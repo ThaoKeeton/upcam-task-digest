@@ -9,6 +9,8 @@ from urllib.parse import urlsplit
 
 
 TEMPLATE = Path(__file__).parent / "templates" / "daily_digest.json"
+# A visible-width blank paragraph keeps spacing in clients that collapse empty lines.
+BLOCK_SEPARATOR = "\n\n\u3000\n\n"
 
 
 def text(value):
@@ -57,15 +59,14 @@ def render_digest(data):
         heading = " ".join(filter(None, [category["icon"], category["label"]]))
         blocks.append(f"**{heading}（{len(tasks)}）**")
         for index, task in enumerate(tasks, 1):
-            prefix = f"{index}. "
-            # Indent continuation lines so they remain inside numbered list items.
-            indent = " " * len(prefix)
+            # Literal numbering prevents ordered-list indentation in Markdown clients.
+            prefix = f"{index}\\. "
             blocks.append(
                 f'{prefix}[{text(task["title"])}](<{task["url"]}>)  \n'
-                f'{indent}{text(task["summary"])}  \n'
-                f'{indent}当前：{text(task["status"])}｜负责人：{text(task["owner"])}'
+                f'{text(task["summary"])}  \n'
+                f'当前：{text(task["status"])}｜负责人：{text(task["owner"])}'
             )
-    return "\n\n".join(blocks) + "\n"
+    return BLOCK_SEPARATOR.join(blocks) + "\n"
 
 
 def main():

@@ -32,33 +32,46 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         for heading in headings:
             self.assertEqual(output.count(heading), 1)
-            self.assertIn(f"\n\n{heading}\n\n", output)
-        self.assertIn("📊 更新 5 项：已解决 1 项、工作进展 2 项、新建任务 1 项、其他变更 1 项\n\n", output)
+            self.assertIn(f"\n\n\u3000\n\n{heading}\n\n\u3000\n\n", output)
+        self.assertIn("📊 更新 5 项：已解决 1 项、工作进展 2 项、新建任务 1 项、其他变更 1 项\n\n\u3000\n\n", output)
         self.assertNotIn("\n---", output)
         self.assertNotIn("\n\n\n", output)
 
-    def test_task_lines_use_hard_breaks_and_list_indentation(self):
+    def test_task_lines_use_hard_breaks_without_indentation(self):
         output = render_digest(self.data)
         for index, task in enumerate(self.data["tasks"]):
-            number = f"{index}. " if task["category"] == "progress" else "1. "
-            indent = " " * len(number)
+            number = f"{index}\\. " if task["category"] == "progress" else "1\\. "
             title = task["title"].replace("-", "\\-")
             block = (f'{number}[{title}](<{task["url"]}>)  \n'
-                     f'{indent}{task["summary"]}  \n'
-                     f'{indent}当前：{task["status"]}｜负责人：{task["owner"]}')
+                     f'{task["summary"]}  \n'
+                     f'当前：{task["status"]}｜负责人：{task["owner"]}')
             self.assertIn(block, output)
-        self.assertIn("\n\n2. [", output)
+        self.assertIn("\n\n\u3000\n\n2\\. [", output)
 
     def test_empty_and_single_item_categories(self):
         self.data["tasks"] = [self.data["tasks"][1]]
         output = render_digest(self.data)
         self.assertIn("**💬 工作进展（1）**", output)
-        self.assertIn("\n\n1. [", output)
-        self.assertNotIn("\n\n2. [", output)
+        self.assertIn("\n\n\u3000\n\n1\\. [", output)
+        self.assertNotIn("\n\n\u3000\n\n2\\. [", output)
         for absent in ("已解决", "新建任务", "其他变更"):
             self.assertNotIn(absent, output)
         self.data["tasks"] = []
-        self.assertEqual(render_digest(self.data), "**Teambition｜UPCAM 项目任务动态日报**\n\n📅 日期：2026-01-01\n\n📊 更新 0 项\n")
+        self.assertEqual(render_digest(self.data), "**Teambition｜UPCAM 项目任务动态日报**\n\n\u3000\n\n📅 日期：2026-01-01\n\n\u3000\n\n📊 更新 0 项\n")
+
+    def test_spacer_paragraphs_and_literal_numbering(self):
+        output = render_digest(self.data)
+        blocks = output.rstrip("\n").split("\n\n\u3000\n\n")
+        # Header/date/overview + four category headings + five task blocks.
+        self.assertEqual(len(blocks), 12)
+        self.assertEqual(output.count("\n\n\u3000\n\n"), 11)
+        self.assertNotRegex(output, r"(?m)^\d+\. ")
+        self.assertNotRegex(output, r"(?m)^[ \t]+\S")
+        for block in blocks:
+            if "https://example.com/tasks/" in block:
+                self.assertRegex(block, r"^\d+\\\. \[")
+                self.assertEqual(len(block.splitlines()), 3)
+                self.assertEqual(block.count("  \n"), 2)
 
     def test_duplicate_task_rejected_across_categories(self):
         duplicate = copy.deepcopy(self.data["tasks"][0])
@@ -75,11 +88,11 @@ class FormatTests(unittest.TestCase):
                 task["category"] = category
                 data["tasks"] = [task]
                 output = render_digest(data)
-                self.assertEqual(output.count("\n\n1. ["), 1)
-                self.assertNotIn("\n\n2. [", output)
+                self.assertEqual(output.count("\n\n\u3000\n\n1\\. ["), 1)
+                self.assertNotIn("\n\n\u3000\n\n2\\. [", output)
         output = render_digest(self.data)
-        self.assertEqual(output.count("\n\n1. ["), 4)
-        self.assertEqual(output.count("\n\n2. ["), 1)
+        self.assertEqual(output.count("\n\n\u3000\n\n1\\. ["), 4)
+        self.assertEqual(output.count("\n\n\u3000\n\n2\\. ["), 1)
 
     def test_invalid_fields_do_not_break_layout(self):
         for field, value in (("category", "unknown"), ("title", "first\nsecond"),
