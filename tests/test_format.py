@@ -33,7 +33,7 @@ class FormatTests(unittest.TestCase):
         for heading in headings:
             self.assertEqual(output.count(heading), 1)
             self.assertIn(f"\n\n\u3000\n\n{heading}  \n1\\. [", output)
-        self.assertIn("更新 5 项：已解决 1 项、工作进展 2 项、新建任务 1 项、其他变更 1 项\n\n\u3000\n\n", output)
+        self.assertIn("📊 更新 5 项：已解决 1 项、工作进展 2 项、新建任务 1 项、其他变更 1 项\n\n\u3000\n\n", output)
         self.assertNotIn("\n---", output)
         self.assertNotIn("\n\n\n", output)
 
@@ -57,15 +57,16 @@ class FormatTests(unittest.TestCase):
         for absent in ("已解决", "新建任务", "其他变更"):
             self.assertNotIn(absent, output)
         self.data["tasks"] = []
-        self.assertEqual(render_digest(self.data), "**Teambition｜UPCAM 项目任务动态日报**  \n日期：2026-01-01  \n更新 0 项\n")
+        self.assertEqual(render_digest(self.data), "**Teambition｜UPCAM 项目任务动态日报**  \n🗓️ 日期：2026-01-01  \n📊 更新 0 项\n")
 
     def test_spacer_paragraphs_and_literal_numbering(self):
         output = render_digest(self.data)
         self.assertTrue(output.startswith(
-            "**Teambition｜UPCAM 项目任务动态日报**  \n日期：2026-01-01  \n更新 5 项："
+            "**Teambition｜UPCAM 项目任务动态日报**  \n🗓️ 日期：2026-01-01  \n📊 更新 5 项："
         ))
         self.assertNotIn("📅", output)
-        self.assertNotIn("📊", output)
+        self.assertEqual(output.count("🗓️"), 1)
+        self.assertEqual(output.count("📊"), 1)
         blocks = output.rstrip("\n").split("\n\n\u3000\n\n")
         # One compact header block + five tasks (category headings join first tasks).
         self.assertEqual(len(blocks), 6)

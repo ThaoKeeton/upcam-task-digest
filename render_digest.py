@@ -52,8 +52,8 @@ def render_digest(data):
         f'{category["label"]} {len(groups[category["key"]])} 项'
         for category in active
     )
-    overview = f'更新 {len(data["tasks"])} 项' + (f"：{counts}" if counts else "")
-    blocks = [f'**{template["title"]}**  \n日期：{day}  \n{overview}']
+    overview = f'📊 更新 {len(data["tasks"])} 项' + (f"：{counts}" if counts else "")
+    blocks = [f'**{template["title"]}**  \n🗓️ 日期：{day}  \n{overview}']
     for category in active:
         tasks = groups[category["key"]]
         heading = " ".join(filter(None, [category["icon"], category["label"]]))
