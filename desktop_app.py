@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
+import sqlite3
 import sys
 import threading
 import tkinter as tk
@@ -15,8 +16,8 @@ from runtime_mappings import parse_config_json
 from teambition_readonly import Client, CollectionError
 from upcam_app import APP_NAME, APP_VERSION, OPENAI_MODEL, OPENAI_REASONING_EFFORT, RULESET_REVISION
 from upcam_app.config import (
-    DEFAULT_SETTINGS, SettingsError, SettingsStore, parse_manual_window,
-    scheduled_occurrences, scheduled_window, user_data_dir, validate_settings,
+    DEFAULT_SETTINGS, SCHEDULE_RECOVERY_WINDOW, SettingsError, SettingsStore, parse_manual_window,
+    recoverable_schedule_occurrences, scheduled_window, user_data_dir, validate_settings,
 )
 from upcam_app.history import HistoryError, HistoryStore
 from upcam_app.openai_models import (
@@ -35,6 +36,25 @@ MAPPING_KEYS = {
     "api_contract_verified", "include_archived", "view", "owner_names",
     "status_names", "resolved_status_ids",
 }
+SMOKE_TEST_TABS = (
+    "首次配置 / 自动运行",
+    "项目映射与范围",
+    "自选时间 / 运行",
+    "运行记录",
+)
+
+
+def verify_desktop_smoke(app, sample_path=SAMPLE) -> bool:
+    """Check the packaged UI's core tabs and bundled report template without network calls."""
+    try:
+        labels = tuple(app.tabs.tab(index, "text") for index in range(app.tabs.index("end")))
+    except (AttributeError, tk.TclError, TypeError) as exc:
+        raise RuntimeError("The desktop window did not initialize its tabs") from exc
+    if labels != SMOKE_TEST_TABS:
+        raise RuntimeError("The desktop window is missing a required application tab")
+    if not Path(sample_path).is_file():
+        raise RuntimeError("The packaged report template is missing")
+    return True
 
 
 class DigestDesktopApp:
@@ -58,6 +78,17 @@ class DigestDesktopApp:
         self.history = HistoryStore(self.data_dir / "history.sqlite3")
         self.history.recover_interrupted_sends()
         self.settings = self.settings_store.load()
+        configured_now = datetime.now().replace(microsecond=0)
+        enabled_since = self.settings.get("auto_send_enabled_since_local", "")
+        if self.settings.get("auto_send_enabled"):
+            self._auto_run_enabled_since = (datetime.fromisoformat(enabled_since) if enabled_since
+                                            else configured_now - SCHEDULE_RECOVERY_WINDOW)
+            if not enabled_since:
+                # Existing settings predate recovery tracking; grant only the bounded recovery window.
+                self.settings["auto_send_enabled_since_local"] = self._auto_run_enabled_since.isoformat(
+                    timespec="seconds")
+        else:
+            self._auto_run_enabled_since = configured_now
         self.saved_secrets = self.secret_store.load()
         self.model_cache = None
         self.ledger_ready, self.ledger_message = self._prepare_ledger()
@@ -217,8 +248,9 @@ class DigestDesktopApp:
                         variable=self.values["auto_send_enabled"]).grid(
                             row=row, column=0, columnspan=4, sticky="w", pady=(8, 2))
         row += 1
-        ttk.Label(form, text="自动执行要求此应用保持打开且 Windows 未休眠；关闭应用期间错过的时间点不会补发。",
-                  foreground="#8a4b00").grid(row=row, column=0, columnspan=4, sticky="w", pady=(0, 4))
+        ttk.Label(form, text="应用重开后会补跑过去 24 小时内、且自动执行已启用期间错过的时段；更早或启用前的时段跳过。应用关闭期间不能自行开机启动，需手动重开；已有记录（含结果不明）不会重发。",
+                  foreground="#8a4b00", wraplength=900).grid(
+                      row=row, column=0, columnspan=4, sticky="w", pady=(0, 4))
         row += 1
         ttk.Separator(form).grid(row=row, column=0, columnspan=4, sticky="ew", pady=10)
         row += 1
@@ -381,10 +413,15 @@ class DigestDesktopApp:
 
     def _save(self):
         proposed = dict(self.settings)
+        previous_auto_send = bool(self.settings.get("auto_send_enabled"))
         for key in DEFAULT_SETTINGS:
             if key in self.values:
                 proposed[key] = self.values[key].get()
         try:
+            if bool(proposed["auto_send_enabled"]) != previous_auto_send:
+                proposed["auto_send_enabled_since_local"] = (
+                    datetime.now().replace(microsecond=0).isoformat(timespec="seconds")
+                    if proposed["auto_send_enabled"] else "")
             proposed.update(self._mapping_document())
             proposed["schema_version"] = 1
             clean = validate_settings(proposed)
@@ -403,6 +440,10 @@ class DigestDesktopApp:
             messagebox.showerror("无法保存配置", str(exc), parent=self.root)
             return
         self.settings, self.saved_secrets = clean, merged
+        if clean["auto_send_enabled"]:
+            self._auto_run_enabled_since = datetime.fromisoformat(clean["auto_send_enabled_since_local"])
+        else:
+            self._auto_run_enabled_since = datetime.now().replace(microsecond=0)
         for key in SECRET_FIELDS:
             self.values[key].set("")
             getattr(self, f"_secret_state_{key}").configure(
@@ -416,6 +457,8 @@ class DigestDesktopApp:
                                    parent=self.root):
             return
         self.settings["auto_send_enabled"] = False
+        self.settings["auto_send_enabled_since_local"] = ""
+        self._auto_run_enabled_since = datetime.now().replace(microsecond=0)
         self.values["auto_send_enabled"].set(False)
         self.settings_store.save(self.settings)
         internal = {key: value for key, value in self.saved_secrets.items() if key == "delivery_ledger_id"}
@@ -599,16 +642,25 @@ class DigestDesktopApp:
         try:
             if self.settings.get("auto_send_enabled"):
                 now = datetime.now().replace(microsecond=0)
-                slots = scheduled_occurrences(self.settings, now - timedelta(seconds=90), now)
+                slots = recoverable_schedule_occurrences(
+                    self.settings, now, enabled_since=self._auto_run_enabled_since)
+                self._handled_schedule_slots.intersection_update(item[2] for item in slots)
                 for slot, kind, key in slots:
                     if key in self._handled_schedule_slots or key in self._scheduled_active:
+                        continue
+                    if self.history.has_schedule_key(key):
+                        self._handled_schedule_slots.add(key)
                         continue
                     start, end = scheduled_window(self.settings, kind, slot.date())
                     if self._launch_scheduled(start, end, key):
                         self._handled_schedule_slots.add(key)
-        except (SettingsError, OSError):
-            pass
-        self.root.after(15000, self._schedule_tick)
+        except (SettingsError, OSError, sqlite3.Error):
+            self._set_status("自动调度检查失败；本次未启动日报。")
+        finally:
+            try:
+                self.root.after(15000, self._schedule_tick)
+            except tk.TclError:
+                pass
 
     def _launch_scheduled(self, start, end, schedule_key):
         if not self.ledger_ready or not self._job_lock.acquire(blocking=False):
@@ -679,9 +731,15 @@ class DigestDesktopApp:
 
 
 def main():
+    smoke_test = sys.argv[1:] == ["--ui-smoke-test"]
     root = tk.Tk()
-    DigestDesktopApp(root)
+    app = DigestDesktopApp(root)
+    if smoke_test:
+        root.update_idletasks()
+        verify_desktop_smoke(app)
+        root.after(300, root.destroy)
     root.mainloop()
+    return 0
 
 
 if __name__ == "__main__":
