@@ -57,25 +57,55 @@ def comment_input(raw, event_id, when):
     semantic review. No LLM, instruction execution, or external requests occur.
     """
     content = raw.get('content')
-    extra = {k: raw[k] for k in ('attachments', 'files', 'images', 'data', 'mentions') if raw.get(k)}
+    evidence_keys = ('attachments', 'dingFiles', 'files', 'images', 'data', 'mentions', 'renderMode')
+    extra = {k: raw[k] for k in evidence_keys if k in raw}
     encoded = json.dumps({'content': content, 'extra': extra}, ensure_ascii=False)
     if len(encoded.encode('utf-8')) > MAX_CONTENT:
         raise CollectionError('Comment evidence exceeds review size budget')
-    plain = isinstance(content, str) and bool(content.strip())
-    rich = plain and bool(re.search(r'<[^>]+>|\{\s*"', content))
-    controls = plain and any(ord(c) < 32 and c not in '\r\n\t' for c in content)
-    normalized = ' '.join(content.split()) if plain else None
-    # Do not suppress text when attachments/other payload may carry substance.
-    has_extra = any(raw.get(k) for k in ('attachments', 'files', 'images', 'data', 'mentions'))
-    acknowledgement = bool(plain and not rich and not controls and not has_extra
+    reasons, payload = [], None
+    if isinstance(content, str):
+        try:
+            candidate = json.loads(content, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
+            if not isinstance(candidate, dict):
+                raise ValueError('Comment payload must be an object')
+            payload = candidate
+        except (ValueError, TypeError, RecursionError):
+            reasons.append('content 不是有效且无重复键的评论 JSON 对象')
+    else:
+        reasons.append('content 必须是 JSON 字符串')
+    body = payload.get('comment') if payload is not None else None
+    payload_evidence = {k: payload[k] for k in ('attachments', 'dingFiles', 'files', 'mentions')
+                        if payload is not None and k in payload}
+    mode = payload.get('renderMode') if payload is not None else None
+    if payload is not None:
+        if set(payload) - {'comment', 'attachments', 'dingFiles', 'files', 'renderMode', 'mentions'}:
+            reasons.append('存在尚未识别的评论字段；完整对象保留')
+        if any(not isinstance(value, list) for value in payload_evidence.values()):
+            reasons.append('附件或提及字段不是已知列表结构')
+        # No nonempty renderMode enum has been verified in the handed-off contract.
+        if mode not in (None, ''):
+            reasons.append('renderMode 语义尚未核验；正文仅作原文字面内容')
+    plain = isinstance(body, str) and bool(body.strip())
+    rich = plain and bool(re.search(r'<[^>]+>|\{\s*"', body))
+    controls = plain and any(ord(c) < 32 and c not in '\r\n\t' for c in body)
+    if not plain:
+        reasons.append('comment 正文缺失、为空或不是字符串')
+    elif rich or controls:
+        reasons.append('正文包含未支持富文本或控制字符；不推断渲染结果')
+    normalized = ' '.join(body.split()) if plain and not rich and not controls else None
+    # Even a short confirmation can carry substantive attachments or mentions.
+    has_extra = any(extra.values()) or any(payload_evidence.values())
+    acknowledgement = bool(normalized and not reasons and not has_extra
                            and normalized.casefold() in {'收到', '好的', '谢谢', 'ok', '👍'})
-    return {'event_id': event_id, 'create_time': when.isoformat() if when else None, 'raw_content': content,
-            'text': normalized if plain and not rich and not controls else None,
-            'extra_evidence': extra,
+    return {'event_id': event_id, 'create_time': when.isoformat() if when else None,
+            'raw_content': content, 'parsed_payload': payload, 'body': body,
+            'text': normalized, 'render_mode': mode,
+            'extra_evidence': extra, 'payload_evidence': payload_evidence,
             'omit_from_summary': acknowledgement,
             'omission_reason': '仅确认性回复候选；原文保留，需结合上下文复核' if acknowledgement else None,
-            'extraction_needs_review': not plain or rich or controls,
+            'review_reasons': reasons, 'extraction_needs_review': bool(reasons),
             'semantic_review_required': True}
+
 
 
 def parse_activity(raw, config):

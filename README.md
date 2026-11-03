@@ -61,10 +61,16 @@ python -m unittest discover -s tests -v
 退出码 0 不代表已发送或已证明生产系统可靠。原始动态文本不会被当成指令或自动编造工作摘要。
 评论输出数量、明确标注的原文摘录和“语义归纳待复核”，不推断完成情况。生产输出可能含企业信息，切勿提交或写进 CI 日志。
 **摘要功能仍不完整**：已提取可审查的评论内容，但没有自动语义总结。含评论任务统一待复核，不能直接发送。
-`summary_inputs` 保留完整 raw_content、事件 ID、createTime、额外附件/提及证据和提取状态，semantic_summary 固定为 null。
-只对完全匹配“收到/好的/谢谢/ok/👍”且没有附件等额外证据的回复标记 omit_from_summary；这只是候选过滤，
+`summary_inputs` 保留完整 raw_content、解析后的 parsed_payload、comment 正文 body、清晰文本 text、事件 ID、createTime、附件/提及证据和复核原因，semantic_summary 固定为 null。
+评论 content 按 JSON 字符串解析，正文取内部 comment；attachments、dingFiles、files、mentions 保存在 payload_evidence，
+事件外层证据独立保存在 extra_evidence，不合并覆盖。原始字符串及完整已解析对象均保留，未知字段也不会丢弃。
+重复键、非标准数值、损坏 JSON、错误包裹类型、缺失正文或错误附件类型均待复核，不猜测正文。
+renderMode 尚无已核验的非空枚举；非空/未知模式会标记待复核，纯字符串正文可作为字面原文供审核，
+HTML/未知富文本或结构化正文不自动转换或解释，原文仍在 body/parsed_payload/raw_content 中可审查。
+只对已成功解析、无格式歧义且正文完全匹配“收到/好的/谢谢/ok/👍”、没有附件或提及等额外证据的回复标记 omit_from_summary；这只是候选过滤，
 原文不会从复核输入删除，因为确认回复在上下文中也可能构成实质决定。“好的，但仍有阻塞”等完整保留。
-普通文本仅合并显示空白；富文本、结构化内容、缺失内容均保留原始证据并待复核，不尝试猜测格式或丢弃附件。
+正文普通文本仅合并显示空白；富文本、结构化内容、缺失内容均保留原始证据并待复核，不尝试猜测格式或丢弃附件。
+附件链接只作为证据保留，不下载、不请求外部资源。所有评论的 semantic_review_required 始终为 true，提取成功不等于摘要审核通过。
 卡片摘录最多 240 字符，超出明确提示复核输入有全文；评论及附件证据超过 64KiB 则失败而非静默截断。
 未知时间的评论保留证据并标记是否属于本日待复核。所有评论内容均视为数据，不执行其中的指令。
 
@@ -156,6 +162,7 @@ historical_event_coverage=false，并进入报告 scope。生成日报时重新�
 [任务动态](https://open.teambition.com/docs/apis/6363bcfb912d20d3b56fb3f4)、
 [应用凭证](https://open.teambition.com/docs/documents/5db8f7e77baeb50014957fc1)。
 本轮仅按交接信息构造结构等价的虚构 fixtures，未调用企业 API 或钉钉，未保存真实数据。
+评论 JSON 包裹格式已适配；实际状态变更载荷及人员/状态映射仍未核实，standard 语义仍未知，不因评论提取成功放开发送门禁。
 独立只读验证交接已确认 v3 q 的半开区间筛选、与当前昨天视图集合一致、UTC 等价及毫秒级比较边界；
 本轮以完全虚构 fixtures 覆盖该契约，没有重新在线验证或保存真实集合。通用语法参考另见
 [官方 TQL 参考](https://github.com/teambition/tb-skills/blob/main/dingtalk-teambition/references/tql.md)，其配套脚本使用 v2，
