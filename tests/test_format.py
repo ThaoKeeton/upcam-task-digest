@@ -40,7 +40,7 @@ class FormatTests(unittest.TestCase):
     def test_task_lines_use_hard_breaks_and_list_indentation(self):
         output = render_digest(self.data)
         for index, task in enumerate(self.data["tasks"]):
-            number = f"{index}. " if task["category"] == "progress" else ""
+            number = f"{index}. " if task["category"] == "progress" else "1. "
             indent = " " * len(number)
             title = task["title"].replace("-", "\\-")
             block = (f'{number}[{title}](<{task["url"]}>)  \n'
@@ -53,7 +53,8 @@ class FormatTests(unittest.TestCase):
         self.data["tasks"] = [self.data["tasks"][1]]
         output = render_digest(self.data)
         self.assertIn("**💬 工作进展（1）**", output)
-        self.assertNotIn("1. [", output)
+        self.assertIn("\n\n1. [", output)
+        self.assertNotIn("\n\n2. [", output)
         for absent in ("已解决", "新建任务", "其他变更"):
             self.assertNotIn(absent, output)
         self.data["tasks"] = []
@@ -65,6 +66,20 @@ class FormatTests(unittest.TestCase):
         self.data["tasks"].append(duplicate)
         with self.assertRaises(ValueError):
             render_digest(self.data)
+
+    def test_each_category_starts_at_one_even_with_single_task(self):
+        for category in ("resolved", "progress", "new", "other"):
+            with self.subTest(category=category):
+                data = copy.deepcopy(self.data)
+                task = data["tasks"][0]
+                task["category"] = category
+                data["tasks"] = [task]
+                output = render_digest(data)
+                self.assertEqual(output.count("\n\n1. ["), 1)
+                self.assertNotIn("\n\n2. [", output)
+        output = render_digest(self.data)
+        self.assertEqual(output.count("\n\n1. ["), 4)
+        self.assertEqual(output.count("\n\n2. ["), 1)
 
     def test_invalid_fields_do_not_break_layout(self):
         for field, value in (("category", "unknown"), ("title", "first\nsecond"),

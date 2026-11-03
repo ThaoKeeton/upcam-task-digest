@@ -57,7 +57,7 @@ def render_digest(data):
         heading = " ".join(filter(None, [category["icon"], category["label"]]))
         blocks.append(f"**{heading}（{len(tasks)}）**")
         for index, task in enumerate(tasks, 1):
-            prefix = f"{index}. " if len(tasks) > 1 else ""
+            prefix = f"{index}. "
             # Indent continuation lines so they remain inside numbered list items.
             indent = " " * len(prefix)
             blocks.append(
