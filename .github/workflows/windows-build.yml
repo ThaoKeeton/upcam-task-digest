@@ -40,8 +40,8 @@ jobs:
       - name: Smoke test final windowed EXE
         shell: pwsh
         run: |
-          & .\dist\UPCAMTaskDigest.exe --ui-smoke-test
-          if ($LASTEXITCODE -ne 0) { throw "Windowed desktop EXE smoke test failed with exit code $LASTEXITCODE" }
+          $process = Start-Process -FilePath ".\dist\UPCAMTaskDigest.exe" -ArgumentList "--ui-smoke-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Windowed desktop EXE smoke test failed with exit code $($process.ExitCode)" }
       - uses: actions/upload-artifact@v4
         with:
           name: UPCAMTaskDigest-windows
