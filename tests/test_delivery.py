@@ -1,8 +1,5 @@
 import concurrent.futures
 from datetime import datetime, timezone
-from unittest.mock import patch
-
-from manual_review import apply_review, make_draft
 from report_contract import updated_selection
 from contextlib import closing
 import json
@@ -12,6 +9,7 @@ import tempfile
 import unittest
 
 from delivery_guard import DeliveryBlocked, DeliveryGuard, initialize_ledger
+from automated_digest import build_automated_digest
 
 
 class DeliveryTests(unittest.TestCase):
@@ -23,23 +21,20 @@ class DeliveryTests(unittest.TestCase):
         collection = json.loads((fixtures / 'collection.json').read_text())
         config = json.loads((fixtures / 'config.json').read_text())
         now = datetime(2026, 1, 3, 2, tzinfo=timezone.utc)
-        self.clock_patch = patch('manual_review.clock', return_value=now)
-        self.clock_patch.start()
-        self.addCleanup(self.clock_patch.stop)
         collection.update(batch_id='00000000-0000-4000-8000-000000000001',
                           collected_at='2026-01-03T01:00:00+00:00',
                           selection=updated_selection('2026-01-02'))
         config.update(api_contract_verified=True, view={'verified': True, 'evidence': 'fictional verification'})
-        draft = make_draft(collection, config, '2026-01-02')
-        review = draft['review_template']
-        review.update(reviewer='Fictional Reviewer', reviewed_at=now.isoformat(), mappings_verified=True)
-        for task, row in zip(draft['tasks'], review['tasks']):
-            row.update(summary='Fictional summary', covered_comment_ids=task['required_comment_ids'],
-                       evidence_verified=True)
-        self.report = apply_review(collection, config, '2026-01-02', review)
+        class FakeSummarizer:
+            def summarize(self, _key, _model, _effort, rows, _rules, service_tier='default'):
+                return {row['task_key']: 'Fictional summary' for row in rows}
+        self.report = build_automated_digest(collection, config, '2026-01-02', 'synthetic-openai-key',
+                                             'gpt-6-luna', 'max', client=FakeSummarizer(),
+                                             generated_at=now)
         self.original_markdown = self.report['markdown']
         self.scope={'tenant':'demo-org','project':'demo-project','destination':'demo-destination',
-                    'current_collection': collection, 'current_config': config, 'current_review': review}
+                    'current_collection': collection, 'current_config': config,
+                    'current_model': 'gpt-6-luna', 'current_effort': 'max'}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -115,7 +110,7 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(sum(outcomes),1)
         self.assertEqual(len(calls),1)
 
-    def test_missing_storage_identity_review_and_database_failure_fail_closed(self):
+    def test_missing_storage_identity_and_database_failure_fail_closed(self):
         with self.assertRaises(DeliveryBlocked): DeliveryGuard(self.path,self.identity)
         with self.assertRaises(DeliveryBlocked): DeliveryGuard(self.path,'wrong',persistent_storage_verified=True)
         with self.assertRaises(FileExistsError): initialize_ledger(self.path)
