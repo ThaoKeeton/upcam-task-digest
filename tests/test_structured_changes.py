@@ -70,6 +70,7 @@ class StructuredChangeTests(unittest.TestCase):
         self.data['records'][0]['task'].update(tfsId='demo-done',isDone=True)
         self.assertFalse(self.report(done,duplicate,later)['ready_to_send'])
         self.config['status_names']={}
+        self.config['resolved_status_ids']=[]
         self.assertFalse(self.report(done)['ready_to_send'])
 
     def test_executor_json_automation_and_names_only_from_id_mapping(self):

@@ -38,6 +38,7 @@ class ReviewRegressions(unittest.TestCase):
             return self.collection
         stdout = io.StringIO()
         with patch('sys.argv',['digest_pipeline.py','--config',str(FIXTURES/'config.json'),'--collect']), \
+             patch('runtime_mappings.os.environ', {}), \
              patch.object(digest_pipeline,'datetime',Clock,create=True), \
              patch('digest_pipeline.Client') as client, patch('sys.stdout',stdout):
             client.return_value.collect.side_effect = collect

@@ -12,6 +12,7 @@ from report_contract import SHANGHAI, canonical_window, strict_day, updated_sele
 from teambition_readonly import Client, CollectionError, identifier, record_id
 from activity_adapter import (comment_input, parse_activity, validate_binding, status_transition,
                               executor_change, standard_commit_candidate)
+from runtime_mappings import load_runtime_mappings, parse_config_json, validate_mappings
 
 
 def day_window(day=None, now=None):
@@ -73,6 +74,7 @@ def build_digest(collection, config, day):
     # Caller must freeze the report day before collection; no implicit late clock read.
     if day is None:
         raise ValueError("Report day must be fixed before collection")
+    config = validate_mappings(config)
     start, end = day_window(day)
     view = validate_view(config)
     if collection.get("pagination_complete") is not True:
@@ -270,13 +272,14 @@ def main():
     parser.add_argument("--date", help="YYYY-MM-DD; defaults to yesterday in Asia/Shanghai")
     args = parser.parse_args()
     try:
-        config = json.loads(args.config.read_text(encoding="utf-8"))
+        config = validate_mappings(parse_config_json(args.config.read_text(encoding="utf-8")))
         validate_view(config)
         # Freeze before either file ingestion or live collection crosses midnight.
         fixed_day = day_window(args.date)[0].date().isoformat()
         if args.fixture:
             collection = json.loads(args.fixture.read_text(encoding="utf-8"))
         else:
+            config = load_runtime_mappings(config)
             collection = Client(config["tenant_id"]).collect(config["project_id"],
                          include_archived=config.get("include_archived", False), day=fixed_day)
         result = build_digest(collection, config, fixed_day)
