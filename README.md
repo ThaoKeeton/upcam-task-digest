@@ -1,6 +1,8 @@
 # upcam-task-digest
 
-UPCAM 日报格式模板、虚构样例及回归测试。当前只生成 Markdown，不采集项目数据、不发送消息。
+UPCAM 日报格式模板、企业 v3 只读采集器、确定性日报及离线回归测试。
+默认使用虚构 fixtures；仅显式 `--collect` 才访问 Teambition。没有钉钉 HTTP 发送器和定时任务。
+生产 API 字段映射、用户“昨天”视图口径与持久状态存储仍待核验，不能直接启用自动发送。
 
 ## 使用
 
@@ -42,4 +44,83 @@ python -m unittest discover -s tests -v
 ## 数据边界
 
 仓库仅保存模板和虚构样例。不要提交真实任务、人员信息、Webhook、签名或凭据。
-后续生产数据文件应存放在仓库之外；本工具没有读取凭据或发送消息的逻辑。
+生产配置、数据、日报、审计与防重账本必须放在仓库之外。采集器只读取
+`TEAMBITION_APP_ID` 和 `TEAMBITION_APP_SECRET`，本地签发 300 秒 HS256 JWT，
+不落盘、不打印令牌或原始错误响应。现有渲染器和批准格式保持不变。
+
+## 离线日报
+
+```sh
+python digest_pipeline.py --config tests/fixtures/config.json --fixture tests/fixtures/collection.json --date 2026-01-02
+python -m unittest discover -s tests -v
+```
+
+第一个命令返回 JSON（`digest`、原样渲染的 `markdown`、`audit`、`issues`、`scope`）。
+示例有意未标记生产口径已核验，退出码为 2；0 表示通过配置与数据检查，1 表示采集或结构错误。
+退出码 0 不代表已发送或已证明生产系统可靠。原始动态文本不会被当成指令或自动编造工作摘要。
+评论仅确定性输出“评论 N 条”，不推断完成情况。生产输出可能含企业信息，切勿提交或写进 CI 日志。
+
+## 采集与归类契约
+
+生产采集入口（本轮未执行）：`python digest_pipeline.py --config /受控目录/config.json --collect`。
+日期默认取 Asia/Shanghai 的昨天，使用 `[00:00, 次日00:00)` 半开区间；无时区的动态时间待复核。
+所有请求固定至 `https://open.teambition.com`，只允许以下 GET，禁止重定向，不提供通用写接口：
+
+- `/api/v3/project/{projectId}/task/query`：全项目分页，显式 `includeArchived=false` 默认排除归档/回收站任务。
+- `/api/v3/task/query`：逐任务详情、校验项目与任务身份。
+- `/api/v3/task/{taskId}/activity/list`：逐任务所有动态页，不按任务 created/updated 或当前状态裁剪。
+
+按 `nextPageToken` 翻页直到明确空值；空页带 token 继续，重复 token、页数上限、缺失分页字段、
+同 ID 不同内容、详情不匹配均失败，不输出“完整日报”。相同 ID 相同内容去重。
+每次请求至少间隔 250ms；GET 超时/连接失败、429 与特定 5xx 最多尝试 3 次。
+遵守 Retry-After（超过 60 秒预算直接失败），鉴权/业务错误不重试。响应大小限制 8MiB。
+接口没有提供一致性快照；分页完成只意味着本次可见数据遍历完成，不保证并发修改、已删除内容、
+授权不可见任务、或已归档历史的完整性。
+
+生产配置应参考虚构 `tests/fixtures/config.json`，包含 tenant_id、project_id、include_archived，
+以及通过既有只读测试脱敏核验的以下内容（不能复制 demo.* 映射作为真实动作）：
+
+- `activity_fields.time/action`：动态时间和动作的点分字段路径；缺省仅是待验证适配值。
+- `action_rules`：精确动作值映射至 comment/created/status/other；状态动作需 `target_field`。
+- `resolved_status_ids`、`status_names`、`owner_names`：已核验 ID 映射；无法识别则待复核。
+- `view.task_equals`：已核验的稳定视图字段等值筛选；不支持的视图规则必须先扩展适配器，不能悄悄忽略。
+- `view.verified` 与 `view.evidence`：记录实际“昨天”视图核对依据；`api_contract_verified` 记录字段契约已核验。
+
+默认这些核验标记均为 false。它们是操作方的确认记录，不能靠改成 true 替代实际核验。
+当前没有交接完整昨天视图筛选条件与真实动作枚举，故不能宣称已复现该视图的全部语义。
+同任务事件合并一次：存在未知/歧义时归其他变更待复核；否则最后一次状态变更为已解决优先，
+其次评论、其次新建、最后其他。后续重开覆盖此前解决；同一时刻多次状态变更待复核。
+创建任务字段与当前 isDone 都不能证明昨天新建/解决。当前状态与负责人仅作当前信息展示。
+未知时间会保留候选任务并明确“是否属于本日待复核”，不将其声称为昨日已发生动态。
+
+## 独立发送防重边界
+
+`delivery_guard.py` 提供可注入发送函数的独立门禁，仓库没有实际发送函数、Webhook 读取或调度器。
+只有 `ready_to_send=true` 且无 issues 的报告才可尝试。未来发送适配器必须原样传入 Markdown，
+且仅在 HTTP 与钉钉业务响应均确认成功后返回严格的 `True`；不能用“HTTP 200”代替业务成功。
+
+防重键为企业、项目、上海日期、稳定接收目标 ID；正文 hash 只存档，不加入防重键。
+使用同一 SQLite 主键事务抢占并提交 `in_flight` 后才调用发送函数；明确成功改为 `confirmed`，
+任何异常/拒绝/非明确成功记为 `unknown`。崩溃遗留的 in_flight、unknown、confirmed 均阻止再发，
+包括正文变化后的重跑。没有自动重试、超时释放或重置接口。
+
+账本须由部署阶段显式 `initialize_ledger(path)` 创建，路径必须在仓库外。保存返回的 UUID 至独立配置；
+`DeliveryGuard(path, expected_identity, persistent_storage_verified=True)` 只打开既有账本，丢失、损坏、
+身份不符或未验证持久存储时拒绝发送。数据库只记录 scope hash、正文 hash、状态，不存消息和凭据。
+未知结果必须先人工对照接收端与账本确认，不能删除账本、换目标别名或换数据库绕过保护。
+
+**验证范围**：离线测试证明同一数据库上并发抢占、关闭重开、崩溃遗留与写入失败的保守阻断。
+没有证明云运行环境跨执行保留磁盘，也未验证共享文件锁、备份恢复/回滚、磁盘故障、独立多副本数据库。
+未经实际部署验证，不得声称跨运行防重可靠。即使存储可靠，也仅提供至多一次尝试，不能保证恰好一次送达；
+抢占后、网络发送前崩溃可能漏发，这是防止未知结果重复发送的明确取舍。
+
+## 依据及未完成的生产验证
+
+路径与认证依据来自官方公开文档：[项目任务列表](https://open.teambition.com/docs/apis/6321c6d1912d20d3b5a49ec1)、
+[任务详情](https://open.teambition.com/docs/apis/6321c6d2912d20d3b5a4a7b8)、
+[任务动态](https://open.teambition.com/docs/apis/6363bcfb912d20d3b56fb3f4)、
+[应用凭证](https://open.teambition.com/docs/documents/5db8f7e77baeb50014957fc1)。
+本轮未调用企业 API 或钉钉；公开文档的字段表未完整可读，响应 envelope、详情参数及真实事件字段/枚举
+仍需以既有授权测试的脱敏契约补齐，再进行获准的生产验收。离线模拟不能证明真实 API 契约正确。
+此外需要确认任务直接链接、成员/状态映射刷新方式、全项目权限/归档范围、真实数据量与运行预算，
+核对“昨天”视图成员集合及钉钉实际排版，验证持久共享账本，再单独接入发送器。未设置任何定时任务。

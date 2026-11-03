@@ -1,0 +1,193 @@
+"""Deterministic event-only daily digest. Unknown evidence blocks delivery."""
+
+import argparse
+from collections import Counter
+from datetime import date, datetime, time, timedelta
+import json
+from pathlib import Path
+import sys
+from zoneinfo import ZoneInfo
+
+from render_digest import render_digest, text
+from teambition_readonly import Client, CollectionError, identifier, record_id
+
+
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def day_window(day=None, now=None):
+    if day is None:
+        now = now or datetime.now(SHANGHAI)
+        if now.tzinfo is None:
+            raise ValueError("Clock must be timezone-aware")
+        day = (now.astimezone(SHANGHAI) - timedelta(days=1)).date()
+    elif isinstance(day, str):
+        day = date.fromisoformat(day)
+    start = datetime.combine(day, time.min, SHANGHAI)
+    return start, start + timedelta(days=1)
+
+
+def timestamp(value):
+    if not isinstance(value, str):
+        raise ValueError("Timestamp must be ISO 8601")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("Timestamp lacks explicit timezone")
+    return parsed.astimezone(SHANGHAI)
+
+
+def field(obj, path):
+    for key in path.split("."):
+        if not isinstance(obj, dict):
+            return None
+        obj = obj.get(key)
+    return obj
+
+
+def safe_label(value):
+    try:
+        text(value)
+        return value
+    except (ValueError, TypeError):
+        return "待复核"
+
+
+def build_digest(collection, config, day=None):
+    start, end = day_window(day)
+    if collection.get("pagination_complete") is not True:
+        raise CollectionError("Cannot render incomplete collection")
+    project = identifier(collection["project_id"])
+    schema = config.get("activity_fields", {})
+    rules = config.get("action_rules", {})
+    view = config.get("view", {})
+    issues = []
+    if view.get("verified") is not True or not view.get("evidence"):
+        issues.append("昨天视图口径尚未核验")
+    if config.get("api_contract_verified") is not True:
+        issues.append("API 字段及事件映射尚未核验")
+    if collection.get("include_archived") != config.get("include_archived", False):
+        raise CollectionError("Archive scope mismatch")
+    items, audit, seen = [], [], set()
+    for record in collection["records"]:
+        task = record["task"]
+        task_id = record_id(task)
+        if task_id in seen:
+            raise CollectionError("Duplicate task in collection")
+        seen.add(task_id)
+        if task.get("projectId") != project:
+            raise CollectionError("Task belongs to another project")
+        if type(task.get("isArchived")) is not bool:
+            raise CollectionError("Missing archive scope")
+        if task["isArchived"] and not config.get("include_archived", False):
+            continue
+        # Explicit stable view filters only; no inferred created/updated predicate.
+        filters = view.get("task_equals", {})
+        if any(key in ("created", "updated", "isDone") for key in filters):
+            raise CollectionError("Task timestamps/status cannot substitute for event window")
+        if any(field(task, key) is None for key in filters):
+            raise CollectionError("Missing configured view filter field")
+        if any(field(task, key) != value for key, value in filters.items()):
+            continue
+        events, unknown_time, ids = [], False, {}
+        for raw in record["activities"]:
+            event_id = record_id(raw, task_fallback=False)
+            if event_id in ids:
+                if ids[event_id] != raw:
+                    raise CollectionError("Conflicting event identity")
+                continue
+            ids[event_id] = raw
+            if raw.get("taskId", task_id) != task_id:
+                raise CollectionError("Event belongs to another task")
+            try:
+                when = timestamp(field(raw, schema.get("time", "created")))
+            except (ValueError, TypeError):
+                unknown_time = True
+                continue
+            if not start <= when < end:
+                continue
+            action = field(raw, schema.get("action", "action"))
+            rule = rules.get(action, {}) if isinstance(action, str) else {}
+            kind = rule.get("kind", "unknown")
+            if kind not in ("comment", "created", "status", "other"):
+                kind = "unknown"
+            target = field(raw, rule.get("target_field", "data.newStatusId")) if kind == "status" else None
+            # Require a verified target ID for resolution; never read task.isDone.
+            resolved = kind == "status" and isinstance(target, str) and target in config.get("resolved_status_ids", [])
+            if kind == "status" and (not isinstance(target, str) or target not in config.get("status_names", {})):
+                kind = "unknown"
+            events.append((when, event_id, kind, resolved))
+        if not events and not unknown_time:
+            continue
+        events.sort(key=lambda e: (e[0], e[1]))
+        counts = Counter(e[2] for e in events)
+        review = unknown_time or bool(counts["unknown"])
+        # The last status transition of the day wins; reopen is never resolved.
+        status_events = [e for e in events if e[2] == "status"]
+        ambiguous_status = bool(status_events and sum(e[0] == status_events[-1][0] for e in status_events) > 1)
+        review = review or ambiguous_status
+        category = "other"
+        if not review:
+            if status_events and status_events[-1][3]:
+                category = "resolved"
+            elif counts["comment"]:
+                category = "progress"
+            elif counts["created"]:
+                category = "new"
+        descriptions = []
+        for kind, label in (("created", "新建记录"), ("comment", "评论"),
+                            ("status", "状态变更"), ("other", "其他变更")):
+            if counts[kind]:
+                descriptions.append(f"{label} {counts[kind]} 条")
+        if counts["unknown"]:
+            descriptions.append(f"未识别动态 {counts['unknown']} 条，待复核")
+        if unknown_time:
+            descriptions.append("存在时间不明动态，是否属于本日待复核")
+        if ambiguous_status:
+            descriptions.append("同一时刻多次状态变更，待复核")
+        title = safe_label(task.get("content"))
+        owner = safe_label(config.get("owner_names", {}).get(task.get("executorId")))
+        status = safe_label(config.get("status_names", {}).get(task.get("tfsId")))
+        if "待复核" in (title, owner, status):
+            review = True
+            descriptions.append("标题、负责人或当前状态待复核")
+        if review:
+            issues.append(f"任务 {task_id} 待复核")
+        items.append({"category": category, "title": title,
+                      "url": f"https://www.teambition.com/project/{project}/task/{task_id}",
+                      "summary": "；".join(descriptions), "owner": owner, "status": status})
+        audit.append({"task_id": task_id, "event_ids": [e[1] for e in events], "needs_review": review})
+    combined = sorted(zip(items, audit), key=lambda pair: pair[1]["task_id"])
+    data = {"date": start.date().isoformat(), "tasks": [pair[0] for pair in combined]}
+    return {"digest": data, "markdown": render_digest(data), "audit": [pair[1] for pair in combined],
+            "issues": issues, "ready_to_send": not issues,
+            "scope": {"timezone": "Asia/Shanghai", "start": start.isoformat(), "end_exclusive": end.isoformat(),
+                      "include_archived": config.get("include_archived", False),
+                      "pagination_complete": True, "snapshot_guaranteed": False}}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--fixture", type=Path, help="Offline normalized collection")
+    source.add_argument("--collect", action="store_true", help="Explicitly allow Teambition GET requests")
+    parser.add_argument("--date", help="YYYY-MM-DD; defaults to yesterday in Asia/Shanghai")
+    args = parser.parse_args()
+    try:
+        config = json.loads(args.config.read_text(encoding="utf-8"))
+        if args.fixture:
+            collection = json.loads(args.fixture.read_text(encoding="utf-8"))
+        else:
+            collection = Client(config["tenant_id"]).collect(config["project_id"],
+                         include_archived=config.get("include_archived", False))
+        result = build_digest(collection, config, args.date)
+        # Output is sensitive at runtime. Operator must redirect outside the repository.
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["ready_to_send"] else 2
+    except (CollectionError, ValueError, TypeError, KeyError, OSError):
+        print("Digest failed; no send attempted. Check configuration/schema/collection.", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
