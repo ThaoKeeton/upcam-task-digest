@@ -1,4 +1,9 @@
 import concurrent.futures
+from datetime import datetime, timezone
+from unittest.mock import patch
+
+from manual_review import apply_review, make_draft
+from report_contract import updated_selection
 from contextlib import closing
 import json
 from pathlib import Path
@@ -14,11 +19,27 @@ class DeliveryTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory()
         self.path=Path(self.tmp.name)/'delivery.sqlite3'
         self.identity=initialize_ledger(self.path)
-        self.report={'ready_to_send':True,'issues':[],'digest':{'date':'2026-01-02'},'markdown':'fictional report'}
-        self.report['scope'] = {'tenant_id':'demo-org','project_id':'demo-project',
-            'timezone':'Asia/Shanghai','start':'2026-01-02T00:00:00+08:00',
-            'end_exclusive':'2026-01-03T00:00:00+08:00','include_archived':False,'pagination_complete':True}
-        self.scope={'tenant':'demo-org','project':'demo-project','destination':'demo-destination'}
+        fixtures = Path(__file__).parent / 'fixtures'
+        collection = json.loads((fixtures / 'collection.json').read_text())
+        config = json.loads((fixtures / 'config.json').read_text())
+        now = datetime(2026, 1, 3, 2, tzinfo=timezone.utc)
+        self.clock_patch = patch('manual_review.clock', return_value=now)
+        self.clock_patch.start()
+        self.addCleanup(self.clock_patch.stop)
+        collection.update(batch_id='00000000-0000-4000-8000-000000000001',
+                          collected_at='2026-01-03T01:00:00+00:00',
+                          selection=updated_selection('2026-01-02'))
+        config.update(api_contract_verified=True, view={'verified': True, 'evidence': 'fictional verification'})
+        draft = make_draft(collection, config, '2026-01-02')
+        review = draft['review_template']
+        review.update(reviewer='Fictional Reviewer', reviewed_at=now.isoformat(), mappings_verified=True)
+        for task, row in zip(draft['tasks'], review['tasks']):
+            row.update(summary='Fictional summary', covered_comment_ids=task['required_comment_ids'],
+                       evidence_verified=True)
+        self.report = apply_review(collection, config, '2026-01-02', review)
+        self.original_markdown = self.report['markdown']
+        self.scope={'tenant':'demo-org','project':'demo-project','destination':'demo-destination',
+                    'current_collection': collection, 'current_config': config, 'current_review': review}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -44,7 +65,7 @@ class DeliveryTests(unittest.TestCase):
         guard=self.guard()
         with self.assertRaises(DeliveryBlocked): guard.attempt(self.report,**self.scope,send=send)
         guard.close()
-        self.assertEqual(calls,['fictional report'])
+        self.assertEqual(calls,[self.original_markdown])
 
     def test_uncertain_failure_never_retries(self):
         calls=[]

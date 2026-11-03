@@ -132,6 +132,7 @@ def apply_review(collection, config, day, review, now=None):
                 entry['needs_review'] = audit['needs_review']
     report['markdown'] = render_digest(report['digest'])
     report['ready_to_send'] = not report['issues']
+    report['report_type'] = 'human-reviewed-v1'
     report['human_review'] = {'binding': expected, 'reviewer': review['reviewer'],
                               'reviewed_at': review['reviewed_at'], 'review_sha256': fingerprint(review)}
     report['human_review']['report_sha256'] = fingerprint(report)

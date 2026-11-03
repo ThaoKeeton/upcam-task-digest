@@ -165,19 +165,81 @@ class ManualReviewTests(unittest.TestCase):
                     changed = deepcopy(self.collection)
                     changed['batch_id'] = '00000000-0000-4000-8000-000000000002'
                     with self.assertRaises(DeliveryBlocked):
-                        guard.attempt(result, current_collection=changed, current_config=self.config, **args)
+                        guard.attempt(result, current_collection=changed, current_config=self.config, current_review=self.review(), **args)
                     self.assertEqual(guard.db.execute('SELECT count(*) FROM deliveries').fetchone()[0], 0)
                     # Pure in-memory callback, no provider/network sender.
                     calls = []
                     args['send'] = lambda value: calls.append(value) or True
                     self.assertEqual(guard.attempt(result, current_collection=self.collection,
-                                                  current_config=self.config, **args), 'confirmed')
+                                                  current_config=self.config, current_review=self.review(), **args), 'confirmed')
                     self.assertEqual(calls, [result['markdown']])
                     with self.assertRaises(DeliveryBlocked):
-                        guard.attempt(result, current_collection=self.collection, current_config=self.config, **args)
+                        guard.attempt(result, current_collection=self.collection, current_config=self.config, current_review=self.review(), **args)
                     self.assertEqual(len(calls), 1)
             finally:
                 guard.close()
+
+    def test_removed_review_metadata_cannot_downgrade_or_claim(self):
+        from delivery_guard import DeliveryGuard, DeliveryBlocked, initialize_ledger
+        report = self.apply()
+        del report['human_review']
+        report['markdown'] = 'fictional tampered report'
+        calls = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'ledger.sqlite'
+            guard = DeliveryGuard(path, initialize_ledger(path), persistent_storage_verified=True)
+            try:
+                with patch('manual_review.clock', return_value=self.now + timedelta(hours=48)):
+                    with self.assertRaises(DeliveryBlocked):
+                        guard.attempt(report, tenant='demo-org', project='demo-project',
+                                      destination='fictional', send=lambda body: calls.append(body) or True)
+                self.assertEqual(calls, [])
+                self.assertEqual(guard.db.execute('SELECT count(*) FROM deliveries').fetchone()[0], 0)
+            finally:
+                guard.close()
+
+    def test_provenance_fields_and_independent_inputs_cannot_be_downgraded(self):
+        from delivery_guard import DeliveryGuard, DeliveryBlocked, initialize_ledger
+        from manual_review import fingerprint
+        from digest_pipeline import build_digest
+        original = self.apply()
+        for case in ('missing-review', 'missing-type', 'plain-type', 'missing-collection',
+                     'missing-config', 'missing-independent-review', 'forged-self-hash',
+                     'altered-independent-review', 'ordinary-report', 'expired'):
+            report = deepcopy(original)
+            inputs = dict(current_collection=self.collection, current_config=self.config,
+                          current_review=self.review())
+            if case == 'missing-review': del report['human_review']
+            elif case == 'missing-type': del report['report_type']
+            elif case == 'plain-type': report['report_type'] = 'plain'
+            elif case == 'missing-collection': inputs.pop('current_collection')
+            elif case == 'missing-config': inputs.pop('current_config')
+            elif case == 'missing-independent-review': inputs.pop('current_review')
+            elif case == 'forged-self-hash':
+                report['markdown'] = 'forged fictional summary'
+                del report['human_review']['report_sha256']
+                report['human_review']['report_sha256'] = fingerprint(report)
+            elif case == 'altered-independent-review':
+                inputs['current_review']['tasks'][0]['covered_comment_ids'] = []
+            elif case == 'ordinary-report':
+                source = deepcopy(self.collection)
+                source['records'][0]['activities'][0]['action'] = 'create'
+                source['records'][0]['activities'] = source['records'][0]['activities'][:1]
+                report = build_digest(source, self.config, '2026-01-02')
+                self.assertTrue(report['ready_to_send'])
+                inputs['current_collection'] = source
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'ledger.sqlite'
+                guard = DeliveryGuard(path, initialize_ledger(path), persistent_storage_verified=True)
+                calls = []
+                try:
+                    with patch('manual_review.clock', return_value=self.now + (timedelta(hours=48) if case == 'expired' else timedelta())), self.assertRaises(DeliveryBlocked):
+                        guard.attempt(report, tenant='demo-org', project='demo-project', destination='fictional',
+                                      send=lambda body: calls.append(body) or True, **inputs)
+                    self.assertEqual(calls, [])
+                    self.assertEqual(guard.db.execute('SELECT count(*) FROM deliveries').fetchone()[0], 0)
+                finally:
+                    guard.close()
 
     def test_no_batch_cannot_review_legacy_fixture(self):
         del self.collection['batch_id']

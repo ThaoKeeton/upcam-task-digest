@@ -78,8 +78,12 @@ class DeliveryGuard:
         self.db.close()
 
     def attempt(self, report, *, tenant, project, destination, send,
-                current_collection=None, current_config=None):
+                current_collection=None, current_config=None, current_review=None):
         """send(markdown) must return exactly True ONLY after provider success.
+
+        current_* inputs must come independently from the trusted local workflow,
+        not be extracted from the report or external task/comment payloads. Every
+        report requires human approval; older plain reports are not deliverable.
 
         A timeout, rejection, unexpected response, crash or failed local commit
         leaves unknown/in_flight and blocks all further attempts. Reconciliation
@@ -87,16 +91,21 @@ class DeliveryGuard:
         """
         if report.get("ready_to_send") is not True or report.get("issues"):
             raise DeliveryBlocked("Report requires review")
-        if 'human_review' in report:
-            from manual_review import validate_reviewed_report, binding
-            try:
-                validate_reviewed_report(report)
-                if current_collection is None or current_config is None:
-                    raise ValueError("Current collection and configuration required")
-                if binding(current_collection, current_config, report['digest']['date']) != report['human_review']['binding']:
-                    raise ValueError("Review differs from current collection")
-            except (ValueError, TypeError, KeyError, AttributeError):
-                raise DeliveryBlocked("Reviewed report changed or expired") from None
+        # No legacy/plain-report fallback: all deliveries must be reproduced from
+        # independent inputs supplied by the trusted caller, never from report fields.
+        from manual_review import apply_review, validate_reviewed_report
+        try:
+            if (report.get('report_type') != 'human-reviewed-v1'
+                    or not isinstance(report.get('human_review'), dict)
+                    or current_collection is None or current_config is None or current_review is None):
+                raise ValueError("Current evidence, config and independent review required")
+            validate_reviewed_report(report)
+            expected = apply_review(current_collection, current_config,
+                                    report['digest']['date'], current_review)
+            if expected.get('ready_to_send') is not True or report != expected:
+                raise ValueError("Report differs from validated current inputs")
+        except (ValueError, TypeError, KeyError, AttributeError, RuntimeError):
+            raise DeliveryBlocked("Invalid, stale or unverified report provenance") from None
         if any(not isinstance(v, str) or not v for v in (tenant, project, destination)):
             raise DeliveryBlocked("Missing delivery scope")
         try:
