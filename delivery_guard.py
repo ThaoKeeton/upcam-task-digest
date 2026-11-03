@@ -12,6 +12,8 @@ from pathlib import Path
 import sqlite3
 import uuid
 
+from report_contract import validated_report_source
+
 
 class DeliveryBlocked(RuntimeError):
     pass
@@ -83,8 +85,14 @@ class DeliveryGuard:
             raise DeliveryBlocked("Report requires review")
         if any(not isinstance(v, str) or not v for v in (tenant, project, destination)):
             raise DeliveryBlocked("Missing delivery scope")
+        try:
+            source_tenant, source_project, report_day = validated_report_source(report)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise DeliveryBlocked("Invalid report source, canonical date or window") from None
+        if (tenant, project) != (source_tenant, source_project):
+            raise DeliveryBlocked("Delivery scope differs from report source")
         # Content is NOT part of the key: regenerated text cannot bypass the gate.
-        key = hashlib.sha256(json.dumps([tenant, project, report["digest"]["date"], destination],
+        key = hashlib.sha256(json.dumps([source_tenant, source_project, report_day, destination],
                                        separators=(",", ":")).encode()).hexdigest()
         digest_hash = hashlib.sha256(report["markdown"].encode()).hexdigest()
         try:

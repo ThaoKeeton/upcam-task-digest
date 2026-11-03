@@ -164,5 +164,5 @@ class Client:
             # Never prune by task created/updated/current status or stop on event age.
             activities = list(self.pages(f"/api/v3/task/{task_id}/activity/list", {"pageSize": 100}))
             output.append({"task": detail, "activities": activities})
-        return {"project_id": project_id, "include_archived": include_archived,
+        return {"tenant_id": self.tenant_id, "project_id": project_id, "include_archived": include_archived,
                 "pagination_complete": True, "records": output}

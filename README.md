@@ -59,11 +59,16 @@ python -m unittest discover -s tests -v
 示例有意未标记生产口径已核验，退出码为 2；0 表示通过配置与数据检查，1 表示采集或结构错误。
 退出码 0 不代表已发送或已证明生产系统可靠。原始动态文本不会被当成指令或自动编造工作摘要。
 评论仅确定性输出“评论 N 条”，不推断完成情况。生产输出可能含企业信息，切勿提交或写进 CI 日志。
+**摘要功能仍不完整**：当前只统计评论数量，没有阅读或总结实际评论内容，不能将输出称为已完成的工作内容摘要。
 
 ## 采集与归类契约
 
 生产采集入口（本轮未执行）：`python digest_pipeline.py --config /受控目录/config.json --collect`。
-日期默认取 Asia/Shanghai 的昨天，使用 `[00:00, 次日00:00)` 半开区间；无时区的动态时间待复核。
+日期在任何采集/文件读取前固定为 Asia/Shanghai 的昨天，再贯穿归类和报告窗口，跨午夜不改变日期。
+使用 `[00:00, 次日00:00)` 半开区间；无时区的动态时间待复核。
+显式日期严格要求 `YYYY-MM-DD`；不接受 `20260102`、ISO 周日期等别名。
+库调用 `build_digest` 必须传入采集前固定的日期，不再提供采集后推算昨天的默认值。
+采集结果记录 tenant_id/project_id，必须与配置一致；报告 scope 绑定相同来源身份。
 所有请求固定至 `https://open.teambition.com`，只允许以下 GET，禁止重定向，不提供通用写接口：
 
 - `/api/v3/project/{projectId}/task/query`：全项目分页，显式 `includeArchived=false` 默认排除归档/回收站任务。
@@ -83,13 +88,16 @@ python -m unittest discover -s tests -v
 - `activity_fields.time/action`：动态时间和动作的点分字段路径；缺省仅是待验证适配值。
 - `action_rules`：精确动作值映射至 comment/created/status/other；状态动作需 `target_field`。
 - `resolved_status_ids`、`status_names`、`owner_names`：已核验 ID 映射；无法识别则待复核。
-- `view.task_equals`：已核验的稳定视图字段等值筛选；不支持的视图规则必须先扩展适配器，不能悄悄忽略。
+- `view.task_equals`：已核验的稳定视图字段等值筛选；目前只接受 executorId、tasklistId、stageId、tfsId、scenariofieldconfigId、visible、parentTaskId 的字符串等值。
 - `view.verified` 与 `view.evidence`：记录实际“昨天”视图核对依据；`api_contract_verified` 记录字段契约已核验。
 
 默认这些核验标记均为 false。它们是操作方的确认记录，不能靠改成 true 替代实际核验。
 当前没有交接完整昨天视图筛选条件与真实动作枚举，故不能宣称已复现该视图的全部语义。
+`view` 仅接受 verified、evidence、task_equals 三个字段；未知字段、拼写错误、错误类型及不支持的筛选
+在采集前直接失败，即使零任务也不能静默忽略。不支持的视图规则必须先扩展适配器并补测试。
 同任务事件合并一次：存在未知/歧义时归其他变更待复核；否则最后一次状态变更为已解决优先，
 其次评论、其次新建、最后其他。后续重开覆盖此前解决；同一时刻多次状态变更待复核。
+分类在动态与标题、负责人、当前状态等所有复核检查后决定；缺失负责人等情况也不能留在已解决分类。
 创建任务字段与当前 isDone 都不能证明昨天新建/解决。当前状态与负责人仅作当前信息展示。
 未知时间会保留候选任务并明确“是否属于本日待复核”，不将其声称为昨日已发生动态。
 
@@ -100,6 +108,10 @@ python -m unittest discover -s tests -v
 且仅在 HTTP 与钉钉业务响应均确认成功后返回严格的 `True`；不能用“HTTP 200”代替业务成功。
 
 防重键为企业、项目、上海日期、稳定接收目标 ID；正文 hash 只存档，不加入防重键。
+发送前要求参数中的企业/项目与报告 scope 完全一致，严格核验报告日期、Asia/Shanghai 时区、
+对应午夜起止窗口及完整分页标记；缺失来源、日期别名或不匹配窗口均在写账本/调用发送函数前拒绝。
+键从已核验的报告来源与规范日期生成，不能用外部参数重新标注来源。此绑定是可信进程内的数据一致性校验，
+不是对任意外部报告的数字签名验证；发送适配器必须只接收可信生成流程的报告。
 使用同一 SQLite 主键事务抢占并提交 `in_flight` 后才调用发送函数；明确成功改为 `confirmed`，
 任何异常/拒绝/非明确成功记为 `unknown`。崩溃遗留的 in_flight、unknown、confirmed 均阻止再发，
 包括正文变化后的重跑。没有自动重试、超时释放或重置接口。

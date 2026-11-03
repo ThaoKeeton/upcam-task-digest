@@ -14,6 +14,9 @@ class DeliveryTests(unittest.TestCase):
         self.path=Path(self.tmp.name)/'delivery.sqlite3'
         self.identity=initialize_ledger(self.path)
         self.report={'ready_to_send':True,'issues':[],'digest':{'date':'2026-01-02'},'markdown':'fictional report'}
+        self.report['scope'] = {'tenant_id':'demo-org','project_id':'demo-project',
+            'timezone':'Asia/Shanghai','start':'2026-01-02T00:00:00+08:00',
+            'end_exclusive':'2026-01-03T00:00:00+08:00','include_archived':False,'pagination_complete':True}
         self.scope={'tenant':'demo-org','project':'demo-project','destination':'demo-destination'}
 
     def tearDown(self):
