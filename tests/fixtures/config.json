@@ -1,0 +1,25 @@
+{
+  "tenant_id": "demo-org",
+  "project_id": "demo-project",
+  "include_archived": false,
+  "api_contract_verified": false,
+  "view": {
+    "verified": false,
+    "evidence": "",
+    "task_equals": {}
+  },
+  "activity_fields": {
+    "time": "createTime",
+    "action": "action"
+  },
+  "resolved_status_ids": [
+    "demo-done"
+  ],
+  "status_names": {
+    "demo-done": "已解决",
+    "demo-open": "待处理"
+  },
+  "owner_names": {
+    "demo-person": "虚构成员"
+  }
+}
