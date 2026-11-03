@@ -27,7 +27,7 @@ class FormatTests(unittest.TestCase):
     def test_category_order_counts_and_spacing(self):
         self.data["tasks"].reverse()
         output = render_digest(self.data)
-        headings = ["**✅ 已解决（1）**", "**💬 工作进展（2）**", "**🆕 新建任务（1）**", "**其他变更（1）**"]
+        headings = ["**✅ 已解决（1）**", "**💬 工作进展（2）**", "**🆕 新建任务（1）**", "**📝 其他变更（1）**"]
         positions = [output.index(heading) for heading in headings]
         self.assertEqual(positions, sorted(positions))
         for heading in headings:
