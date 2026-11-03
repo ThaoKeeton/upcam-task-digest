@@ -1,9 +1,9 @@
 # upcam-task-digest
 
 UPCAM 日报格式模板、企业 v3 只读采集器、确定性日报及离线回归测试。
-默认使用虚构 fixtures；当前 `--collect` 在任何请求前明确阻断，因为更新时间筛选 API 语义尚未核验。
-没有钉钉 HTTP 发送器和定时任务，不会退回全项目完整历史扫描。
-生产 API 字段映射、用户“昨天”视图口径与持久状态存储仍待核验，不能直接启用自动发送。
+默认使用虚构 fixtures；显式 `--collect` 使用已验证的 v3 `q` 更新时间筛选。
+没有钉钉 HTTP 发送器和定时任务，不会退回无筛选的全项目历史扫描。
+当前最近更新时间筛选已依据交接的独立只读验证适配；未识别事件、评论语义及持久状态存储仍需复核，不能直接启用自动发送。
 
 ## 使用
 
@@ -70,10 +70,11 @@ python -m unittest discover -s tests -v
 
 ## 采集与归类契约
 
-待接通入口：`python digest_pipeline.py --config /受控目录/config.json --collect`。
-当前明确返回选择契约缺失错误，不读取凭据、不发请求。不能以 view.verified=true 解除该阻断。
-用户要求沿用“昨天”视图按更新时间选取候选任务；但未交接可验证的服务端筛选参数、操作符和边界语义，
-因此没有编造 TQL 或把客户端过滤宣称为等价实现。必须先取得确切 API 选择语义，再实现生产适配器。
+显式采集入口：`python digest_pipeline.py --config /受控目录/config.json --collect`（本轮未执行）。
+采用已交接验证的 `/api/v3/project/{projectId}/task/query` 的 `q` 参数，例如虚构日期：
+`updated >= '2026-01-02T00:00:00+08:00' AND updated < '2026-01-03T00:00:00+08:00'`。
+该口径是**当前任务最近更新时间在昨天区间内**，不是昨日任意事件的历史全覆盖。昨天有评论但今天再次更新的任务
+可能不属于此视图；这是沿用用户已设置视图的明确范围，不增加旁路全量扫描。
 日期在任何采集/文件读取前固定为 Asia/Shanghai 的昨天，再贯穿归类和报告窗口，跨午夜不改变日期。
 使用 `[00:00, 次日00:00)` 半开区间；无时区的动态时间待复核。
 显式日期严格要求 `YYYY-MM-DD`；不接受 `20260102`、ISO 周日期等别名。
@@ -81,7 +82,7 @@ python -m unittest discover -s tests -v
 采集结果记录 tenant_id/project_id，必须与配置一致；报告 scope 绑定相同来源身份。
 所有请求固定至 `https://open.teambition.com`，只允许以下 GET，禁止重定向，不提供通用写接口：
 
-- `/api/v3/project/{projectId}/task/query`：候选列表端点；更新时间筛选适配器待实现，默认归档范围为 includeArchived=false。
+- `/api/v3/project/{projectId}/task/query`：每页保留相同、由固定日期生成的 q；默认 includeArchived=false，pageSize 默认 100（可显式设为 1–100）。
 - `/api/v3/task/query`：逐任务详情、校验项目与任务身份。
 - `/api/v3/task/{taskId}/activity/list`：仅在候选任务确定后读取动态。事件使用 createTime 窗口，不能以任务时间或当前状态证明昨日事件。
 
@@ -91,9 +92,12 @@ python -m unittest discover -s tests -v
 遵守 Retry-After（超过 60 秒预算直接失败），鉴权/业务错误不重试。响应大小限制 8MiB。
 默认硬预算：每个分页流 20 页、整个客户端 300 次请求（重试计入）、100 个候选任务、10,000 条返回记录、120 秒。
 超过预算、等待/响应越过截止时间均失败，不把部分结果输出为完整日报；不假设活动有序而提前停页。
-`_collect_bounded_fixture` 只用于注入虚构 transport 的离线分页测试，标记 selection.mode=offline-unfiltered、view_equivalent=false，
-不是生产入口。`Client.collect` 始终阻断至真实筛选适配器完成，不调用该测试路径。
-selection 结果与 scope 一起保留，缺少已核验等价性时阻止发送。核验标记本身不是证明。
+`_collect_bounded_fixture` 只用于注入虚构 transport 的通用离线分页测试，标记 selection.mode=offline-unfiltered、view_equivalent=false，
+不是生产入口。`Client.collect` 只调用带固定 q 的生产路径，查询错误、超预算或结构异常均不回退该测试路径。
+返回候选的 updated 必须显式带时区且处于所选半开区间；详情 updated 与列表不一致时失败，防止采集中途状态变化。
+selection 记录模式 v3-project-updated-half-open、固定日期、起止时间、q、basis=current-latest-updated 和
+historical_event_coverage=false，并进入报告 scope。生成日报时重新校验选择契约与日期、任务范围一致。
+这仍不是数据库一致性快照；列表完成后的新增/移出候选以及权限不可见项目内容不能据此保证覆盖。
 接口没有提供一致性快照；分页完成只意味着本次可见数据遍历完成，不保证并发修改、已删除内容、
 授权不可见任务、或已归档历史的完整性。
 
@@ -110,7 +114,7 @@ selection 结果与 scope 一起保留，缺少已核验等价性时阻止发送
 - `view.verified` 与 `view.evidence`：记录实际“昨天”视图核对依据；`api_contract_verified` 记录字段契约已核验。
 
 默认这些核验标记均为 false。它们是操作方的确认记录，不能靠改成 true 替代实际核验。
-已接入本轮交接的动态字段及已观察动作，尚缺完整昨天视图的服务端更新时间筛选语义，不能宣称已复现该视图。
+已接入交接的动态字段、已观察动作以及经独立只读验证的最近更新时间筛选；不扩大为历史任意事件口径。
 `view` 仅接受 verified、evidence、task_equals 三个字段；未知字段、拼写错误、错误类型及不支持的筛选
 在采集前直接失败，即使零任务也不能静默忽略。不支持的视图规则必须先扩展适配器并补测试。
 同任务事件合并一次：存在未知/歧义时归其他变更待复核；否则最后一次状态变更为已解决优先，
@@ -118,6 +122,7 @@ selection 结果与 scope 一起保留，缺少已核验等价性时阻止发送
 分类在动态与标题、负责人、当前状态等所有复核检查后决定；缺失负责人等情况也不能留在已解决分类。
 创建任务字段与当前 isDone 都不能证明昨天新建/解决。当前状态与负责人仅作当前信息展示。
 未知时间会保留候选任务并明确“是否属于本日待复核”，不将其声称为昨日已发生动态。
+已由更新时间视图选中但没有本日可归类动态的任务也保留为“动态证据不足，待复核”，不静默漏掉视图成员。
 
 ## 独立发送防重边界
 
@@ -151,8 +156,11 @@ selection 结果与 scope 一起保留，缺少已核验等价性时阻止发送
 [任务动态](https://open.teambition.com/docs/apis/6363bcfb912d20d3b56fb3f4)、
 [应用凭证](https://open.teambition.com/docs/documents/5db8f7e77baeb50014957fc1)。
 本轮仅按交接信息构造结构等价的虚构 fixtures，未调用企业 API 或钉钉，未保存真实数据。
-尚缺更新时间筛选参数/操作符/时区边界、评论是否更新任务 updated、跨日再次更新的候选规则、排序及分页稳定性等
-可验证语义。不能用任务当前 updated 自动推断历史视图成员，也不能声称所有旧任务评论均覆盖。
-取得脱敏接口契约后需补查询适配器与边界测试，再进行获准的生产验收；离线模拟不能证明真实 API 契约正确。
+独立只读验证交接已确认 v3 q 的半开区间筛选、与当前昨天视图集合一致、UTC 等价及毫秒级比较边界；
+本轮以完全虚构 fixtures 覆盖该契约，没有重新在线验证或保存真实集合。通用语法参考另见
+[官方 TQL 参考](https://github.com/teambition/tb-skills/blob/main/dingtalk-teambition/references/tql.md)，其配套脚本使用 v2，
+因此 v3 兼容性的依据是交接的实测证据，而非仅凭该通用文档推断。
+真实权限范围、后续并发修改、已删除/已归档任务、事件保留策略与评论是否必然改变 updated 仍有限制；
+当前 updated 不能重建历史时点视图，也不能证明所有旧任务的昨日评论均覆盖。
 此外需要确认任务直接链接、成员/状态映射刷新方式、全项目权限/归档范围、真实数据量与运行预算，
 核对“昨天”视图成员集合及钉钉实际排版，验证持久共享账本，再单独接入发送器。未设置任何定时任务。

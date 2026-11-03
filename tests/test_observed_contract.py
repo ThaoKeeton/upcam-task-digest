@@ -1,3 +1,4 @@
+from report_contract import updated_selection
 """Entirely fictional data shaped like the supplied v3 field contract."""
 import copy
 import io
@@ -30,7 +31,7 @@ class ObservedContractTests(unittest.TestCase):
         self.data=json.loads((FIXTURES/'collection.json').read_text())
         self.config['view'].update(verified=True,evidence='fictional-test-only')
         self.config['api_contract_verified']=True
-        self.data['selection']={'mode':'fictional-test-only','view_equivalent':True}
+        self.data['selection']=updated_selection('2026-01-02')
 
     def report(self, *events):
         self.data['records'][0]['activities']=list(events)
@@ -125,21 +126,20 @@ class ObservedContractTests(unittest.TestCase):
 
 
 class CollectionBudgetTests(unittest.TestCase):
-    def test_live_collection_is_blocked_before_credentials_or_transport(self):
+    def test_collection_without_fixed_date_is_blocked_before_credentials_or_transport(self):
         transport=Mock(); credentials=Mock()
         c=Client('demo-org',transport=transport,credentials=credentials)
-        with self.assertRaisesRegex(CollectionError,'selection adapter unavailable'):
-            c.collect('demo-project',day='2026-01-02')
+        with self.assertRaises(CollectionError):
+            c.collect('demo-project')
         transport.assert_not_called(); credentials.assert_not_called()
         with self.assertRaises(CollectionError): Client('demo-org')._collect_bounded_fixture('demo-project')
 
-    def test_cli_reports_missing_selection_contract_without_request(self):
+    def test_cli_rejects_invalid_date_before_request(self):
         stderr=io.StringIO()
-        with patch('sys.argv',['digest_pipeline.py','--config',str(FIXTURES/'config.json'),'--collect']), \
+        with patch('sys.argv',['digest_pipeline.py','--config',str(FIXTURES/'config.json'),'--collect','--date','20260102']), \
              patch('teambition_readonly.app_jwt') as jwt, patch('sys.stderr',stderr):
             self.assertEqual(main(),1)
-            self.assertIn('updated-time API selection semantics unavailable',stderr.getvalue())
-            self.assertIn('no request attempted',stderr.getvalue())
+            self.assertIn('Digest failed',stderr.getvalue())
             jwt.assert_not_called()
 
     def test_foreign_bound_activity_rejected_by_offline_collector(self):

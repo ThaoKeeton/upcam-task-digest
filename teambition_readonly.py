@@ -12,14 +12,11 @@ from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from report_contract import updated_in_window, updated_selection
 
 
 class CollectionError(RuntimeError):
     """Messages deliberately exclude response bodies, URLs and credentials."""
-
-
-class SelectionUnavailable(CollectionError):
-    """Production collection has no verified updated-time query contract yet."""
 
 
 def identifier(value):
@@ -186,21 +183,39 @@ class Client:
             params["pageToken"] = token
         raise CollectionError("Pagination limit exceeded; incomplete collection")
 
-    def collect(self, project_id, *, include_archived=False, day=None):
-        # No verified server-side updated-time selection contract has been supplied.
-        # Never turn this missing contract into a production-wide history scan.
-        raise SelectionUnavailable("Verified updated-time API selection adapter unavailable; live collection blocked")
+    def collect(self, project_id, *, include_archived=False, day=None, page_size=100):
+        # Caller freezes the Shanghai day before any request; there is no fallback query.
+        try:
+            selection = updated_selection(day)
+        except (ValueError, TypeError):
+            raise CollectionError('Canonical report day must be fixed before collection') from None
+        if type(page_size) is not int or not 1 <= page_size <= 100:
+            raise CollectionError('Invalid page size')
+        return self._collect(project_id, include_archived, page_size, selection)
 
     def _collect_bounded_fixture(self, project_id, *, include_archived=False):
         """Test-only bounded traversal. Never a production selection implementation."""
         if not self.injected_transport:
             raise CollectionError("Offline fixture collection requires an injected transport")
+        return self._collect(project_id, include_archived, 100,
+                             {'mode': 'offline-unfiltered', 'view_equivalent': False})
+
+    def _collect(self, project_id, include_archived, page_size, selection):
         project_id = identifier(project_id)
         if type(include_archived) is not bool:
             raise CollectionError("include_archived must be boolean")
-        tasks = list(self.pages(f"/api/v3/project/{project_id}/task/query", {
-            "pageSize": 100, "includeArchived": str(include_archived).lower(),
-        }, max_items=self.max_tasks))
+        params = {'pageSize': page_size, 'includeArchived': str(include_archived).lower()}
+        filtered = selection['mode'] == 'v3-project-updated-half-open'
+        if filtered:
+            params['q'] = selection['q']
+        tasks = list(self.pages(f"/api/v3/project/{project_id}/task/query", params, max_items=self.max_tasks))
+        selected_updates = {}
+        if filtered:
+            try:
+                for task in tasks:
+                    selected_updates[record_id(task)] = updated_in_window(task.get('updated'), selection['date'])
+            except ValueError:
+                raise CollectionError('Returned candidate violates updated-time selection') from None
         output = []
         for task in tasks:
             task_id = record_id(task)
@@ -209,15 +224,22 @@ class Client:
                 detail = detail[0]
             if record_id(detail) != task_id or detail.get("projectId") != project_id:
                 raise CollectionError("Detail identity or project mismatch")
+            if filtered:
+                try:
+                    current_update = updated_in_window(detail.get('updated'), selection['date'])
+                except ValueError:
+                    raise CollectionError('Task changed outside selection or has invalid updated timestamp') from None
+                if current_update != selected_updates[task_id]:
+                    raise CollectionError('Task changed during collection; retry a fresh bounded run')
             if type(detail.get("isArchived")) is not bool:
                 raise CollectionError("Missing archive flag")
             if detail["isArchived"] and not include_archived:
                 continue
-            # Offline adapter: do not invent a date query or assume activity ordering.
-            activities = list(self.pages(f"/api/v3/task/{task_id}/activity/list", {"pageSize": 100}))
+            # The candidate query is bounded; activity ordering is still not assumed.
+            activities = list(self.pages(f"/api/v3/task/{task_id}/activity/list", {"pageSize": page_size}))
             for activity in activities:
                 validate_binding(activity, task_id)
             output.append({"task": detail, "activities": activities})
         return {"tenant_id": self.tenant_id, "project_id": project_id, "include_archived": include_archived,
-                "selection": {"mode": "offline-unfiltered", "view_equivalent": False},
+                "selection": selection,
                 "pagination_complete": True, "records": output}

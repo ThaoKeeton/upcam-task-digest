@@ -8,8 +8,8 @@ from pathlib import Path
 import sys
 
 from render_digest import render_digest, text
-from report_contract import SHANGHAI, canonical_window, strict_day
-from teambition_readonly import Client, CollectionError, SelectionUnavailable, identifier, record_id
+from report_contract import SHANGHAI, canonical_window, strict_day, updated_selection, updated_in_window
+from teambition_readonly import Client, CollectionError, identifier, record_id
 from activity_adapter import comment_input, parse_activity, validate_binding
 
 
@@ -88,7 +88,11 @@ def build_digest(collection, config, day):
         issues.append("昨天视图口径尚未核验")
     if config.get("api_contract_verified") is not True:
         issues.append("API 字段及事件映射尚未核验")
-    if collection.get('selection', {}).get('view_equivalent') is not True:
+    selection = collection.get('selection')
+    if isinstance(selection, dict) and selection.get('mode') == 'v3-project-updated-half-open':
+        if selection != updated_selection(start.date().isoformat()):
+            raise CollectionError('Selection contract differs from report window')
+    else:
         issues.append("更新时间筛选与昨天视图的等价性尚未核验")
     if collection.get("include_archived") != config.get("include_archived", False):
         raise CollectionError("Archive scope mismatch")
@@ -101,6 +105,11 @@ def build_digest(collection, config, day):
         seen.add(task_id)
         if task.get("projectId") != project:
             raise CollectionError("Task belongs to another project")
+        if isinstance(selection, dict) and selection.get('mode') == 'v3-project-updated-half-open':
+            try:
+                updated_in_window(task.get('updated'), start.date().isoformat())
+            except ValueError:
+                raise CollectionError('Task violates report selection contract') from None
         if type(task.get("isArchived")) is not bool:
             raise CollectionError("Missing archive scope")
         if task["isArchived"] and not config.get("include_archived", False):
@@ -136,16 +145,21 @@ def build_digest(collection, config, day):
             if kind == "comment":
                 comments.append(comment_input(raw, event_id, when))
             events.append((when, event_id, kind, resolved))
-        if not events and not unknown_time:
+        no_window_evidence = (not events and not unknown_time
+                              and isinstance(selection, dict)
+                              and selection.get('mode') == 'v3-project-updated-half-open')
+        if not events and not unknown_time and not no_window_evidence:
             continue
         events.sort(key=lambda e: (e[0], e[1]))
         counts = Counter(e[2] for e in events)
-        review = unknown_time or bool(counts["unknown"]) or bool(comments)
+        review = unknown_time or bool(counts["unknown"]) or bool(comments) or no_window_evidence
         # The last status transition of the day wins; reopen is never resolved.
         status_events = [e for e in events if e[2] == "status"]
         ambiguous_status = bool(status_events and sum(e[0] == status_events[-1][0] for e in status_events) > 1)
         review = review or ambiguous_status
         descriptions = []
+        if no_window_evidence:
+            descriptions.append("最近更新时间符合昨天视图，但本日动态证据不足，待复核")
         for kind, label in (("created", "新建记录"), ("comment", "评论"),
                             ("status", "状态变更"), ("other", "其他变更")):
             if counts[kind]:
@@ -223,9 +237,6 @@ def main():
         # Output is sensitive at runtime. Operator must redirect outside the repository.
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["ready_to_send"] else 2
-    except SelectionUnavailable:
-        print("Digest blocked: verified updated-time API selection semantics unavailable; no request attempted.", file=sys.stderr)
-        return 1
     except (CollectionError, ValueError, TypeError, KeyError, OSError):
         print("Digest failed; no send attempted. Check configuration/schema/collection.", file=sys.stderr)
         return 1

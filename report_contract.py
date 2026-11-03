@@ -22,6 +22,27 @@ def canonical_window(day):
     return start, start + timedelta(days=1)
 
 
+def updated_selection(day):
+    """Verified v3 q syntax; membership means CURRENT latest updated is in window."""
+    start, end = canonical_window(day)
+    return {'mode': 'v3-project-updated-half-open', 'view_equivalent': True,
+            'date': day, 'start': start.isoformat(), 'end_exclusive': end.isoformat(),
+            'q': f"updated >= '{start.isoformat()}' AND updated < '{end.isoformat()}'",
+            'basis': 'current-latest-updated', 'historical_event_coverage': False}
+
+
+def updated_in_window(value, day):
+    if not isinstance(value, str):
+        raise ValueError('Missing task updated timestamp')
+    instant = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if instant.tzinfo is None:
+        raise ValueError('Task updated timestamp lacks timezone')
+    start, end = canonical_window(day)
+    if not start <= instant < end:
+        raise ValueError('Task updated timestamp outside selection window')
+    return instant
+
+
 def validated_report_source(report):
     """Validate a trusted pipeline report's structural binding, not a signature."""
     day = report["digest"]["date"]

@@ -1,3 +1,4 @@
+from report_contract import updated_selection
 """Fictional regressions for the independent review of c858832."""
 import copy
 from datetime import datetime
@@ -71,7 +72,7 @@ class ReviewRegressions(unittest.TestCase):
 
     def test_delivery_rejects_date_alias_window_mismatch_and_source_relabel(self):
         self.collection['records'][0]['activities']=[{'id':'demo-created','action':'create','createTime':'2026-01-02T01:00:00Z','boundToObjectId':'demo-old-task','boundToObjectType':'task'}]
-        self.collection['selection']={'mode':'fictional-verified-test','view_equivalent':True}
+        self.collection['selection']=updated_selection('2026-01-02')
         report=self.report()
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'ledger.sqlite3'; identity=initialize_ledger(path)
