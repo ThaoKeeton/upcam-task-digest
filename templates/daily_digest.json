@@ -1,0 +1,9 @@
+{
+  "title": "Teambition｜UPCAM 项目任务动态日报",
+  "categories": [
+    {"key": "resolved", "label": "已解决", "icon": "✅"},
+    {"key": "progress", "label": "工作进展", "icon": "💬"},
+    {"key": "new", "label": "新建任务", "icon": "🆕"},
+    {"key": "other", "label": "其他变更", "icon": ""}
+  ]
+}
