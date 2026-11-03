@@ -22,37 +22,73 @@ def canonical_window(day):
     return start, start + timedelta(days=1)
 
 
-def updated_selection(day):
-    """Verified v3 q syntax; membership means CURRENT latest updated is in window."""
-    start, end = canonical_window(day)
+def report_window(day, start=None, end=None):
+    """Resolve an optional explicit half-open range into Asia/Shanghai time.
+
+    Custom windows are a caller-selected scope; they still require the same
+    local view/API verification gates as the original calendar-day contract.
+    """
+    report_day = strict_day(day)
+    if start is None and end is None:
+        return canonical_window(report_day.isoformat())
+    if start is None or end is None:
+        raise ValueError("Both custom window boundaries are required")
+
+    def aware_boundary(value):
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if not isinstance(value, datetime) or value.tzinfo is None:
+            raise ValueError("Custom window boundaries must include a timezone")
+        return value.astimezone(SHANGHAI)
+
+    start = aware_boundary(start)
+    end = aware_boundary(end)
+    full_start, full_end = canonical_window(report_day.isoformat())
+    is_calendar_day = (start, end) == (full_start, full_end)
+    if end <= start or (not is_calendar_day and end.date() != report_day):
+        raise ValueError("Custom window must end after it starts and close on the report date")
+    return start, end
+
+
+def updated_selection(day, start=None, end=None):
+    """Build a bounded v3 q; membership means CURRENT latest updated is in range."""
+    report_day = strict_day(day)
+    start, end = report_window(report_day.isoformat(), start, end)
+    full_start, full_end = canonical_window(report_day.isoformat())
     return {'mode': 'v3-project-updated-half-open', 'view_equivalent': True,
-            'date': day, 'start': start.isoformat(), 'end_exclusive': end.isoformat(),
+            'date': report_day.isoformat(), 'start': start.isoformat(), 'end_exclusive': end.isoformat(),
             'q': f"updated >= '{start.isoformat()}' AND updated < '{end.isoformat()}'",
-            'basis': 'current-latest-updated', 'historical_event_coverage': False}
+            'basis': 'current-latest-updated', 'historical_event_coverage': False,
+            'window_kind': 'calendar_day' if (start, end) == (full_start, full_end) else 'custom'}
 
 
-def updated_in_window(value, day):
+def updated_in_window(value, day, start=None, end=None):
     if not isinstance(value, str):
         raise ValueError('Missing task updated timestamp')
     instant = datetime.fromisoformat(value.replace('Z', '+00:00'))
     if instant.tzinfo is None:
         raise ValueError('Task updated timestamp lacks timezone')
-    start, end = canonical_window(day)
+    start, end = report_window(day, start, end)
     if not start <= instant < end:
         raise ValueError('Task updated timestamp outside selection window')
     return instant
 
 
 def validated_report_source(report):
-    """Validate a trusted pipeline report's structural binding, not a signature."""
+    """Validate a trusted pipeline report's source and exact half-open scope."""
     day = report["digest"]["date"]
-    start, end = canonical_window(day)
     scope = report["scope"]
+    try:
+        start, end = report_window(day, scope.get("start"), scope.get("end_exclusive"))
+    except (TypeError, ValueError):
+        raise ValueError("Invalid report window") from None
+    selection = scope.get("selection")
     if (scope.get("timezone") != "Asia/Shanghai"
             or scope.get("start") != start.isoformat()
             or scope.get("end_exclusive") != end.isoformat()
             or scope.get("pagination_complete") is not True
-            or type(scope.get("include_archived")) is not bool):
+            or type(scope.get("include_archived")) is not bool
+            or selection != updated_selection(day, start, end)):
         raise ValueError("Report window or collection scope mismatch")
     source = tuple(scope.get(key) for key in ("tenant_id", "project_id"))
     if any(not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", v) for v in source):
