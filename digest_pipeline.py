@@ -8,15 +8,17 @@ from pathlib import Path
 import sys
 
 from render_digest import render_digest, text
-from report_contract import SHANGHAI, canonical_window, strict_day, updated_selection, updated_in_window
+from report_contract import SHANGHAI, canonical_window, report_window, strict_day, updated_selection, updated_in_window
 from teambition_readonly import Client, CollectionError, identifier, record_id
 from activity_adapter import (comment_input, parse_activity, validate_binding, status_transition,
                               executor_change, standard_commit_candidate)
 from runtime_mappings import load_runtime_mappings, parse_config_json, validate_mappings
 
 
-def day_window(day=None, now=None):
+def day_window(day=None, now=None, window=None):
     if day is None:
+        if window is not None:
+            raise ValueError("A custom window requires an explicit report date")
         now = now or datetime.now(SHANGHAI)
         if now.tzinfo is None:
             raise ValueError("Clock must be timezone-aware")
@@ -25,7 +27,7 @@ def day_window(day=None, now=None):
         day = strict_day(day)
     elif type(day) is not date:
         raise ValueError("Report day must be a date")
-    return canonical_window(day.isoformat())
+    return report_window(day.isoformat(), *(window or (None, None)))
 
 
 def timestamp(value):
@@ -70,12 +72,16 @@ def validate_view(config):
     return view
 
 
-def build_digest(collection, config, day):
-    # Caller must freeze the report day before collection; no implicit late clock read.
+def build_digest(collection, config, day, window=None):
+    # Caller freezes the report date before collection. A custom range is half-open.
     if day is None:
         raise ValueError("Report day must be fixed before collection")
     config = validate_mappings(config)
-    start, end = day_window(day)
+    report_day = strict_day(day).isoformat() if isinstance(day, str) else day.isoformat()
+    selection = collection.get('selection')
+    if window is None and isinstance(selection, dict) and selection.get('mode') == 'v3-project-updated-half-open':
+        window = (selection.get('start'), selection.get('end_exclusive'))
+    start, end = day_window(report_day, window=window)
     view = validate_view(config)
     if collection.get("pagination_complete") is not True:
         raise CollectionError("Cannot render incomplete collection")
@@ -91,9 +97,8 @@ def build_digest(collection, config, day):
         issues.append("昨天视图口径尚未核验")
     if config.get("api_contract_verified") is not True:
         issues.append("API 字段及事件映射尚未核验")
-    selection = collection.get('selection')
     if isinstance(selection, dict) and selection.get('mode') == 'v3-project-updated-half-open':
-        if selection != updated_selection(start.date().isoformat()):
+        if selection != updated_selection(report_day, start, end):
             raise CollectionError('Selection contract differs from report window')
     else:
         issues.append("更新时间筛选与昨天视图的等价性尚未核验")
@@ -110,7 +115,7 @@ def build_digest(collection, config, day):
             raise CollectionError("Task belongs to another project")
         if isinstance(selection, dict) and selection.get('mode') == 'v3-project-updated-half-open':
             try:
-                updated_in_window(task.get('updated'), start.date().isoformat())
+                updated_in_window(task.get('updated'), report_day, start, end)
             except ValueError:
                 raise CollectionError('Task violates report selection contract') from None
         if type(task.get("isArchived")) is not bool:
@@ -258,7 +263,7 @@ def build_digest(collection, config, day):
                       "undated_event_ids": sorted(undated_ids),
                       "activity_evidence": [ids[e[1]] for e in events] + [ids[k] for k in sorted(undated_ids)]})
     combined = sorted(zip(items, audit), key=lambda pair: pair[1]["task_id"])
-    data = {"date": start.date().isoformat(), "tasks": [pair[0] for pair in combined]}
+    data = {"date": report_day, "tasks": [pair[0] for pair in combined]}
     return {"digest": data, "markdown": render_digest(data), "audit": [pair[1] for pair in combined],
             "summary_inputs": sorted(summary_inputs, key=lambda item: item['task_id']),
             "issues": issues, "ready_to_send": not issues,
@@ -276,19 +281,27 @@ def main():
     source.add_argument("--fixture", type=Path, help="Offline normalized collection")
     source.add_argument("--collect", action="store_true", help="Explicitly allow Teambition GET requests")
     parser.add_argument("--date", help="YYYY-MM-DD; defaults to yesterday in Asia/Shanghai")
+    parser.add_argument("--start", help="Optional timezone-aware ISO 8601 start; inclusive")
+    parser.add_argument("--end", help="Optional timezone-aware ISO 8601 end; exclusive")
     args = parser.parse_args()
     try:
         config = validate_mappings(parse_config_json(args.config.read_text(encoding="utf-8")))
         validate_view(config)
         # Freeze before either file ingestion or live collection crosses midnight.
+        if bool(args.start) != bool(args.end):
+            raise ValueError("Both --start and --end are required")
+        if args.start and not args.date:
+            raise ValueError("--date is required for a custom collection window")
         fixed_day = day_window(args.date)[0].date().isoformat()
+        custom_window = (args.start, args.end) if args.start else None
         if args.fixture:
             collection = json.loads(args.fixture.read_text(encoding="utf-8"))
         else:
             config = load_runtime_mappings(config)
             collection = Client(config["tenant_id"]).collect(config["project_id"],
-                         include_archived=config.get("include_archived", False), day=fixed_day)
-        result = build_digest(collection, config, fixed_day)
+                         include_archived=config.get("include_archived", False), day=fixed_day,
+                         window=custom_window)
+        result = build_digest(collection, config, fixed_day, window=custom_window)
         # Output is sensitive at runtime. Operator must redirect outside the repository.
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["ready_to_send"] else 2
