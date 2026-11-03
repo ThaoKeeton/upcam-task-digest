@@ -47,6 +47,7 @@ OpenAI 文档：[`/v1/models`](https://developers.openai.com/api/reference/resou
 - `openai_summarizer.py`、`automated_digest.py`：最小输入、Responses API 结构化摘要和独立验证。
 - `delivery_guard.py`、`upcam_app/dingtalk.py`：一次性持久化防重门禁与钉钉传输。
 - `templates/daily_digest.json`：随程序版本打包的日报格式和内容规则。
+- `DATA_COLLECTION_CONTRACT.md`：延续并更新主分支的 Teambition 采集、字段映射和动态归类规则。
 - `tests/fixtures/`：全部为虚构数据。测试通过替身传输模拟外部 API，不请求真实企业、OpenAI 或钉钉服务。
 
 运行测试：
