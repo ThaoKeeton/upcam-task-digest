@@ -232,6 +232,11 @@ def build_digest(collection, config, day):
         if "待复核" in (title, owner, status):
             review = True
             descriptions.append("标题、负责人或当前状态待复核")
+        hard_review = (unknown_time or bool(counts["unknown"]) or no_window_evidence
+                       or ambiguous_status or status_conflict or status_noop or executor_conflict
+                       or any(c['needs_review'] for c in parsed_changes)
+                       or any(c['extraction_needs_review'] for c in comments)
+                       or "待复核" in (title, owner, status))
         if review:
             issues.append(f"任务 {task_id} 待复核")
         # Final classification follows every event AND display-field review check.
@@ -247,6 +252,7 @@ def build_digest(collection, config, day):
                       "url": f"https://www.teambition.com/project/{project}/task/{task_id}",
                       "summary": "；".join(descriptions), "owner": owner, "status": status})
         audit.append({"task_id": task_id, "event_ids": [e[1] for e in events], "needs_review": review,
+                      "hard_review": bool(hard_review),
                       "executor_conflict": executor_conflict, "status_noop": status_noop,
                       "status_transitions": transitions, "parsed_changes": parsed_changes,
                       "undated_event_ids": sorted(undated_ids),

@@ -77,7 +77,8 @@ class DeliveryGuard:
     def close(self):
         self.db.close()
 
-    def attempt(self, report, *, tenant, project, destination, send):
+    def attempt(self, report, *, tenant, project, destination, send,
+                current_collection=None, current_config=None):
         """send(markdown) must return exactly True ONLY after provider success.
 
         A timeout, rejection, unexpected response, crash or failed local commit
@@ -86,6 +87,16 @@ class DeliveryGuard:
         """
         if report.get("ready_to_send") is not True or report.get("issues"):
             raise DeliveryBlocked("Report requires review")
+        if 'human_review' in report:
+            from manual_review import validate_reviewed_report, binding
+            try:
+                validate_reviewed_report(report)
+                if current_collection is None or current_config is None:
+                    raise ValueError("Current collection and configuration required")
+                if binding(current_collection, current_config, report['digest']['date']) != report['human_review']['binding']:
+                    raise ValueError("Review differs from current collection")
+            except (ValueError, TypeError, KeyError, AttributeError):
+                raise DeliveryBlocked("Reviewed report changed or expired") from None
         if any(not isinstance(v, str) or not v for v in (tenant, project, destination)):
             raise DeliveryBlocked("Missing delivery scope")
         try:

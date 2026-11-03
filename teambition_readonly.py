@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
@@ -242,4 +243,6 @@ class Client:
             output.append({"task": detail, "activities": activities})
         return {"tenant_id": self.tenant_id, "project_id": project_id, "include_archived": include_archived,
                 "selection": selection,
+                "batch_id": str(uuid.uuid4()),
+                "collected_at": datetime.now(timezone.utc).isoformat(),
                 "pagination_complete": True, "records": output}
