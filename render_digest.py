@@ -62,6 +62,11 @@ def render_digest(data):
     )
     overview = f'📊 更新 {len(data["tasks"])} 项' + (f"：{counts}" if counts else "")
     blocks = [f'**{template["title"]}**  \n🗓️ 日期：{day}  \n{overview}']
+    if not data["tasks"]:
+        empty_message = template.get("no_activity_message")
+        if not isinstance(empty_message, str) or not empty_message.strip():
+            raise ValueError("Empty report requires a template no-activity message")
+        blocks.append(empty_message)
     for category in active:
         tasks = groups[category["key"]]
         heading = " ".join(filter(None, [category["icon"], category["label"]]))
