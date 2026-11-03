@@ -10,7 +10,8 @@ import sys
 from render_digest import render_digest, text
 from report_contract import SHANGHAI, canonical_window, strict_day, updated_selection, updated_in_window
 from teambition_readonly import Client, CollectionError, identifier, record_id
-from activity_adapter import comment_input, parse_activity, validate_binding
+from activity_adapter import (comment_input, parse_activity, validate_binding, status_transition,
+                              executor_change, standard_commit_candidate)
 
 
 def day_window(day=None, now=None):
@@ -155,8 +156,26 @@ def build_digest(collection, config, day):
         review = unknown_time or bool(counts["unknown"]) or bool(comments) or no_window_evidence
         # The last status transition of the day wins; reopen is never resolved.
         status_events = [e for e in events if e[2] == "status"]
-        ambiguous_status = bool(status_events and sum(e[0] == status_events[-1][0] for e in status_events) > 1)
-        review = review or ambiguous_status
+        ambiguous_status = len({e[0] for e in status_events}) != len(status_events)
+        transitions = [dict(status_transition(ids[e[1]].get('content'), config), event_id=e[1]) for e in status_events]
+        status_conflict = any(previous['target_id'] != current['previous_id']
+                              for previous, current in zip(transitions, transitions[1:]))
+        if transitions:
+            latest = transitions[-1]
+            status_conflict = status_conflict or task.get('tfsId') != latest['target_id']
+            status_conflict = status_conflict or type(task.get('isDone')) is not bool
+            status_conflict = status_conflict or task.get('isDone') != latest['resolved']
+        parsed_changes = []
+        for event in events:
+            raw = ids[event[1]]
+            change = None
+            if raw.get('action') == 'update_executor':
+                change = executor_change(raw, config)
+            elif raw.get('action') == 'standard':
+                change = standard_commit_candidate(raw)
+            if change is not None:
+                parsed_changes.append(dict(change, event_id=event[1], action=raw['action']))
+        review = review or ambiguous_status or status_conflict or any(c['needs_review'] for c in parsed_changes)
         descriptions = []
         if no_window_evidence:
             descriptions.append("最近更新时间符合昨天视图，但本日动态证据不足，待复核")
@@ -170,6 +189,18 @@ def build_digest(collection, config, day):
             descriptions.append("存在时间不明动态，是否属于本日待复核")
         if ambiguous_status:
             descriptions.append("同一时刻多次状态变更，待复核")
+        if status_conflict:
+            descriptions.append("状态事件序列或当前状态不一致，待复核")
+        for change in parsed_changes:
+            if change['action'] == 'update_executor':
+                if change['needs_review']:
+                    descriptions.append("执行人变更已提取 ID，姓名或来源待复核")
+                else:
+                    descriptions.append(f"执行人变更：{change['previous_name']} → {change['target_name']}")
+                if change['from_automation'] is True:
+                    descriptions.append("来源标记：自动化")
+            else:
+                descriptions.append("检测到关联提交标题模式，具体提交及来源待复核")
         if comments:
             comments.sort(key=lambda c: (c['create_time'] or '', c['event_id']))
             candidates = [c for c in comments if not c['omit_from_summary']]
@@ -201,6 +232,7 @@ def build_digest(collection, config, day):
                       "url": f"https://www.teambition.com/project/{project}/task/{task_id}",
                       "summary": "；".join(descriptions), "owner": owner, "status": status})
         audit.append({"task_id": task_id, "event_ids": [e[1] for e in events], "needs_review": review,
+                      "status_transitions": transitions, "parsed_changes": parsed_changes,
                       "undated_event_ids": sorted(undated_ids),
                       "activity_evidence": [ids[e[1]] for e in events] + [ids[k] for k in sorted(undated_ids)]})
     combined = sorted(zip(items, audit), key=lambda pair: pair[1]["task_id"])

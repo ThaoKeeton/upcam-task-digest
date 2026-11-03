@@ -42,9 +42,10 @@ def status_transition(content, config):
                 or names[previous] != data['oldTaskflowstatus']):
             return None
         resolved = target in config.get('resolved_status_ids', [])
-        if data['isDone'] != resolved:
-            return None
-        return {'target_id': target, 'previous_id': previous, 'resolved': resolved}
+        # This event flag's meaning is unverified; preserve it without treating it
+        # as the target state's completion flag (or the current task's flag).
+        return {'target_id': target, 'previous_id': previous, 'resolved': resolved,
+                'event_is_done': data['isDone']}
     except (ValueError, TypeError, CollectionError, RecursionError):
         return None
 
@@ -108,6 +109,61 @@ def comment_input(raw, event_id, when):
 
 
 
+def bounded_object(content):
+    if not isinstance(content, str) or len(content.encode('utf-8')) > MAX_CONTENT:
+        return None
+    try:
+        value = json.loads(content, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
+        return value if isinstance(value, dict) else None
+    except (ValueError, TypeError, RecursionError):
+        return None
+
+
+def executor_change(raw, config):
+    data = bounded_object(raw.get('content'))
+    if data is None:
+        return None
+    try:
+        new_id, old_id = identifier(data.get('_executorId')), identifier(data.get('_oldExecutorId'))
+    except CollectionError:
+        return None
+    payloads = {'content': data.get('payload', {}), 'event': raw.get('payload', {})}
+    if any(not isinstance(p, dict) or ('fromAutomation' in p and type(p['fromAutomation']) is not bool)
+           for p in payloads.values()):
+        return None
+    flags = [p['fromAutomation'] for p in payloads.values() if 'fromAutomation' in p]
+    automation_conflict = len(set(flags)) > 1
+    names = config.get('owner_names', {})
+    # Names are exclusively looked up by ID in the supplied verified mapping.
+    mapped = [names.get(key) for key in (old_id, new_id)]
+    valid_names = all(isinstance(name, str) and name.strip() and not any(ord(c) < 32 for c in name) for name in mapped)
+    return {'previous_id': old_id, 'target_id': new_id,
+            'previous_name': mapped[0] if valid_names else None,
+            'target_name': mapped[1] if valid_names else None,
+            'from_automation': flags[0] if flags and not automation_conflict else None,
+            'parsed_payload': data, 'automation_payload': payloads,
+            'automation_conflict': automation_conflict,
+            'needs_review': not valid_names or automation_conflict}
+
+
+def standard_commit_candidate(raw):
+    data = bounded_object(raw.get('content'))
+    if data is None:
+        return None
+    title = data.get('title')
+    creator = data.get('customCreator')
+    if (not isinstance(title, str) or not isinstance(creator, dict)
+            or not isinstance(creator.get('name'), str) or not creator['name'].strip()):
+        return None
+    # Match only the explicit standalone action phrase or a phrase followed by
+    # a delimiter. No broad substring match (e.g. "未关联了提交") is accepted.
+    if not re.fullmatch(r'关联了提交(?:[：: \t]+[^\r\n]+)?', title):
+        return None
+    return {'pattern': 'commit-link-title', 'title': title,
+            'source_creator_name': creator['name'], 'parsed_payload': data,
+            'needs_review': True}  # Source text is not proof of a commit or identity.
+
+
 def parse_activity(raw, config):
     action = raw.get('action')
     if action == 'update.taskflowstatus':
@@ -115,7 +171,10 @@ def parse_activity(raw, config):
         if transition is None:
             return 'unknown', False
         return 'status', transition['resolved']
-    # "standard" is observed but its business meaning has not been verified.
+    if action == 'update_executor':
+        return ('other', False) if executor_change(raw, config) is not None else ('unknown', False)
+    if action == 'standard':
+        return ('other', False) if standard_commit_candidate(raw) is not None else ('unknown', False)
     kinds = {'create': 'created', 'comment': 'comment', 'involve.add': 'other',
-             'update_content': 'other', 'update_executor': 'other'}
+             'update_content': 'other'}
     return kinds.get(action, 'unknown') if isinstance(action, str) else 'unknown', False

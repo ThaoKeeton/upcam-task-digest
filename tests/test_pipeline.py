@@ -54,6 +54,7 @@ class PipelineTests(unittest.TestCase):
         expected = self.result(); events.reverse()
         self.assertEqual(expected, self.result())
         events[:] = [events[1]]
+        self.data['records'][0]['task'].update(tfsId='demo-done',isDone=True)
         self.assertEqual(self.result()['digest']['tasks'][0]['category'], 'resolved')
 
     def test_event_categories_merge_once_with_deduplicated_evidence(self):

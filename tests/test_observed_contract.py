@@ -49,6 +49,7 @@ class ObservedContractTests(unittest.TestCase):
 
     def test_string_status_transition_resolution_and_reopen(self):
         done=event('update.taskflowstatus',content=json.dumps(transition()))
+        self.data['records'][0]['task'].update(tfsId='demo-done',isDone=True)
         self.assertEqual(self.report(done)['digest']['tasks'][0]['category'],'resolved')
         reopened=event('update.taskflowstatus',id='fictional-reopened',createTime='2026-01-02T02:00:00Z',
                        content=json.dumps(transition('demo-open')))
@@ -58,7 +59,7 @@ class ObservedContractTests(unittest.TestCase):
         invalid=['{', '[]', '{"tfsId":"a","tfsId":"b"}', '{"isDone":NaN}', 'x'*(MAX_CONTENT+1), transition()]
         for key in transition():
             value=transition(); value.pop(key); invalid.append(json.dumps(value))
-        for key,value in [('isDone',1),('isDone',False),('tfsId','unknown'),('taskflowstatus','other'),('oldTaskflowstatus',{})]:
+        for key,value in [('isDone',1),('tfsId','unknown'),('taskflowstatus','other'),('oldTaskflowstatus',{})]:
             data=transition(); data[key]=value; invalid.append(json.dumps(data))
         for content in invalid:
             with self.subTest(content_type=type(content).__name__):
@@ -76,12 +77,12 @@ class ObservedContractTests(unittest.TestCase):
         with self.assertRaises(CollectionError): self.report(raw)
 
     def test_observed_actions_allowlist_and_unverified_standard(self):
-        for action,category in [('create','new'),('involve.add','other'),('update_content','other'),('update_executor','other')]:
+        for action,category in [('create','new'),('involve.add','other'),('update_content','other')]:
             with self.subTest(action=action):
                 report=self.report(event(action))
                 self.assertEqual(report['digest']['tasks'][0]['category'],category)
                 self.assertTrue(report['ready_to_send'])
-        for action in ('standard','future.action',None,{}):
+        for action in ('standard','update_executor','future.action',None,{}):
             report=self.report(event(action))
             self.assertFalse(report['ready_to_send'])
             self.assertIn('未识别动态',report['markdown'])
