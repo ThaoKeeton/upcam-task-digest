@@ -52,20 +52,21 @@ def render_digest(data):
         f'{category["label"]} {len(groups[category["key"]])} 项'
         for category in active
     )
-    overview = f'📊 更新 {len(data["tasks"])} 项' + (f"：{counts}" if counts else "")
-    blocks = [f'**{template["title"]}**', f"📅 日期：{day}", overview]
+    overview = f'更新 {len(data["tasks"])} 项' + (f"：{counts}" if counts else "")
+    blocks = [f'**{template["title"]}**  \n日期：{day}  \n{overview}']
     for category in active:
         tasks = groups[category["key"]]
         heading = " ".join(filter(None, [category["icon"], category["label"]]))
-        blocks.append(f"**{heading}（{len(tasks)}）**")
+        task_blocks = []
         for index, task in enumerate(tasks, 1):
             # Literal numbering prevents ordered-list indentation in Markdown clients.
             prefix = f"{index}\\. "
-            blocks.append(
+            task_blocks.append(
                 f'{prefix}[{text(task["title"])}](<{task["url"]}>)  \n'
                 f'{text(task["summary"])}  \n'
                 f'当前：{text(task["status"])}｜负责人：{text(task["owner"])}'
             )
+        blocks.append(f"**{heading}（{len(tasks)}）**  \n" + BLOCK_SEPARATOR.join(task_blocks))
     return BLOCK_SEPARATOR.join(blocks) + "\n"
 
 
