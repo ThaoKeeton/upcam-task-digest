@@ -64,6 +64,13 @@ python -m unittest discover -s tests -v
 `summary_inputs` 保留完整 raw_content、解析后的 parsed_payload、comment 正文 body、清晰文本 text、事件 ID、createTime、附件/提及证据和复核原因，semantic_summary 固定为 null。
 评论 content 按 JSON 字符串解析，正文取内部 comment；attachments、dingFiles、files、mentions 保存在 payload_evidence，
 事件外层证据独立保存在 extra_evidence，不合并覆盖。原始字符串及完整已解析对象均保留，未知字段也不会丢弃。
+仅将作者 comment 中精确匹配的 `<br>` 转成换行，结果置于 normalized_body；body/raw_content 仍保持原文。
+卡片 text 仅合并显示空白并转义 Markdown，不进行通用 HTML 清洗、实体解码或属性解释；`<br/>`、`<BR>`、
+带属性标签、其他 HTML、残缺标签及控制字符继续待审核。只有换行标记而无正文也待审核。
+quote 只接受字符串并独立保存到 quote_evidence，注明 quote_role=quoted-context-not-author-opinion；
+不会拼进作者 text、摘要摘录或当作作者的新意见。内外层引用分来源保留，不覆盖、不推断原作者身份。
+非空引用会阻止把“收到”等简单正文静默筛掉；引用结构异常、包含未知标记或控制字符时继续待复核。
+引用原文不规范化、不执行，也不下载其中的链接或图片。
 重复键、非标准数值、损坏 JSON、错误包裹类型、缺失正文或错误附件类型均待复核，不猜测正文。
 renderMode 支持 text/markdown；两者的普通正文均作为字面文本供审核，再由现有渲染器转义 Markdown 控制符，不执行或直接渲染输入的链接、图片和格式。
 未知模式继续待复核。HTML/未知富文本、结构化正文，以及非换行/制表符的 Unicode 控制/格式字符不进入卡片摘录，
