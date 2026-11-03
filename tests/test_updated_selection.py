@@ -118,5 +118,34 @@ class UpdatedSelectionTests(unittest.TestCase):
             with self.assertRaises(CollectionError):client(t).collect('demo-project',day=day,page_size=size)
             self.assertEqual(t.requests,[])
 
+    def test_custom_half_open_window_drives_query_membership_and_event_filter(self):
+        window=('2026-01-01T16:50:00+08:00','2026-01-02T08:50:00+08:00')
+        task=dict(self.task,updated='2026-01-02T07:00:00+08:00')
+        events=[
+            {'id':'fictional-at-start','action':'create','createTime':window[0],
+             'boundToObjectId':task['id'],'boundToObjectType':'task'},
+            {'id':'fictional-at-end','action':'create','createTime':window[1],
+             'boundToObjectId':task['id'],'boundToObjectType':'task'},
+        ]
+        t=FakeTransport(page([task]),{'code':200,'result':task},page(events))
+        collection=client(t).collect('demo-project',day=self.day,window=window)
+        report=build_digest(collection,self.config,self.day,window=window)
+        query=parse_qs(urlsplit(t.requests[0].full_url).query)['q'][0]
+        self.assertEqual(query,"updated >= '2026-01-01T16:50:00+08:00' AND updated < '2026-01-02T08:50:00+08:00'")
+        self.assertEqual(collection['selection']['window_kind'],'custom')
+        self.assertEqual(report['digest']['date'],self.day)
+        self.assertEqual(report['audit'][0]['event_ids'],['fictional-at-start'])
+        self.assertEqual(report['scope']['start'],window[0])
+        self.assertEqual(report['scope']['end_exclusive'],window[1])
+
+    def test_custom_window_requires_both_aware_boundaries_and_report_end_date(self):
+        for window in [(None,'2026-01-02T08:50:00+08:00'),
+                       ('2026-01-01T16:50:00','2026-01-02T08:50:00'),
+                       ('2026-01-01T16:50:00+08:00','2026-01-03T08:50:00+08:00')]:
+            t=FakeTransport()
+            with self.assertRaises(CollectionError):
+                client(t).collect('demo-project',day=self.day,window=window)
+            self.assertEqual(t.requests,[])
+
 
 if __name__=='__main__':unittest.main()
