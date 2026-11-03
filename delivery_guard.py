@@ -17,7 +17,9 @@ from report_contract import validated_report_source
 
 
 class DeliveryBlocked(RuntimeError):
-    pass
+    def __init__(self, message, *, outcome="blocked"):
+        super().__init__(message)
+        self.outcome = outcome
 
 
 def _outside_repository(path):
@@ -30,6 +32,7 @@ def _outside_repository(path):
 def initialize_ledger(path):
     """Explicit provisioning only. Save returned identity independently of DB."""
     path = _outside_repository(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.close(fd)
     ledger_id = str(uuid.uuid4())
@@ -46,11 +49,14 @@ def initialize_ledger(path):
         """)
         db.execute("INSERT INTO metadata VALUES (?)", (ledger_id,))
     # Database commits sync file data; persist the newly created directory entry.
-    fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    # O_DIRECTORY is Unix-only. SQLite synchronous=FULL remains active on
+    # Windows; where directory handles are supported, also persist the entry.
+    if hasattr(os, "O_DIRECTORY"):
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
     return ledger_id
 
 
@@ -78,33 +84,32 @@ class DeliveryGuard:
         self.db.close()
 
     def attempt(self, report, *, tenant, project, destination, send,
-                current_collection=None, current_config=None, current_review=None):
+                current_collection=None, current_config=None, current_model=None,
+                current_effort=None, current_service_tier="default"):
         """send(markdown) must return exactly True ONLY after provider success.
 
         current_* inputs must come independently from the trusted local workflow,
-        not be extracted from the report or external task/comment payloads. Every
-        report requires human approval; older plain reports are not deliverable.
+        not be extracted from the report or external task/comment payloads. Only
+        an automatically summarized report whose provenance can be independently
+        reproduced is deliverable; no human approval token is accepted or needed.
 
         A timeout, rejection, unexpected response, crash or failed local commit
         leaves unknown/in_flight and blocks all further attempts. Reconciliation
-        is a separate manual operation; there is deliberately no retry/reset API.
+        is a separate recovery operation; there is deliberately no retry/reset API.
         """
-        if report.get("ready_to_send") is not True or report.get("issues"):
-            raise DeliveryBlocked("Report requires review")
-        # No legacy/plain-report fallback: all deliveries must be reproduced from
-        # independent inputs supplied by the trusted caller, never from report fields.
-        from manual_review import apply_review, validate_reviewed_report
+        if not isinstance(report, dict) or report.get("ready_to_send") is not True or report.get("issues"):
+            raise DeliveryBlocked("Automatic report validation did not pass")
+        # No legacy/plain-report fallback: generation and content are reproduced
+        # from independent current inputs, never trusted from the report itself.
+        from automated_digest import AutomatedDigestBlocked, validate_automated_report
         try:
-            if (report.get('report_type') != 'human-reviewed-v1'
-                    or not isinstance(report.get('human_review'), dict)
-                    or current_collection is None or current_config is None or current_review is None):
-                raise ValueError("Current evidence, config and independent review required")
-            validate_reviewed_report(report)
-            expected = apply_review(current_collection, current_config,
-                                    report['digest']['date'], current_review)
-            if expected.get('ready_to_send') is not True or report != expected:
-                raise ValueError("Report differs from validated current inputs")
-        except (ValueError, TypeError, KeyError, AttributeError, RuntimeError):
+            if (current_collection is None or current_config is None
+                    or not isinstance(current_model, str) or not current_model
+                    or not isinstance(current_effort, str) or not current_effort):
+                raise ValueError("Current evidence and model settings are required")
+            validate_automated_report(report, current_collection, current_config,
+                                      current_model, current_effort, current_service_tier)
+        except (ValueError, TypeError, KeyError, AttributeError, RuntimeError, AutomatedDigestBlocked):
             raise DeliveryBlocked("Invalid, stale or unverified report provenance") from None
         if any(not isinstance(v, str) or not v for v in (tenant, project, destination)):
             raise DeliveryBlocked("Missing delivery scope")
@@ -115,14 +120,26 @@ class DeliveryGuard:
         if (tenant, project) != (source_tenant, source_project):
             raise DeliveryBlocked("Delivery scope differs from report source")
         # Content is NOT part of the key: regenerated text cannot bypass the gate.
-        key = hashlib.sha256(json.dumps([source_tenant, source_project, report_day, destination],
+        # The half-open range distinguishes the two configured daily runs.
+        scope = report["scope"]
+        key = hashlib.sha256(json.dumps([
+            source_tenant, source_project, report_day, scope["start"],
+            scope["end_exclusive"], destination,
+        ],
                                        separators=(",", ":")).encode()).hexdigest()
         digest_hash = hashlib.sha256(report["markdown"].encode()).hexdigest()
         try:
             with self.db:
                 self.db.execute("INSERT INTO deliveries VALUES (?, ?, 'in_flight')", (key, digest_hash))
         except sqlite3.IntegrityError:
-            raise DeliveryBlocked("Delivery already claimed; reconcile before any further action") from None
+            try:
+                prior = self.db.execute("SELECT state FROM deliveries WHERE key=?", (key,)).fetchone()
+            except sqlite3.Error:
+                prior = None
+            if prior == ("confirmed",):
+                raise DeliveryBlocked("Delivery already confirmed; duplicate blocked") from None
+            raise DeliveryBlocked("Delivery already claimed; reconcile before any further action",
+                                  outcome="unknown") from None
         except sqlite3.Error:
             raise DeliveryBlocked("Claim not safely committed; no send attempted") from None
         # No sender call can occur before the durable claim transaction commits.
@@ -138,7 +155,7 @@ class DeliveryGuard:
                 self.db.execute("UPDATE deliveries SET state=? WHERE key=?",
                                 ("confirmed" if confirmed else "unknown", key))
         except sqlite3.Error:
-            raise DeliveryBlocked("Delivery outcome uncertain; do not retry") from None
+            raise DeliveryBlocked("Delivery outcome uncertain; do not retry", outcome="unknown") from None
         if not confirmed:
-            raise DeliveryBlocked("Delivery outcome unknown or rejected; do not retry")
+            raise DeliveryBlocked("Delivery outcome unknown or rejected; do not retry", outcome="unknown")
         return "confirmed"
