@@ -19,6 +19,9 @@ def text(value):
         ord(char) < 32 for char in value
     ):
         raise ValueError("Task fields must be nonempty single-line strings")
+    # Prevent the display renderer from decoding input entities into controls or
+    # altered visible text. This is display-only; source/audit fields stay raw.
+    value = value.replace("&", "&amp;")
     return re.sub(r"([\\`*_{}\[\]<>()!#+.>|~-])", r"\\\1", value)
 
 
