@@ -184,12 +184,13 @@ class Client:
             params["pageToken"] = token
         raise CollectionError("Pagination limit exceeded; incomplete collection")
 
-    def collect(self, project_id, *, include_archived=False, day=None, page_size=100):
-        # Caller freezes the Shanghai day before any request; there is no fallback query.
+    def collect(self, project_id, *, include_archived=False, day=None, page_size=100, window=None):
+        # Caller freezes the Shanghai report date and optional half-open window
+        # before any request; there is no fallback query.
         try:
-            selection = updated_selection(day)
+            selection = updated_selection(day, *(window or (None, None)))
         except (ValueError, TypeError):
-            raise CollectionError('Canonical report day must be fixed before collection') from None
+            raise CollectionError('Canonical report day and timezone-aware window must be fixed before collection') from None
         if type(page_size) is not int or not 1 <= page_size <= 100:
             raise CollectionError('Invalid page size')
         return self._collect(project_id, include_archived, page_size, selection)
@@ -214,7 +215,8 @@ class Client:
         if filtered:
             try:
                 for task in tasks:
-                    selected_updates[record_id(task)] = updated_in_window(task.get('updated'), selection['date'])
+                    selected_updates[record_id(task)] = updated_in_window(
+                        task.get('updated'), selection['date'], selection['start'], selection['end_exclusive'])
             except ValueError:
                 raise CollectionError('Returned candidate violates updated-time selection') from None
         output = []
@@ -227,7 +229,8 @@ class Client:
                 raise CollectionError("Detail identity or project mismatch")
             if filtered:
                 try:
-                    current_update = updated_in_window(detail.get('updated'), selection['date'])
+                    current_update = updated_in_window(
+                        detail.get('updated'), selection['date'], selection['start'], selection['end_exclusive'])
                 except ValueError:
                     raise CollectionError('Task changed outside selection or has invalid updated timestamp') from None
                 if current_update != selected_updates[task_id]:

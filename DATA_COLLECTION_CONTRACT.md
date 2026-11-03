@@ -1,0 +1,87 @@
+# Teambition 采集与内容规则
+
+本文保留并更新主分支既有的采集、字段映射、动态归类和时间窗口契约。桌面应用遵循这些规则；未知、未核验或覆盖不完整时自动发送会停止。具体日报版式和内容筛选规则仍由仓库模板版本维护。
+
+## 受控人员与状态映射
+
+显式 `--collect` 在采集前通过 `load_runtime_mappings` 从 `TEAMBITION_USER_MAP_JSON` 加载用户 ID→姓名 JSON 对象，
+只在内存中使用；不会落盘、打印整个映射或把它加入报告/audit。库调用需显式调用该加载函数，再传给 `build_digest`。
+`--fixture` 不读取环境映射，避免离线回归意外接触真实数据；所有测试仅注入虚构环境字典。
+
+环境变量缺失时沿用显式配置；若变量已配置，则空字符串、空对象、null、数组、重复键（包括同值重复）、
+无效 ID、空姓名、非字符串姓名、首尾空白或控制/格式字符均失败。环境与配置中的 owner_names 仅在同 ID 同名时合并，
+同 ID 不同姓名直接阻断，绝不静默覆盖。不同 ID 同姓名允许存在，不能因重名推断同一人。
+错误仅报告固定原因，不回显变量值、用户 ID 或姓名。单份 JSON 上限 1MiB。
+
+人员映射不会改变 view.verified/api_contract_verified 等审核标记；未知 ID 仍显示待复核并保持发送阻断。
+生成的受控日报会按既有格式包含所涉任务的负责人姓名，但不会输出整个映射或无关成员；不得把生产报告作为公开日志。
+映射值不得提交至代码、测试样例、仓库或公开输出，也不要把环境变量内容作为命令参数或诊断文本输出。
+
+状态直接使用受控配置文件中的 status_names（ID→名称）和 resolved_status_ids（解决状态 ID 列表），
+必须来自已核验资料；没有状态映射时不猜名称/解决状态。重复键、空状态名、重复解决 ID 或解决 ID 缺少名称映射均失败。
+配置 JSON 同样严格拒绝所有层级的重复键。代码不查询状态列表、不新增状态权限，也不会从人员环境变量推导状态。
+
+## 采集与归类契约
+
+显式采集入口：`python digest_pipeline.py --config /受控目录/config.json --collect`（本轮未执行）。
+采用已交接验证的 `/api/v3/project/{projectId}/task/query` 的 `q` 参数，例如虚构日期：
+`updated >= '2026-01-02T00:00:00+08:00' AND updated < '2026-01-03T00:00:00+08:00'`。
+该口径是**当前任务最近更新时间在昨天区间内**，不是昨日任意事件的历史全覆盖。昨天有评论但今天再次更新的任务
+可能不属于此视图；这是沿用用户已设置视图的明确范围，不增加旁路全量扫描。
+日期在任何采集/文件读取前固定为 Asia/Shanghai 的昨天，再贯穿归类和报告窗口，跨午夜不改变日期。
+使用 `[00:00, 次日00:00)` 半开区间；无时区的动态时间待复核。
+显式日期严格要求 `YYYY-MM-DD`；不接受 `20260102`、ISO 周日期等别名。
+库调用 `build_digest` 必须传入采集前固定的日期，不再提供采集后推算昨天的默认值。
+采集结果记录 tenant_id/project_id，必须与配置一致；报告 scope 绑定相同来源身份。
+所有请求固定至 `https://open.teambition.com`，只允许以下 GET，禁止重定向，不提供通用写接口：
+
+- `/api/v3/project/{projectId}/task/query`：每页保留相同、由固定日期生成的 q；默认 includeArchived=false，pageSize 默认 100（可显式设为 1–100）。
+- `/api/v3/task/query`：逐任务详情、校验项目与任务身份。
+- `/api/v3/task/{taskId}/activity/list`：仅在候选任务确定后读取动态。事件使用 createTime 窗口，不能以任务时间或当前状态证明昨日事件。
+
+按 `nextPageToken` 翻页直到明确空值；空页带 token 继续，重复 token、页数上限、缺失分页字段、
+同 ID 不同内容、详情不匹配均失败，不输出“完整日报”。相同 ID 相同内容去重。
+每次请求至少间隔 250ms；GET 超时/连接失败、429 与特定 5xx 最多尝试 3 次。
+遵守 Retry-After（超过 60 秒预算直接失败），鉴权/业务错误不重试。响应大小限制 8MiB。
+默认硬预算：每个分页流 20 页、整个客户端 300 次请求（重试计入）、100 个候选任务、10,000 条返回记录、120 秒。
+超过预算、等待/响应越过截止时间均失败，不把部分结果输出为完整日报；不假设活动有序而提前停页。
+`_collect_bounded_fixture` 只用于注入虚构 transport 的通用离线分页测试，标记 selection.mode=offline-unfiltered、view_equivalent=false，
+不是生产入口。`Client.collect` 只调用带固定 q 的生产路径，查询错误、超预算或结构异常均不回退该测试路径。
+返回候选的 updated 必须显式带时区且处于所选半开区间；详情 updated 与列表不一致时失败，防止采集中途状态变化。
+selection 记录模式 v3-project-updated-half-open、固定日期、起止时间、q、basis=current-latest-updated 和
+historical_event_coverage=false，并进入报告 scope。生成日报时重新校验选择契约与日期、任务范围一致。
+这仍不是数据库一致性快照；列表完成后的新增/移出候选以及权限不可见项目内容不能据此保证覆盖。
+接口没有提供一致性快照；分页完成只意味着本次可见数据遍历完成，不保证并发修改、已删除内容、
+授权不可见任务、或已归档历史的完整性。
+
+生产配置应参考虚构 `tests/fixtures/config.json`，包含 tenant_id、project_id、include_archived，
+以及通过既有只读测试脱敏核验的以下内容（demo-* ID 与人员均为虚构）：
+
+- `activity_fields`：固定为 time=createTime、action=action；不允许回退任务 created 或任意覆盖字段。
+- 动作采用明确适配表：create→新建、comment→评论复核、involve.add/update_content→其他变更；update_executor 需通过结构校验。standard 仅识别受限标题候选，其余保持未知待复核，未来动作同样待复核。
+- `update.taskflowstatus`：安全解析 content JSON 字符串，要求 tfsId、oldTfsId、taskflowstatus、oldTaskflowstatus、isDone 齐全且类型、ID/名称映射一致；重复 JSON 键、非标准数值、缺失/错误字段都待复核。当前只支持已核验的字符串状态名，其他结构不猜测。
+- 事件 isDone 只验证结构类型并以 event_is_done 保留，**不假设它表达目标状态，也不要求与解决状态一致**。解决与否由事件目标状态 ID 及已核验映射判断。
+- 同一任务当日状态事件按时间排序，前一目标 ID 必须衔接后一旧状态 ID；任意同时间多次状态变化、事件链断裂、最后目标与当前 tfsId 不符或当前完成标记冲突均待复核。当前状态只用于校验，不能凭它生成昨日解决事件。oldTfsId 与 tfsId 相同的事件标记待复核，即使目标名称为已解决，也不能据此认定进入已解决。
+- update_executor 的 content 按有界、无重复键的 JSON 对象解析，要求 _executorId/_oldExecutorId；姓名仅从 owner_names 的 ID 映射获得，缺失不猜测。content.payload 和事件外层 payload 分开保留；fromAutomation 必须为布尔值，双来源冲突则待复核。该标记只描述来源，不能推断操作人身份。执行人事件按时间排序后检查旧/新 ID 链连续性、任何同一时刻的多条变更、末次目标与当前 executorId 一致性；任一冲突均阻断发送，不能用事件 ID 排序消除同刻歧义。
+- standard 只对 title 精确为“关联了提交”，或以该短语加冒号/空白分隔后续文本，并且有 customCreator.name 的 JSON 识别 commit-link-title 候选。该受限前缀后的内容允许 LF/CRLF 多行，原始 title 不归一化、不截断；额外控制字符仍拒绝识别。否定句、前置描述、无分隔后缀及其他标题不匹配；未匹配不推断为提交。候选仍需复核，customCreator.name 仅是来源原文，不作为已核验成员或实际提交的证明。
+- audit.status_transitions 保留状态 ID、原始事件布尔值及事件 ID；audit.parsed_changes 保留执行人/来源/标题候选结构，原始 activity_evidence 始终保留。audit.executor_conflict/status_noop 明确记录执行人冲突及状态 ID 未变化的复核原因。
+- 每条动态必须具有匹配的 boundToObjectId 和 boundToObjectType=task；缺失或跨任务/类型冲突即失败。若同时存在 taskId，也必须一致。
+- `resolved_status_ids`、`status_names`、`owner_names`：已核验 ID 映射；无法识别则待复核。
+- `view.task_equals`：已核验的稳定视图字段等值筛选；目前只接受 executorId、tasklistId、stageId、tfsId、scenariofieldconfigId、visible、parentTaskId 的字符串等值。
+- `view.verified` 与 `view.evidence`：记录实际“昨天”视图核对依据；`api_contract_verified` 记录字段契约已核验。
+
+默认这些核验标记均为 false。它们是操作方的确认记录，不能靠改成 true 替代实际核验。
+已接入交接的动态字段、已观察动作以及经独立只读验证的最近更新时间筛选；不扩大为历史任意事件口径。
+`view` 仅接受 verified、evidence、task_equals 三个字段；未知字段、拼写错误、错误类型及不支持的筛选
+在采集前直接失败，即使零任务也不能静默忽略。不支持的视图规则必须先扩展适配器并补测试。
+同任务事件合并一次：存在未知/歧义时归其他变更待复核；否则最后一次状态变更为已解决优先，
+其次新建、最后其他；含评论因语义待复核暂归其他变更。后续重开覆盖此前解决；同一时刻多次状态变更待复核。
+分类在动态与标题、负责人、当前状态等所有复核检查后决定；缺失负责人等情况也不能留在已解决分类。
+创建任务字段与当前 isDone 都不能证明昨天新建/解决。当前状态与负责人仅作当前信息展示。
+未知时间会保留候选任务并明确“是否属于本日待复核”，不将其声称为昨日已发生动态。
+已由更新时间视图选中但没有本日可归类动态的任务也保留为“动态证据不足，待复核”，不静默漏掉视图成员。
+
+
+## 自动发送门禁说明
+
+桌面应用把采集范围、映射、编辑规则、模型与推理设置绑定到生成结果，并在本机重新验证后才允许发送。校验失败、来源覆盖不完整或结果存在歧义时停止。发送前持久化防重占位；请求超时、服务端结果不明或本机记账失败均进入结果不明状态，不自动重试。`manual_review.py` 是保留的离线分析工具，不参与桌面应用的发送流程。

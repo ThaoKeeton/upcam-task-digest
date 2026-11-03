@@ -58,7 +58,7 @@ class FormatTests(unittest.TestCase):
         for absent in ("已解决", "新建任务", "其他变更"):
             self.assertNotIn(absent, output)
         self.data["tasks"] = []
-        self.assertEqual(render_digest(self.data), "**Teambition｜UPCAM 项目任务动态日报**  \n🗓️ 日期：2026-01-01  \n📊 更新 0 项\n")
+        self.assertEqual(render_digest(self.data), "**Teambition｜UPCAM 项目任务动态日报**  \n🗓️ 日期：2026-01-01  \n📊 更新 0 项\n\n\u3000\n\nℹ️ 经完整采集，筛选时间段内未发现任务动态。\n")
 
     def test_spacer_paragraphs_and_literal_numbering(self):
         output = render_digest(self.data)
