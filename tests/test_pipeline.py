@@ -34,21 +34,21 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             day_window(now=datetime(2026,1,2))
         result = self.result()
-        self.assertEqual(result['digest']['tasks'][0]['summary'], '评论 2 条')
+        self.assertIn('评论 2 条', result['digest']['tasks'][0]['summary'])
         self.assertEqual(result['audit'][0]['event_ids'], ['demo-event-1','demo-event-2'])
-        self.assertTrue(result['ready_to_send'])
+        self.assertFalse(result['ready_to_send'])
 
     def test_old_task_comment_and_current_status_never_infers_resolution(self):
         self.data['records'][0]['task'].update(isDone=True, tfsId='demo-done', created='2026-01-02T00:00:00Z')
-        self.assertEqual(self.result()['digest']['tasks'][0]['category'], 'progress')
+        self.assertEqual(self.result()['digest']['tasks'][0]['category'], 'other')
         self.data['records'][0]['activities'] = []
         self.assertEqual(self.result()['digest']['tasks'], [])
 
     def test_status_resolution_reopen_and_deterministic_order(self):
         events = self.data['records'][0]['activities']
         events[:] = [
-            {'id':'a','action':'demo.status','created':'2026-01-02T01:00:00Z','data':{'newStatusId':'demo-done'}},
-            {'id':'b','action':'demo.status','created':'2026-01-02T02:00:00Z','data':{'newStatusId':'demo-open'}},
+            {'boundToObjectId':'demo-old-task','boundToObjectType':'task','id':'a','action':'update.taskflowstatus','createTime':'2026-01-02T01:00:00Z','content':json.dumps({'tfsId': 'demo-done', 'oldTfsId': 'demo-open', 'taskflowstatus': '已解决', 'oldTaskflowstatus': '待处理', 'isDone': True})},
+            {'boundToObjectId':'demo-old-task','boundToObjectType':'task','id':'b','action':'update.taskflowstatus','createTime':'2026-01-02T02:00:00Z','content':json.dumps({'tfsId': 'demo-open', 'oldTfsId': 'demo-open', 'taskflowstatus': '待处理', 'oldTaskflowstatus': '待处理', 'isDone': False})},
         ]
         self.assertEqual(self.result()['digest']['tasks'][0]['category'], 'other')
         expected = self.result(); events.reverse()
@@ -58,24 +58,24 @@ class PipelineTests(unittest.TestCase):
 
     def test_event_categories_merge_once_with_deduplicated_evidence(self):
         events = self.data['records'][0]['activities']
-        events[:] = [{'id':'a','action':'demo.created','created':'2026-01-02T01:00:00Z'}]
+        events[:] = [{'boundToObjectId':'demo-old-task','boundToObjectType':'task','id':'a','action':'create','createTime':'2026-01-02T01:00:00Z'}]
         events.append(copy.deepcopy(events[0]))
         report = self.result()
         self.assertEqual(report['digest']['tasks'][0]['category'],'new')
         self.assertEqual(report['digest']['tasks'][0]['summary'],'新建记录 1 条')
-        events.append({'id':'b','action':'demo.comment','created':'2026-01-02T02:00:00Z'})
+        events.append({'boundToObjectId':'demo-old-task','boundToObjectType':'task','id':'b','action':'comment','createTime':'2026-01-02T02:00:00Z'})
         report = self.result()
-        self.assertEqual(report['digest']['tasks'][0]['category'],'progress')
+        self.assertEqual(report['digest']['tasks'][0]['category'],'other')
         self.assertEqual(len(report['digest']['tasks']),1)
 
     def test_unknown_type_time_status_target_and_same_time_status_block_send(self):
         cases = [
-            [{'id':'a','action':'unrecognized','created':'2026-01-02T01:00:00Z'}],
-            [{'id':'a','action':'demo.comment','created':'not-a-time'}],
-            [{'id':'a','action':'demo.status','created':'2026-01-02T01:00:00Z'}],
-            [{'id':'a','action':'demo.status','created':'2026-01-02T01:00:00Z','data':{'newStatusId':'unmapped'}}],
-            [{'id':'a','action':'demo.status','created':'2026-01-02T01:00:00Z','data':{'newStatusId':'demo-done'}},
-             {'id':'b','action':'demo.status','created':'2026-01-02T01:00:00Z','data':{'newStatusId':'demo-open'}}],
+            [{'boundToObjectId':'demo-old-task','boundToObjectType':'task','id':'a','action':'unrecognized','createTime':'2026-01-02T01:00:00Z'}],
+            [{'boundToObjectId':'demo-old-task','boundToObjectType':'task','id':'a','action':'comment','createTime':'not-a-time'}],
+            [{'boundToObjectId':'demo-old-task','boundToObjectType':'task','id':'a','action':'update.taskflowstatus','createTime':'2026-01-02T01:00:00Z'}],
+            [{'boundToObjectId':'demo-old-task','boundToObjectType':'task','id':'a','action':'update.taskflowstatus','createTime':'2026-01-02T01:00:00Z','content':json.dumps({'tfsId': 'unmapped', 'oldTfsId': 'demo-open', 'taskflowstatus': '未知状态', 'oldTaskflowstatus': '待处理', 'isDone': False})}],
+            [{'boundToObjectId':'demo-old-task','boundToObjectType':'task','id':'a','action':'update.taskflowstatus','createTime':'2026-01-02T01:00:00Z','content':json.dumps({'tfsId': 'demo-done', 'oldTfsId': 'demo-open', 'taskflowstatus': '已解决', 'oldTaskflowstatus': '待处理', 'isDone': True})},
+             {'boundToObjectId':'demo-old-task','boundToObjectType':'task','id':'b','action':'update.taskflowstatus','createTime':'2026-01-02T01:00:00Z','content':json.dumps({'tfsId': 'demo-open', 'oldTfsId': 'demo-open', 'taskflowstatus': '待处理', 'oldTaskflowstatus': '待处理', 'isDone': False})}],
         ]
         for events in cases:
             with self.subTest(events=events):
@@ -114,7 +114,7 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaises(CollectionError): self.result()
 
     def test_view_filters_and_archive_policy(self):
-        self.config['view']['task_equals']={'created':'anything'}
+        self.config['view']['task_equals']={'createTime':'anything'}
         with self.assertRaises(CollectionError): self.result()
         self.config['view']['task_equals']={'missing':'anything'}
         with self.assertRaises(CollectionError): self.result()
@@ -135,7 +135,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result.returncode,2)
         report=json.loads(result.stdout)
         self.assertFalse(report['ready_to_send'])
-        self.assertIn('**💬 工作进展（1）**', report['markdown'])
+        self.assertIn('**📝 其他变更（1）**', report['markdown'])
         self.assertEqual(result.stderr,'')
 
 

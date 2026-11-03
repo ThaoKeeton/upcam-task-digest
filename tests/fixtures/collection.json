@@ -3,14 +3,49 @@
   "project_id": "demo-project",
   "include_archived": false,
   "pagination_complete": true,
-  "records": [{
-    "task": {"id": "demo-old-task", "projectId": "demo-project", "isArchived": false,
-      "content": "虚构旧任务", "executorId": "demo-person", "tfsId": "demo-open",
-      "created": "2020-01-01T00:00:00Z", "updated": "2020-01-01T00:00:00Z", "isDone": false},
-    "activities": [
-      {"id": "demo-event-1", "taskId": "demo-old-task", "action": "demo.comment", "created": "2026-01-01T16:00:00Z"},
-      {"id": "demo-event-2", "taskId": "demo-old-task", "action": "demo.comment", "created": "2026-01-02T15:59:59Z"},
-      {"id": "demo-event-next-day", "taskId": "demo-old-task", "action": "demo.status", "created": "2026-01-02T16:00:00Z", "data": {"newStatusId": "demo-done"}}
-    ]
-  }]
+  "records": [
+    {
+      "task": {
+        "id": "demo-old-task",
+        "projectId": "demo-project",
+        "isArchived": false,
+        "content": "虚构旧任务",
+        "executorId": "demo-person",
+        "tfsId": "demo-open",
+        "created": "2020-01-01T00:00:00Z",
+        "updated": "2020-01-01T00:00:00Z",
+        "isDone": false
+      },
+      "activities": [
+        {
+          "id": "demo-event-1",
+          "action": "comment",
+          "boundToObjectId": "demo-old-task",
+          "boundToObjectType": "task",
+          "createTime": "2026-01-01T16:00:00Z",
+          "content": "虚构：已定位导出异常，仍待修复。"
+        },
+        {
+          "id": "demo-event-2",
+          "action": "comment",
+          "boundToObjectId": "demo-old-task",
+          "boundToObjectType": "task",
+          "createTime": "2026-01-02T15:59:59Z",
+          "content": "收到"
+        },
+        {
+          "id": "demo-event-next-day",
+          "action": "update.taskflowstatus",
+          "boundToObjectId": "demo-old-task",
+          "boundToObjectType": "task",
+          "createTime": "2026-01-02T16:00:00Z",
+          "content": "{\"tfsId\": \"demo-done\", \"oldTfsId\": \"demo-open\", \"taskflowstatus\": \"已解决\", \"oldTaskflowstatus\": \"待处理\", \"isDone\": true}"
+        }
+      ]
+    }
+  ],
+  "selection": {
+    "mode": "offline-fixture",
+    "view_equivalent": false
+  }
 }

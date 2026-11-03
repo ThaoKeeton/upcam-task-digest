@@ -9,7 +9,8 @@ import sys
 
 from render_digest import render_digest, text
 from report_contract import SHANGHAI, canonical_window, strict_day
-from teambition_readonly import Client, CollectionError, identifier, record_id
+from teambition_readonly import Client, CollectionError, SelectionUnavailable, identifier, record_id
+from activity_adapter import comment_input, parse_activity, validate_binding
 
 
 def day_window(day=None, now=None):
@@ -79,16 +80,19 @@ def build_digest(collection, config, day):
     tenant = identifier(collection.get("tenant_id"))
     if tenant != identifier(config.get("tenant_id")) or project != identifier(config.get("project_id")):
         raise CollectionError("Collection source differs from configuration")
-    schema = config.get("activity_fields", {})
-    rules = config.get("action_rules", {})
+    schema = config.get("activity_fields", {"time": "createTime", "action": "action"})
+    if schema != {"time": "createTime", "action": "action"} or config.get("action_rules"):
+        raise CollectionError("Unsupported activity schema override")
     issues = []
     if view.get("verified") is not True or not view.get("evidence"):
         issues.append("昨天视图口径尚未核验")
     if config.get("api_contract_verified") is not True:
         issues.append("API 字段及事件映射尚未核验")
+    if collection.get('selection', {}).get('view_equivalent') is not True:
+        issues.append("更新时间筛选与昨天视图的等价性尚未核验")
     if collection.get("include_archived") != config.get("include_archived", False):
         raise CollectionError("Archive scope mismatch")
-    items, audit, seen = [], [], set()
+    items, audit, summary_inputs, seen = [], [], [], set()
     for record in collection["records"]:
         task = record["task"]
         task_id = record_id(task)
@@ -109,7 +113,7 @@ def build_digest(collection, config, day):
             raise CollectionError("Missing configured view filter field")
         if any(field(task, key) != value for key, value in filters.items()):
             continue
-        events, unknown_time, ids = [], False, {}
+        events, unknown_time, ids, comments, undated_ids = [], False, {}, [], []
         for raw in record["activities"]:
             event_id = record_id(raw, task_fallback=False)
             if event_id in ids:
@@ -117,31 +121,26 @@ def build_digest(collection, config, day):
                     raise CollectionError("Conflicting event identity")
                 continue
             ids[event_id] = raw
-            if raw.get("taskId", task_id) != task_id:
-                raise CollectionError("Event belongs to another task")
+            validate_binding(raw, task_id)
             try:
-                when = timestamp(field(raw, schema.get("time", "created")))
+                when = timestamp(raw.get("createTime"))
             except (ValueError, TypeError):
                 unknown_time = True
+                undated_ids.append(event_id)
+                if raw.get('action') == 'comment':
+                    comments.append(comment_input(raw, event_id, None))
                 continue
             if not start <= when < end:
                 continue
-            action = field(raw, schema.get("action", "action"))
-            rule = rules.get(action, {}) if isinstance(action, str) else {}
-            kind = rule.get("kind", "unknown")
-            if kind not in ("comment", "created", "status", "other"):
-                kind = "unknown"
-            target = field(raw, rule.get("target_field", "data.newStatusId")) if kind == "status" else None
-            # Require a verified target ID for resolution; never read task.isDone.
-            resolved = kind == "status" and isinstance(target, str) and target in config.get("resolved_status_ids", [])
-            if kind == "status" and (not isinstance(target, str) or target not in config.get("status_names", {})):
-                kind = "unknown"
+            kind, resolved = parse_activity(raw, config)
+            if kind == "comment":
+                comments.append(comment_input(raw, event_id, when))
             events.append((when, event_id, kind, resolved))
         if not events and not unknown_time:
             continue
         events.sort(key=lambda e: (e[0], e[1]))
         counts = Counter(e[2] for e in events)
-        review = unknown_time or bool(counts["unknown"])
+        review = unknown_time or bool(counts["unknown"]) or bool(comments)
         # The last status transition of the day wins; reopen is never resolved.
         status_events = [e for e in events if e[2] == "status"]
         ambiguous_status = bool(status_events and sum(e[0] == status_events[-1][0] for e in status_events) > 1)
@@ -157,6 +156,16 @@ def build_digest(collection, config, day):
             descriptions.append("存在时间不明动态，是否属于本日待复核")
         if ambiguous_status:
             descriptions.append("同一时刻多次状态变更，待复核")
+        if comments:
+            comments.sort(key=lambda c: (c['create_time'] or '', c['event_id']))
+            candidates = [c for c in comments if not c['omit_from_summary']]
+            excerpts = [c['text'] for c in candidates if c['text']]
+            descriptions.append("评论内容语义归纳待复核")
+            if excerpts:
+                excerpt = ' / '.join(excerpts)
+                descriptions.append("原文摘录：" + excerpt[:240] + ("…（全文见复核输入）" if len(excerpt) > 240 else ""))
+            summary_inputs.append({'task_id': task_id, 'comments': comments,
+                                   'semantic_summary': None, 'needs_review': True})
         title = safe_label(task.get("content"))
         owner = safe_label(config.get("owner_names", {}).get(task.get("executorId")))
         status = safe_label(config.get("status_names", {}).get(task.get("tfsId")))
@@ -177,14 +186,18 @@ def build_digest(collection, config, day):
         items.append({"category": category, "title": title,
                       "url": f"https://www.teambition.com/project/{project}/task/{task_id}",
                       "summary": "；".join(descriptions), "owner": owner, "status": status})
-        audit.append({"task_id": task_id, "event_ids": [e[1] for e in events], "needs_review": review})
+        audit.append({"task_id": task_id, "event_ids": [e[1] for e in events], "needs_review": review,
+                      "undated_event_ids": sorted(undated_ids),
+                      "activity_evidence": [ids[e[1]] for e in events] + [ids[k] for k in sorted(undated_ids)]})
     combined = sorted(zip(items, audit), key=lambda pair: pair[1]["task_id"])
     data = {"date": start.date().isoformat(), "tasks": [pair[0] for pair in combined]}
     return {"digest": data, "markdown": render_digest(data), "audit": [pair[1] for pair in combined],
+            "summary_inputs": sorted(summary_inputs, key=lambda item: item['task_id']),
             "issues": issues, "ready_to_send": not issues,
             "scope": {"tenant_id": tenant, "project_id": project,
                       "timezone": "Asia/Shanghai", "start": start.isoformat(), "end_exclusive": end.isoformat(),
                       "include_archived": config.get("include_archived", False),
+                      "selection": collection.get('selection'),
                       "pagination_complete": True, "snapshot_guaranteed": False}}
 
 
@@ -205,11 +218,14 @@ def main():
             collection = json.loads(args.fixture.read_text(encoding="utf-8"))
         else:
             collection = Client(config["tenant_id"]).collect(config["project_id"],
-                         include_archived=config.get("include_archived", False))
+                         include_archived=config.get("include_archived", False), day=fixed_day)
         result = build_digest(collection, config, fixed_day)
         # Output is sensitive at runtime. Operator must redirect outside the repository.
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["ready_to_send"] else 2
+    except SelectionUnavailable:
+        print("Digest blocked: verified updated-time API selection semantics unavailable; no request attempted.", file=sys.stderr)
+        return 1
     except (CollectionError, ValueError, TypeError, KeyError, OSError):
         print("Digest failed; no send attempted. Check configuration/schema/collection.", file=sys.stderr)
         return 1

@@ -3,15 +3,23 @@
   "project_id": "demo-project",
   "include_archived": false,
   "api_contract_verified": false,
-  "view": {"verified": false, "evidence": "", "task_equals": {}},
-  "activity_fields": {"time": "created", "action": "action"},
-  "action_rules": {
-    "demo.comment": {"kind": "comment"},
-    "demo.created": {"kind": "created"},
-    "demo.status": {"kind": "status", "target_field": "data.newStatusId"},
-    "demo.renamed": {"kind": "other"}
+  "view": {
+    "verified": false,
+    "evidence": "",
+    "task_equals": {}
   },
-  "resolved_status_ids": ["demo-done"],
-  "status_names": {"demo-done": "已解决", "demo-open": "待处理"},
-  "owner_names": {"demo-person": "虚构成员"}
+  "activity_fields": {
+    "time": "createTime",
+    "action": "action"
+  },
+  "resolved_status_ids": [
+    "demo-done"
+  ],
+  "status_names": {
+    "demo-done": "已解决",
+    "demo-open": "待处理"
+  },
+  "owner_names": {
+    "demo-person": "虚构成员"
+  }
 }

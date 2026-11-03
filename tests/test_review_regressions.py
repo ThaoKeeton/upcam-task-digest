@@ -70,6 +70,8 @@ class ReviewRegressions(unittest.TestCase):
                     digest_pipeline.build_digest(self.collection,config,'2026-01-02')
 
     def test_delivery_rejects_date_alias_window_mismatch_and_source_relabel(self):
+        self.collection['records'][0]['activities']=[{'id':'demo-created','action':'create','createTime':'2026-01-02T01:00:00Z','boundToObjectId':'demo-old-task','boundToObjectType':'task'}]
+        self.collection['selection']={'mode':'fictional-verified-test','view_equivalent':True}
         report=self.report()
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'ledger.sqlite3'; identity=initialize_ledger(path)
@@ -101,8 +103,8 @@ class ReviewRegressions(unittest.TestCase):
     def test_missing_owner_after_resolved_event_forces_review_category(self):
         self.config['owner_names']={}
         self.collection['records'][0]['activities']=[{
-            'id':'demo-resolved','action':'demo.status','created':'2026-01-02T01:00:00Z',
-            'data':{'newStatusId':'demo-done'}}]
+            'boundToObjectId':'demo-old-task','boundToObjectType':'task','id':'demo-resolved','action':'update.taskflowstatus','createTime':'2026-01-02T01:00:00Z',
+            'content':json.dumps({'tfsId': 'demo-done', 'oldTfsId': 'demo-open', 'taskflowstatus': '已解决', 'oldTaskflowstatus': '待处理', 'isDone': True})}]
         report=self.report()
         self.assertFalse(report['ready_to_send'])
         self.assertEqual(report['digest']['tasks'][0]['category'],'other')

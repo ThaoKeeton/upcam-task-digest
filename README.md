@@ -1,7 +1,8 @@
 # upcam-task-digest
 
 UPCAM 日报格式模板、企业 v3 只读采集器、确定性日报及离线回归测试。
-默认使用虚构 fixtures；仅显式 `--collect` 才访问 Teambition。没有钉钉 HTTP 发送器和定时任务。
+默认使用虚构 fixtures；当前 `--collect` 在任何请求前明确阻断，因为更新时间筛选 API 语义尚未核验。
+没有钉钉 HTTP 发送器和定时任务，不会退回全项目完整历史扫描。
 生产 API 字段映射、用户“昨天”视图口径与持久状态存储仍待核验，不能直接启用自动发送。
 
 ## 使用
@@ -55,15 +56,24 @@ python digest_pipeline.py --config tests/fixtures/config.json --fixture tests/fi
 python -m unittest discover -s tests -v
 ```
 
-第一个命令返回 JSON（`digest`、原样渲染的 `markdown`、`audit`、`issues`、`scope`）。
+第一个命令返回 JSON（`digest`、原样渲染的 `markdown`、`audit`、`summary_inputs`、`issues`、`scope`）。
 示例有意未标记生产口径已核验，退出码为 2；0 表示通过配置与数据检查，1 表示采集或结构错误。
 退出码 0 不代表已发送或已证明生产系统可靠。原始动态文本不会被当成指令或自动编造工作摘要。
-评论仅确定性输出“评论 N 条”，不推断完成情况。生产输出可能含企业信息，切勿提交或写进 CI 日志。
-**摘要功能仍不完整**：当前只统计评论数量，没有阅读或总结实际评论内容，不能将输出称为已完成的工作内容摘要。
+评论输出数量、明确标注的原文摘录和“语义归纳待复核”，不推断完成情况。生产输出可能含企业信息，切勿提交或写进 CI 日志。
+**摘要功能仍不完整**：已提取可审查的评论内容，但没有自动语义总结。含评论任务统一待复核，不能直接发送。
+`summary_inputs` 保留完整 raw_content、事件 ID、createTime、额外附件/提及证据和提取状态，semantic_summary 固定为 null。
+只对完全匹配“收到/好的/谢谢/ok/👍”且没有附件等额外证据的回复标记 omit_from_summary；这只是候选过滤，
+原文不会从复核输入删除，因为确认回复在上下文中也可能构成实质决定。“好的，但仍有阻塞”等完整保留。
+普通文本仅合并显示空白；富文本、结构化内容、缺失内容均保留原始证据并待复核，不尝试猜测格式或丢弃附件。
+卡片摘录最多 240 字符，超出明确提示复核输入有全文；评论及附件证据超过 64KiB 则失败而非静默截断。
+未知时间的评论保留证据并标记是否属于本日待复核。所有评论内容均视为数据，不执行其中的指令。
 
 ## 采集与归类契约
 
-生产采集入口（本轮未执行）：`python digest_pipeline.py --config /受控目录/config.json --collect`。
+待接通入口：`python digest_pipeline.py --config /受控目录/config.json --collect`。
+当前明确返回选择契约缺失错误，不读取凭据、不发请求。不能以 view.verified=true 解除该阻断。
+用户要求沿用“昨天”视图按更新时间选取候选任务；但未交接可验证的服务端筛选参数、操作符和边界语义，
+因此没有编造 TQL 或把客户端过滤宣称为等价实现。必须先取得确切 API 选择语义，再实现生产适配器。
 日期在任何采集/文件读取前固定为 Asia/Shanghai 的昨天，再贯穿归类和报告窗口，跨午夜不改变日期。
 使用 `[00:00, 次日00:00)` 半开区间；无时区的动态时间待复核。
 显式日期严格要求 `YYYY-MM-DD`；不接受 `20260102`、ISO 周日期等别名。
@@ -71,32 +81,40 @@ python -m unittest discover -s tests -v
 采集结果记录 tenant_id/project_id，必须与配置一致；报告 scope 绑定相同来源身份。
 所有请求固定至 `https://open.teambition.com`，只允许以下 GET，禁止重定向，不提供通用写接口：
 
-- `/api/v3/project/{projectId}/task/query`：全项目分页，显式 `includeArchived=false` 默认排除归档/回收站任务。
+- `/api/v3/project/{projectId}/task/query`：候选列表端点；更新时间筛选适配器待实现，默认归档范围为 includeArchived=false。
 - `/api/v3/task/query`：逐任务详情、校验项目与任务身份。
-- `/api/v3/task/{taskId}/activity/list`：逐任务所有动态页，不按任务 created/updated 或当前状态裁剪。
+- `/api/v3/task/{taskId}/activity/list`：仅在候选任务确定后读取动态。事件使用 createTime 窗口，不能以任务时间或当前状态证明昨日事件。
 
 按 `nextPageToken` 翻页直到明确空值；空页带 token 继续，重复 token、页数上限、缺失分页字段、
 同 ID 不同内容、详情不匹配均失败，不输出“完整日报”。相同 ID 相同内容去重。
 每次请求至少间隔 250ms；GET 超时/连接失败、429 与特定 5xx 最多尝试 3 次。
 遵守 Retry-After（超过 60 秒预算直接失败），鉴权/业务错误不重试。响应大小限制 8MiB。
+默认硬预算：每个分页流 20 页、整个客户端 300 次请求（重试计入）、100 个候选任务、10,000 条返回记录、120 秒。
+超过预算、等待/响应越过截止时间均失败，不把部分结果输出为完整日报；不假设活动有序而提前停页。
+`_collect_bounded_fixture` 只用于注入虚构 transport 的离线分页测试，标记 selection.mode=offline-unfiltered、view_equivalent=false，
+不是生产入口。`Client.collect` 始终阻断至真实筛选适配器完成，不调用该测试路径。
+selection 结果与 scope 一起保留，缺少已核验等价性时阻止发送。核验标记本身不是证明。
 接口没有提供一致性快照；分页完成只意味着本次可见数据遍历完成，不保证并发修改、已删除内容、
 授权不可见任务、或已归档历史的完整性。
 
 生产配置应参考虚构 `tests/fixtures/config.json`，包含 tenant_id、project_id、include_archived，
-以及通过既有只读测试脱敏核验的以下内容（不能复制 demo.* 映射作为真实动作）：
+以及通过既有只读测试脱敏核验的以下内容（demo-* ID 与人员均为虚构）：
 
-- `activity_fields.time/action`：动态时间和动作的点分字段路径；缺省仅是待验证适配值。
-- `action_rules`：精确动作值映射至 comment/created/status/other；状态动作需 `target_field`。
+- `activity_fields`：固定为 time=createTime、action=action；不允许回退任务 created 或任意覆盖字段。
+- 动作采用明确适配表：create→新建、comment→评论复核、involve.add/update_content/update_executor→其他变更；standard 语义未核验，保持未知待复核，未来动作同样待复核。
+- `update.taskflowstatus`：安全解析 content JSON 字符串，要求 tfsId、oldTfsId、taskflowstatus、oldTaskflowstatus、isDone 齐全且类型、ID/名称映射一致；重复 JSON 键、非标准数值、缺失/错误字段都待复核。当前只支持已核验的字符串状态名，其他结构不猜测。
+- isDone 必须为布尔值，且与已配置的目标解决状态一致；不读取任务当前 isDone 推断事件。
+- 每条动态必须具有匹配的 boundToObjectId 和 boundToObjectType=task；缺失或跨任务/类型冲突即失败。若同时存在 taskId，也必须一致。
 - `resolved_status_ids`、`status_names`、`owner_names`：已核验 ID 映射；无法识别则待复核。
 - `view.task_equals`：已核验的稳定视图字段等值筛选；目前只接受 executorId、tasklistId、stageId、tfsId、scenariofieldconfigId、visible、parentTaskId 的字符串等值。
 - `view.verified` 与 `view.evidence`：记录实际“昨天”视图核对依据；`api_contract_verified` 记录字段契约已核验。
 
 默认这些核验标记均为 false。它们是操作方的确认记录，不能靠改成 true 替代实际核验。
-当前没有交接完整昨天视图筛选条件与真实动作枚举，故不能宣称已复现该视图的全部语义。
+已接入本轮交接的动态字段及已观察动作，尚缺完整昨天视图的服务端更新时间筛选语义，不能宣称已复现该视图。
 `view` 仅接受 verified、evidence、task_equals 三个字段；未知字段、拼写错误、错误类型及不支持的筛选
 在采集前直接失败，即使零任务也不能静默忽略。不支持的视图规则必须先扩展适配器并补测试。
 同任务事件合并一次：存在未知/歧义时归其他变更待复核；否则最后一次状态变更为已解决优先，
-其次评论、其次新建、最后其他。后续重开覆盖此前解决；同一时刻多次状态变更待复核。
+其次新建、最后其他；含评论因语义待复核暂归其他变更。后续重开覆盖此前解决；同一时刻多次状态变更待复核。
 分类在动态与标题、负责人、当前状态等所有复核检查后决定；缺失负责人等情况也不能留在已解决分类。
 创建任务字段与当前 isDone 都不能证明昨天新建/解决。当前状态与负责人仅作当前信息展示。
 未知时间会保留候选任务并明确“是否属于本日待复核”，不将其声称为昨日已发生动态。
@@ -132,7 +150,9 @@ python -m unittest discover -s tests -v
 [任务详情](https://open.teambition.com/docs/apis/6321c6d2912d20d3b5a4a7b8)、
 [任务动态](https://open.teambition.com/docs/apis/6363bcfb912d20d3b56fb3f4)、
 [应用凭证](https://open.teambition.com/docs/documents/5db8f7e77baeb50014957fc1)。
-本轮未调用企业 API 或钉钉；公开文档的字段表未完整可读，响应 envelope、详情参数及真实事件字段/枚举
-仍需以既有授权测试的脱敏契约补齐，再进行获准的生产验收。离线模拟不能证明真实 API 契约正确。
+本轮仅按交接信息构造结构等价的虚构 fixtures，未调用企业 API 或钉钉，未保存真实数据。
+尚缺更新时间筛选参数/操作符/时区边界、评论是否更新任务 updated、跨日再次更新的候选规则、排序及分页稳定性等
+可验证语义。不能用任务当前 updated 自动推断历史视图成员，也不能声称所有旧任务评论均覆盖。
+取得脱敏接口契约后需补查询适配器与边界测试，再进行获准的生产验收；离线模拟不能证明真实 API 契约正确。
 此外需要确认任务直接链接、成员/状态映射刷新方式、全项目权限/归档范围、真实数据量与运行预算，
 核对“昨天”视图成员集合及钉钉实际排版，验证持久共享账本，再单独接入发送器。未设置任何定时任务。

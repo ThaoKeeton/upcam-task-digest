@@ -58,9 +58,9 @@ class ClientTests(unittest.TestCase):
         task = json.loads((FIXTURES/'collection.json').read_text())['records'][0]['task']
         transport = FakeTransport(page([task], 'task-page-2'), page([task]),
             {'code': 200, 'result': task},
-            page([{'id':'old-event','created':'2020-01-01T00:00:00Z'}], 'event-page-2'),
-            page([{'id':'yesterday-comment','created':'2026-01-02T00:00:00Z'}]))
-        result = client(transport).collect('demo-project')
+            page([{'boundToObjectId':'demo-old-task','boundToObjectType':'task','id':'old-event','created':'2020-01-01T00:00:00Z'}], 'event-page-2'),
+            page([{'boundToObjectId':'demo-old-task','boundToObjectType':'task','id':'yesterday-comment','created':'2026-01-02T00:00:00Z'}]))
+        result = client(transport)._collect_bounded_fixture('demo-project')
         self.assertTrue(result['pagination_complete'])
         self.assertEqual(len(result['records'][0]['activities']), 2)
         self.assertEqual(len(transport.requests), 5)
@@ -80,9 +80,9 @@ class ClientTests(unittest.TestCase):
         config=json.loads((FIXTURES/'config.json').read_text())
         t=FakeTransport(page([record['task']]), {'code':200,'result':record['task']},
                         page(record['activities'][:1], 'next'), page(record['activities'][1:]))
-        report=build_digest(client(t).collect('demo-project'), config, '2026-01-02')
+        report=build_digest(client(t)._collect_bounded_fixture('demo-project'), config, '2026-01-02')
         self.assertIn('评论 2 条', report['markdown'])
-        self.assertIn('**💬 工作进展（1）**', report['markdown'])
+        self.assertIn('**📝 其他变更（1）**', report['markdown'])
         self.assertFalse(report['ready_to_send'])
         self.assertEqual(len(report['digest']['tasks']), 1)
 
@@ -141,14 +141,14 @@ class ClientTests(unittest.TestCase):
         task = json.loads((FIXTURES/'collection.json').read_text())['records'][0]['task']
         task['isArchived'] = True
         t = FakeTransport(page([task]), {'code':200,'result':task})
-        self.assertEqual(client(t).collect('demo-project')['records'], [])
+        self.assertEqual(client(t)._collect_bounded_fixture('demo-project')['records'], [])
         t = FakeTransport(page([task]), {'code':200,'result':[task]}, page())
-        self.assertEqual(len(client(t).collect('demo-project',include_archived=True)['records']), 1)
+        self.assertEqual(len(client(t)._collect_bounded_fixture('demo-project',include_archived=True)['records']), 1)
         self.assertIn('includeArchived=true',t.requests[0].full_url)
         for field,value in [('id','other'),('projectId','other'),('isArchived',None)]:
             detail = copy.deepcopy(task); detail[field] = value
             with self.assertRaises(CollectionError):
-                client(FakeTransport(page([task]), {'code':200,'result':detail})).collect('demo-project')
+                client(FakeTransport(page([task]), {'code':200,'result':detail}))._collect_bounded_fixture('demo-project')
 
     def test_missing_credentials_no_request(self):
         t = FakeTransport()
