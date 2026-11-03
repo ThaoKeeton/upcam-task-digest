@@ -25,6 +25,11 @@ def text(value):
     return re.sub(r"([\\`*_{}\[\]<>()!#+.>|~-])", r"\\\1", value)
 
 
+def summary_text(value):
+    """Only an explicit empty string means no substantive supplement."""
+    return '' if isinstance(value, str) and value == '' else text(value)
+
+
 def render_digest(data):
     template = json.loads(TEMPLATE.read_text(encoding="utf-8"))
     categories = template["categories"]
@@ -64,9 +69,11 @@ def render_digest(data):
         for index, task in enumerate(tasks, 1):
             # Literal numbering prevents ordered-list indentation in Markdown clients.
             prefix = f"{index}\\. "
+            summary = summary_text(task["summary"])
+            summary_line = f'{summary}  \n' if summary else ''
             task_blocks.append(
                 f'{prefix}[{text(task["title"])}](<{task["url"]}>)  \n'
-                f'{text(task["summary"])}  \n'
+                f'{summary_line}'
                 f'当前：{text(task["status"])}｜负责人：{text(task["owner"])}'
             )
         blocks.append(f"**{heading}（{len(tasks)}）**  \n" + BLOCK_SEPARATOR.join(task_blocks))

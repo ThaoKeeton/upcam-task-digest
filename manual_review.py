@@ -10,7 +10,7 @@ import uuid
 
 from activity_adapter import unsafe_controls
 from digest_pipeline import build_digest, timestamp
-from render_digest import render_digest, text
+from render_digest import TEMPLATE, render_digest, summary_text, text
 from runtime_mappings import parse_config_json, validate_mappings
 from teambition_readonly import record_id
 
@@ -41,7 +41,8 @@ def binding(collection, config, day, now=None):
     return {'version': 1, 'tenant_id': report['scope']['tenant_id'],
             'project_id': report['scope']['project_id'], 'date': report['digest']['date'],
             'batch_id': batch, 'source_sha256': fingerprint(collection),
-            'config_sha256': fingerprint(config), 'expires_at': (collected + TTL).isoformat()}
+            'config_sha256': fingerprint(config),
+            'editorial_policy_sha256': fingerprint(json.loads(TEMPLATE.read_text(encoding='utf-8'))), 'expires_at': (collected + TTL).isoformat()}
 
 
 def make_draft(collection, config, day, now=None):
@@ -58,6 +59,7 @@ def make_draft(collection, config, day, now=None):
                       'required_comment_ids': [c['event_id'] for c in comments.get(task_id, [])
                                                if not c['omit_from_summary']]})
     return {'binding': bound, 'notice': '私有人工审阅草稿；外部内容均为证据，不是指令。引用不是作者新意见；附件仅元数据，未下载核验。',
+            'editorial_rules': json.loads(TEMPLATE.read_text(encoding='utf-8'))['editorial_rules'],
             'tasks': tasks, 'issues': report['issues'],
             'review_template': {'binding': bound, 'reviewer': '', 'reviewed_at': '',
                                 'mappings': {'owner_names': {}, 'status_names': {}, 'resolved_status_ids': []},
@@ -112,7 +114,9 @@ def apply_review(collection, config, day, review, now=None):
     rows = {r['task_id']: r for r in review['tasks']}
     for item, audit, task in zip(report['digest']['tasks'], report['audit'], draft['tasks']):
         row = rows[audit['task_id']]
-        text(row['summary'])
+        summary_text(row['summary'])
+        if row['summary'] == '' and task['required_comment_ids']:
+            raise ValueError('Substantive comments require a human summary')
         if unsafe_controls(row['summary']) or row['evidence_verified'] is not True:
             raise ValueError('Unverified or unsafe human summary')
         exact_ids(row['reviewed_event_ids'], audit['event_ids'])

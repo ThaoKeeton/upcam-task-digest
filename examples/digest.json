@@ -1,10 +1,45 @@
 {
   "date": "2026-01-01",
   "tasks": [
-    {"category": "resolved", "title": "DEMO-101 示例：修复预览布局", "url": "https://example.com/tasks/101", "summary": "虚构示例：预览布局修复并通过复查。", "status": "已解决", "owner": "示例成员甲"},
-    {"category": "progress", "title": "DEMO-102 示例：调整工具栏", "url": "https://example.com/tasks/102", "summary": "虚构示例：完成布局调整，等待复查。", "status": "进行中", "owner": "示例成员乙"},
-    {"category": "progress", "title": "DEMO-103 示例：优化导出提示", "url": "https://example.com/tasks/103", "summary": "虚构示例：补充提示说明。", "status": "待处理", "owner": "示例成员丙"},
-    {"category": "new", "title": "DEMO-104 示例：增加列表筛选", "url": "https://example.com/tasks/104", "summary": "虚构示例：新建筛选需求。", "status": "待处理", "owner": "示例成员甲"},
-    {"category": "other", "title": "DEMO-105 示例：调整任务标题", "url": "https://example.com/tasks/105", "summary": "虚构示例：补充标题分类。", "status": "进行中", "owner": "示例成员乙"}
+    {
+      "category": "resolved",
+      "title": "DEMO-101 示例：修复预览布局",
+      "url": "https://example.com/tasks/101",
+      "summary": "虚构示例：窄窗口与长标题场景复查通过。",
+      "status": "已解决",
+      "owner": "示例成员甲"
+    },
+    {
+      "category": "progress",
+      "title": "DEMO-102 示例：调整工具栏",
+      "url": "https://example.com/tasks/102",
+      "summary": "虚构示例：按钮间距调整完成；键盘导航仍有焦点丢失风险，下一步补充回归。",
+      "status": "进行中",
+      "owner": "示例成员乙"
+    },
+    {
+      "category": "progress",
+      "title": "DEMO-103 示例：优化导出提示",
+      "url": "https://example.com/tasks/103",
+      "summary": "虚构示例：缺少异常返回样本，提示文案验收受阻；待补齐样本后验证。",
+      "status": "待处理",
+      "owner": "示例成员丙"
+    },
+    {
+      "category": "new",
+      "title": "DEMO-104 示例：增加列表筛选",
+      "url": "https://example.com/tasks/104",
+      "summary": "",
+      "status": "待处理",
+      "owner": "示例成员甲"
+    },
+    {
+      "category": "other",
+      "title": "DEMO-105 示例：调整错误提示",
+      "url": "https://example.com/tasks/105",
+      "summary": "虚构示例：定位修正位于演示提交 demoabc1；需一并回归错误提示。",
+      "status": "进行中",
+      "owner": "示例成员乙"
+    }
   ]
 }

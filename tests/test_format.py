@@ -42,8 +42,9 @@ class FormatTests(unittest.TestCase):
         for index, task in enumerate(self.data["tasks"]):
             number = f"{index}\\. " if task["category"] == "progress" else "1\\. "
             title = task["title"].replace("-", "\\-")
+            summary_line = f'{task["summary"]}  \n' if task["summary"] else ''
             block = (f'{number}[{title}](<{task["url"]}>)  \n'
-                     f'{task["summary"]}  \n'
+                     f'{summary_line}'
                      f'当前：{task["status"]}｜负责人：{task["owner"]}')
             self.assertIn(block, output)
         self.assertIn("\n\n\u3000\n\n2\\. [", output)
@@ -79,8 +80,10 @@ class FormatTests(unittest.TestCase):
                     heading, block = block.split("  \n", 1)
                     self.assertTrue(heading.endswith("**"))
                 self.assertRegex(block, r"^\d+\\\. \[")
-                self.assertEqual(len(block.splitlines()), 3)
-                self.assertEqual(block.count("  \n"), 2)
+                task = next(task for task in self.data['tasks'] if task['url'] in block)
+                lines = 3 if task['summary'] else 2
+                self.assertEqual(len(block.splitlines()), lines)
+                self.assertEqual(block.count("  \n"), lines - 1)
 
     def test_duplicate_task_rejected_across_categories(self):
         duplicate = copy.deepcopy(self.data["tasks"][0])
@@ -105,12 +108,36 @@ class FormatTests(unittest.TestCase):
 
     def test_invalid_fields_do_not_break_layout(self):
         for field, value in (("category", "unknown"), ("title", "first\nsecond"),
-                             ("summary", ""), ("url", "javascript:alert(1)")):
+                             ("summary", None), ("summary", "  "), ("url", "javascript:alert(1)")):
             with self.subTest(field=field):
                 data = copy.deepcopy(self.data)
                 data["tasks"][0][field] = value
                 with self.assertRaises(ValueError):
                     render_digest(data)
+
+    def test_no_supplement_omits_summary_line_but_keeps_owner_and_status(self):
+        task = self.data['tasks'][0]
+        task['summary'] = ''
+        self.data['tasks'] = [task]
+        output = render_digest(self.data)
+        self.assertIn(f'](<{task["url"]}>)  \n当前：{task["status"]}｜负责人：{task["owner"]}', output)
+        for forbidden in ('北京时间', '采集截止', '00:00'):
+            self.assertNotIn(forbidden, output)
+        for key in ('owner', 'status'):
+            bad = copy.deepcopy(self.data)
+            bad['tasks'][0][key] = ''
+            with self.assertRaises(ValueError): render_digest(bad)
+
+    def test_editorial_sample_keeps_material_facts_without_redundant_summary(self):
+        output = render_digest(self.data)
+        for fact in ('复查通过', '焦点丢失风险', '下一步补充回归', '验收受阻', 'demoabc1'):
+            self.assertIn(fact, output)
+        for task in self.data['tasks']:
+            self.assertIn(f'当前：{task["status"]}｜负责人：{task["owner"]}', output)
+            self.assertNotIn(task['status'], task['summary'])
+        for omitted in ('北京时间', '采集截止', '新建筛选需求', '自动加参与者', '收到'):
+            self.assertNotIn(omitted, output)
+        self.assertNotRegex(output, r'\d{2}:\d{2}')
 
     def test_markdown_title_and_parenthesized_direct_link(self):
         self.data["tasks"] = [self.data["tasks"][0]]

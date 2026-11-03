@@ -241,6 +241,46 @@ class ManualReviewTests(unittest.TestCase):
                 finally:
                     guard.close()
 
+    def test_empty_summary_requires_no_substantive_comment(self):
+        review = self.review()
+        review['tasks'][0]['summary'] = ''
+        with self.assertRaises(ValueError): self.apply(review)
+        event = self.collection['records'][0]['activities'][0]
+        event['content'] = json.dumps({'comment': '收到'})
+        review = self.review()
+        review['tasks'][0]['summary'] = ''
+        result = self.apply(review)
+        self.assertTrue(result['ready_to_send'])
+        self.assertIn('>)  \n当前：', result['markdown'])
+        self.assertNotIn('收到', result['markdown'])
+        self.assertEqual(result['audit'][0]['activity_evidence'][0]['content'], event['content'])
+
+    def test_editorial_rule_changes_require_fresh_review(self):
+        from render_digest import TEMPLATE
+        review = self.review()
+        draft = make_draft(self.collection, self.config, '2026-01-02', self.now)
+        self.assertTrue(any('不能' in rule for rule in draft['editorial_rules']))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'fictional-template.json'
+            policy = json.loads(TEMPLATE.read_text())
+            policy['editorial_rules'].append('Fictional policy change')
+            path.write_text(json.dumps(policy))
+            with patch('manual_review.TEMPLATE', path), self.assertRaises(ValueError):
+                self.apply(review)
+
+    def test_title_only_creation_and_participant_events_need_no_filler(self):
+        events = self.collection['records'][0]['activities']
+        events[0]['action'] = 'create'
+        events[1]['action'] = 'involve.add'
+        review = self.review()
+        review['tasks'][0]['summary'] = ''
+        result = self.apply(review)
+        self.assertTrue(result['ready_to_send'])
+        self.assertEqual(result['digest']['tasks'][0]['category'], 'new')
+        for filler in ('新建记录', '其他变更 1 条', '参与者'):
+            self.assertNotIn(filler, result['markdown'])
+        self.assertEqual(len(result['audit'][0]['activity_evidence']), 2)
+
     def test_no_batch_cannot_review_legacy_fixture(self):
         del self.collection['batch_id']
         with self.assertRaises(ValueError): self.review()
