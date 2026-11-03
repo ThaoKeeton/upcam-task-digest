@@ -47,4 +47,3 @@ jobs:
           name: UPCAMTaskDigest-windows
           path: dist/UPCAMTaskDigest.exe
           retention-days: 14
-
