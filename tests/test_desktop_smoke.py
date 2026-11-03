@@ -2,7 +2,7 @@ import tempfile
 from pathlib import Path
 import unittest
 
-from desktop_app import verify_desktop_smoke
+from desktop_app import DigestDesktopApp, verify_desktop_smoke
 
 
 _EXPECTED_TABS = (
@@ -31,7 +31,28 @@ class _FakeApp:
         self.tabs = _FakeNotebook(labels)
 
 
+class _FakeSecretStore:
+    def __init__(self):
+        self.values = None
+
+    def save(self, values):
+        self.values = dict(values)
+
+
 class DesktopSmokeTests(unittest.TestCase):
+    def test_first_run_prepares_a_validated_local_delivery_ledger(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = DigestDesktopApp.__new__(DigestDesktopApp)
+            app.data_dir = Path(temporary)
+            app.saved_secrets = {}
+            app.secret_store = _FakeSecretStore()
+
+            ready, _message = app._prepare_ledger()
+
+            self.assertTrue(ready)
+            self.assertIn("delivery_ledger_id", app.secret_store.values)
+            self.assertTrue((Path(temporary) / "delivery_ledger.sqlite3").is_file())
+
     def test_smoke_check_accepts_expected_tabs_and_bundled_template(self):
         with tempfile.TemporaryDirectory() as temporary:
             template = Path(temporary) / "daily_digest.json"

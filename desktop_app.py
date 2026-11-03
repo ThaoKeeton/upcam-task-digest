@@ -26,7 +26,7 @@ from upcam_app.openai_models import (
 from openai_summarizer import KNOWN_FAST_MODELS
 from upcam_app.secrets import DpapiSecretStore, SECRET_FIELDS, SecretStoreError
 from upcam_app.workflow import DigestWorkflow, WorkflowBlocked
-from delivery_guard import DeliveryBlocked, initialize_ledger
+from delivery_guard import DeliveryBlocked, DeliveryGuard, initialize_ledger
 from report_contract import SHANGHAI
 
 
