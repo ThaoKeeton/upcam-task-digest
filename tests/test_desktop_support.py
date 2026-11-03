@@ -6,7 +6,7 @@ import unittest
 
 from upcam_app.config import (
     DEFAULT_SETTINGS, SettingsError, SettingsStore, parse_manual_window,
-    scheduled_occurrences, scheduled_window, validate_settings,
+    recoverable_schedule_occurrences, scheduled_occurrences, scheduled_window, validate_settings,
 )
 from upcam_app.dingtalk import DingTalkConfigError, DingTalkSender, signed_webhook
 from upcam_app.history import HistoryError, HistoryStore
@@ -46,6 +46,33 @@ class ConfigTests(unittest.TestCase):
                                       datetime(2026, 11, 4, 8, 51))
         self.assertEqual([item[1] for item in slots], ["morning", "afternoon", "morning"])
         self.assertEqual(len({item[2] for item in slots}), 3)
+
+    def test_restart_recovery_catches_recent_slots_but_not_slots_older_than_24_hours(self):
+        recent = recoverable_schedule_occurrences(DEFAULT_SETTINGS, datetime(2026, 11, 3, 9, 30))
+        self.assertEqual([item[2] for item in recent], [
+            "2026-11-02:afternoon", "2026-11-03:morning",
+        ])
+        later = recoverable_schedule_occurrences(DEFAULT_SETTINGS, datetime(2026, 11, 4, 17, 0))
+        self.assertEqual([item[2] for item in later], [
+            "2026-11-04:morning", "2026-11-04:afternoon",
+        ])
+
+    def test_restart_recovery_requires_local_naive_time(self):
+        with self.assertRaises(SettingsError):
+            recoverable_schedule_occurrences(
+                DEFAULT_SETTINGS, datetime.fromisoformat("2026-11-03T09:30:00+08:00"))
+
+    def test_recovery_does_not_replay_slots_from_before_auto_run_was_enabled(self):
+        slots = recoverable_schedule_occurrences(
+            DEFAULT_SETTINGS, datetime(2026, 11, 3, 9, 30),
+            enabled_since=datetime(2026, 11, 3, 8, 0))
+        self.assertEqual([item[2] for item in slots], ["2026-11-03:morning"])
+
+    def test_saved_auto_run_enable_time_must_be_local_naive_time(self):
+        settings = dict(DEFAULT_SETTINGS, auto_send_enabled=True,
+                        auto_send_enabled_since_local="2026-11-03T08:00:00+08:00")
+        with self.assertRaises(SettingsError):
+            validate_settings(settings)
 
     def test_settings_round_trip_does_not_include_secret_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -186,6 +213,14 @@ class HistoryAndTransportTests(unittest.TestCase):
         self.history.start_delivery(self.run_id)
         self.assertEqual(self.history.recover_interrupted_sends(), 1)
         self.assertEqual(self.history.get(self.run_id)["state"], "delivery_unknown")
+
+    def test_history_can_skip_a_schedule_slot_already_started_before_restart(self):
+        slot = self.history.create_draft(
+            datetime(2026, 11, 3, 0, 0), datetime(2026, 11, 3, 8, 50),
+            "teambition", self.markdown, "2026-11-03:morning")
+        self.assertTrue(self.history.has_schedule_key("2026-11-03:morning"))
+        self.assertFalse(self.history.has_schedule_key("2026-11-03:afternoon"))
+        self.assertEqual(self.history.get(slot)["schedule_key"], "2026-11-03:morning")
 
     def test_signed_webhook_rejects_non_dingtalk_host(self):
         with self.assertRaises(DingTalkConfigError):

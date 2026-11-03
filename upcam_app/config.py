@@ -15,6 +15,7 @@ from teambition_readonly import CollectionError
 
 
 SCHEMA_VERSION = 1
+SCHEDULE_RECOVERY_WINDOW = timedelta(hours=24)
 DEFAULT_SETTINGS = {
     "schema_version": SCHEMA_VERSION,
     "tenant_id": "",
@@ -32,6 +33,7 @@ DEFAULT_SETTINGS = {
     "afternoon_start_at": "00:00",
     "afternoon_end_at": "16:50",
     "auto_send_enabled": False,
+    "auto_send_enabled_since_local": "",
     "openai_model": "gpt-6-luna",
     "openai_reasoning_effort": "max",
     "openai_service_tier": "default",
@@ -60,6 +62,16 @@ def validate_settings(settings: dict) -> dict:
         raise SettingsError("Teambition scope verification flags must be true or false")
     if not isinstance(merged.get("auto_send_enabled"), bool):
         raise SettingsError("Automatic run and send setting must be true or false")
+    enabled_since = merged.get("auto_send_enabled_since_local")
+    if not isinstance(enabled_since, str):
+        raise SettingsError("Automatic run enable time must be text")
+    if enabled_since:
+        try:
+            parsed_enabled_since = datetime.fromisoformat(enabled_since)
+        except ValueError as exc:
+            raise SettingsError("Automatic run enable time is invalid") from exc
+        if parsed_enabled_since.tzinfo is not None:
+            raise SettingsError("Automatic run enable time must use the PC's local time")
     try:
         validate_mappings(merged)
         validate_view({"view": merged.get("view")})
@@ -137,6 +149,19 @@ def scheduled_occurrences(settings: dict, after: datetime, through: datetime) ->
                 rows.append((slot, kind, f"{day.isoformat()}:{kind}"))
         day += timedelta(days=1)
     return sorted(rows)
+
+
+def recoverable_schedule_occurrences(settings: dict, now: datetime, *,
+                                     enabled_since: datetime | None = None) -> list[tuple[datetime, str, str]]:
+    """Return recent local slots since auto-run was enabled, if provided."""
+    if not isinstance(now, datetime) or now.tzinfo is not None:
+        raise SettingsError("Schedule recovery requires the PC's local naive time")
+    after = now - SCHEDULE_RECOVERY_WINDOW
+    if enabled_since is not None:
+        if not isinstance(enabled_since, datetime) or enabled_since.tzinfo is not None:
+            raise SettingsError("Schedule recovery requires the PC's local naive time")
+        after = max(after, enabled_since)
+    return scheduled_occurrences(settings, after, now)
 
 
 class SettingsStore:

@@ -30,9 +30,21 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -r requirements-build.txt
-      - run: pyinstaller --clean --noconfirm --onefile --windowed --name UPCAMTaskDigest --collect-all tzdata --add-data "templates;templates" --add-data "examples;examples" desktop_app.py
+      - run: pyinstaller --clean --noconfirm --onefile --console --name UPCAMTaskDigestSmoke --collect-all tzdata --add-data "templates;templates" --add-data "examples;examples" desktop_app.py
+      - name: Diagnose packaged application and tabs
+        shell: pwsh
+        run: |
+          & .\dist\UPCAMTaskDigestSmoke.exe --ui-smoke-test
+          if ($LASTEXITCODE -ne 0) { throw "Console desktop EXE smoke test failed with exit code $LASTEXITCODE" }
+      - run: pyinstaller --noconfirm --onefile --windowed --name UPCAMTaskDigest --collect-all tzdata --add-data "templates;templates" --add-data "examples;examples" desktop_app.py
+      - name: Smoke test final windowed EXE
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath ".\dist\UPCAMTaskDigest.exe" -ArgumentList "--ui-smoke-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Windowed desktop EXE smoke test failed with exit code $($process.ExitCode)" }
       - uses: actions/upload-artifact@v4
         with:
           name: UPCAMTaskDigest-windows
           path: dist/UPCAMTaskDigest.exe
           retention-days: 14
+

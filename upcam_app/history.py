@@ -139,6 +139,13 @@ class HistoryStore:
             row = db.execute("SELECT * FROM digest_runs WHERE run_id=?", (run_id,)).fetchone()
         return dict(row) if row else None
 
+    def has_schedule_key(self, schedule_key: str) -> bool:
+        """Whether this slot has any local record, including a blocked or unknown delivery."""
+        with self._connect() as db:
+            row = db.execute("SELECT 1 FROM digest_runs WHERE schedule_key=? LIMIT 1",
+                             (schedule_key,)).fetchone()
+        return row is not None
+
     def list_runs(self, limit: int = 200) -> list[dict]:
         with self._connect() as db:
             rows = db.execute("SELECT * FROM digest_runs ORDER BY created_at_utc DESC LIMIT ?",
