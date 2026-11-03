@@ -158,6 +158,7 @@ def build_digest(collection, config, day):
         status_events = [e for e in events if e[2] == "status"]
         ambiguous_status = len({e[0] for e in status_events}) != len(status_events)
         transitions = [dict(status_transition(ids[e[1]].get('content'), config), event_id=e[1]) for e in status_events]
+        status_noop = any(change['previous_id'] == change['target_id'] for change in transitions)
         status_conflict = any(previous['target_id'] != current['previous_id']
                               for previous, current in zip(transitions, transitions[1:]))
         if transitions:
@@ -175,7 +176,15 @@ def build_digest(collection, config, day):
                 change = standard_commit_candidate(raw)
             if change is not None:
                 parsed_changes.append(dict(change, event_id=event[1], action=raw['action']))
-        review = review or ambiguous_status or status_conflict or any(c['needs_review'] for c in parsed_changes)
+        executor_changes = [c for c in parsed_changes if c['action'] == 'update_executor']
+        event_times = {event[1]: event[0] for event in events}
+        executor_conflict = len({event_times[c['event_id']] for c in executor_changes}) != len(executor_changes)
+        executor_conflict = executor_conflict or any(previous['target_id'] != current['previous_id']
+                                                    for previous, current in zip(executor_changes, executor_changes[1:]))
+        if executor_changes:
+            executor_conflict = executor_conflict or executor_changes[-1]['target_id'] != task.get('executorId')
+        review = (review or ambiguous_status or status_conflict or status_noop or executor_conflict
+                  or any(c['needs_review'] for c in parsed_changes))
         descriptions = []
         if no_window_evidence:
             descriptions.append("最近更新时间符合昨天视图，但本日动态证据不足，待复核")
@@ -191,6 +200,10 @@ def build_digest(collection, config, day):
             descriptions.append("同一时刻多次状态变更，待复核")
         if status_conflict:
             descriptions.append("状态事件序列或当前状态不一致，待复核")
+        if status_noop:
+            descriptions.append("状态 ID 未变化，不能认定进入新状态，待复核")
+        if executor_conflict:
+            descriptions.append("执行人事件序列、同刻变更或当前执行人不一致，待复核")
         for change in parsed_changes:
             if change['action'] == 'update_executor':
                 if change['needs_review']:
@@ -232,6 +245,7 @@ def build_digest(collection, config, day):
                       "url": f"https://www.teambition.com/project/{project}/task/{task_id}",
                       "summary": "；".join(descriptions), "owner": owner, "status": status})
         audit.append({"task_id": task_id, "event_ids": [e[1] for e in events], "needs_review": review,
+                      "executor_conflict": executor_conflict, "status_noop": status_noop,
                       "status_transitions": transitions, "parsed_changes": parsed_changes,
                       "undated_event_ids": sorted(undated_ids),
                       "activity_evidence": [ids[e[1]] for e in events] + [ids[k] for k in sorted(undated_ids)]})

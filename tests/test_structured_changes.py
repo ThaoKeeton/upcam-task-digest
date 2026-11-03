@@ -118,4 +118,43 @@ class StructuredChangeTests(unittest.TestCase):
         self.assertIsNone(standard_commit_candidate(raw))
 
 
+    def test_executor_sequence_conflicts_block_with_complete_evidence(self):
+        self.config['owner_names'].update({key:'虚构成员'+key for key in ('a','b','c','d')})
+        def change(old,new,event_id,hour):
+            return self.event('update_executor',{'_oldExecutorId':old,'_executorId':new},
+                              id=event_id,createTime=f'2026-01-02T0{hour}:00:00Z')
+        cases=[([change('a','b','first',1),change('c','d','second',2)],'d'),
+               ([change('a','b','first',1),change('b','c','second',1)],'c'),
+               ([change('a','b','first',1)],'c')]
+        for events,current in cases:
+            with self.subTest(events=events,current=current):
+                self.data['records'][0]['task']['executorId']=current
+                report=self.report(*events)
+                self.assertFalse(report['ready_to_send'])
+                self.assertEqual(report['digest']['tasks'][0]['category'],'other')
+                self.assertIn('执行人事件序列、同刻变更或当前执行人不一致',report['markdown'])
+                self.assertEqual(report['audit'][0]['activity_evidence'],events)
+                self.assertTrue(report['audit'][0]['executor_conflict'])
+
+    def test_unchanged_resolved_status_is_not_entry_into_resolved(self):
+        self.data['records'][0]['task'].update(tfsId='demo-done',isDone=True)
+        raw=self.event('update.taskflowstatus',self.state('demo-done','demo-done',flag=False))
+        report=self.report(raw)
+        self.assertFalse(report['ready_to_send'])
+        self.assertEqual(report['digest']['tasks'][0]['category'],'other')
+        self.assertIn('状态 ID 未变化',report['markdown'])
+        self.assertEqual(report['audit'][0]['activity_evidence'],[raw])
+        self.assertTrue(report['audit'][0]['status_noop'])
+
+    def test_continuous_executor_chain_is_sorted_and_matches_current(self):
+        self.config['owner_names'].update({'a':'虚构甲','b':'虚构乙','c':'虚构丙'})
+        self.data['records'][0]['task']['executorId']='c'
+        first=self.event('update_executor',{'_oldExecutorId':'a','_executorId':'b'},id='first')
+        second=self.event('update_executor',{'_oldExecutorId':'b','_executorId':'c'},id='second',
+                          createTime='2026-01-02T02:00:00Z')
+        report=self.report(second,first)
+        self.assertTrue(report['ready_to_send'])
+        self.assertEqual([e['event_id'] for e in report['audit'][0]['parsed_changes']],['first','second'])
+
+
 if __name__=='__main__':unittest.main()
