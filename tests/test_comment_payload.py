@@ -100,4 +100,60 @@ class CommentPayloadTests(unittest.TestCase):
         self.assertEqual(json.loads(report['audit'][0]['activity_evidence'][0]['content']),payload)
 
 
+    def test_text_markdown_modes_dict_mentions_and_notification_boolean(self):
+        for mode in ('text','markdown'):
+            payload={'comment':'虚构：仍待复核。','renderMode':mode,'isOnlyNotifyMentions':False,
+                     'mentions':{'fictional-id':{'label':'虚构引用','opaque':['keep']}}}
+            result=self.parse(payload)
+            self.assertFalse(result['extraction_needs_review'])
+            self.assertEqual(result['payload_evidence']['mentions'],payload['mentions'])
+            self.assertIs(result['is_only_notify_mentions'],False)
+            self.assertEqual(result['text'],payload['comment'])
+            self.assertTrue(result['semantic_review_required'])
+            self.assertFalse(result['omit_from_summary'])
+
+    def test_notification_only_and_mentions_prevent_ack_suppression(self):
+        base={'comment':'收到','renderMode':'markdown','mentions':{},'isOnlyNotifyMentions':False}
+        self.assertTrue(self.parse(base)['omit_from_summary'])
+        for extra in ({'isOnlyNotifyMentions':True},{'mentions':{'fictional':'opaque'}},
+                      {'mentions':[{'id':'fictional'}]}):
+            result=self.parse(dict(base,**extra))
+            self.assertFalse(result['omit_from_summary'])
+            self.assertFalse(result['extraction_needs_review'])
+
+    def test_abnormal_mentions_notification_and_modes_require_review(self):
+        for extra in ({'mentions':'not-a-map'},{'mentions':None},{'mentions':True},
+                      {'isOnlyNotifyMentions':1},{'isOnlyNotifyMentions':'false'},
+                      {'isOnlyNotifyMentions':None},{'renderMode':'future-mode'},
+                      {'renderMode':{'type':'text'}}):
+            result=self.parse(dict({'comment':'收到'},**extra))
+            self.assertTrue(result['extraction_needs_review'])
+            self.assertFalse(result['omit_from_summary'])
+        result=self.parse({'comment':'收到','renderMode':'text'},renderMode='markdown')
+        self.assertTrue(result['extraction_needs_review'])
+
+    def test_markdown_display_is_escaped_and_rich_or_controls_preserved_only(self):
+        data=json.loads((FIXTURES/'collection.json').read_text())
+        config=json.loads((FIXTURES/'config.json').read_text())
+        bodies=['**虚构强调** [demo](https://example.com)\n![image](https://example.com/image)',
+                '<p>虚构富文本</p>\x00内容', '虚构\x7f内容', '虚构\u0085内容', '虚构\u202e内容']
+        for body in bodies:
+            payload={'comment':body,'renderMode':'markdown','mentions':{},'isOnlyNotifyMentions':False}
+            data['records'][0]['activities'][0]['content']=json.dumps(payload,ensure_ascii=False)
+            report=build_digest(data,config,'2026-01-02')
+            result=report['summary_inputs'][0]['comments'][0]
+            self.assertEqual(result['body'],body)
+            self.assertEqual(json.loads(result['raw_content']),payload)
+            self.assertFalse(report['ready_to_send'])
+            if body==bodies[0]:
+                self.assertFalse(result['extraction_needs_review'])
+                self.assertIn(r'\*\*虚构强调\*\*',report['markdown'])
+                self.assertIn(r'\[demo\]',report['markdown'])
+                self.assertNotIn('![image]',report['markdown'])
+            else:
+                self.assertTrue(result['extraction_needs_review'])
+                self.assertIsNone(result['text'])
+                self.assertNotIn(body,report['markdown'])
+
+
 if __name__=='__main__':unittest.main()

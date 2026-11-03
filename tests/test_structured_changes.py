@@ -157,4 +157,23 @@ class StructuredChangeTests(unittest.TestCase):
         self.assertEqual([e['event_id'] for e in report['audit'][0]['parsed_changes']],['first','second'])
 
 
+    def test_multiline_standard_commit_title_preserves_original_and_stays_review(self):
+        for title in ('关联了提交 fictional-change\n虚构说明',
+                      '关联了提交 fictional-change\n虚构说明\n第二行',
+                      '关联了提交 fictional-change\r\n虚构说明'):
+            raw=self.event('standard',{'title':title,'customCreator':{'name':'虚构集成'}})
+            parsed=standard_commit_candidate(raw)
+            self.assertEqual(parsed['title'],title)
+            report=self.report(raw)
+            self.assertFalse(report['ready_to_send'])
+            self.assertIn('关联提交标题模式',report['markdown'])
+            self.assertEqual(report['audit'][0]['parsed_changes'][0]['parsed_payload']['title'],title)
+            self.assertEqual(report['audit'][0]['activity_evidence'],[raw])
+        for title in ('虚构说明\n关联了提交 fictional-change','未关联了提交 fictional-change\n说明',
+                      '关联了提交 fictional-change\x00说明','关联了提交 fictional-change\u202e说明'):
+            raw=self.event('standard',{'title':title,'customCreator':{'name':'虚构集成'}})
+            self.assertIsNone(standard_commit_candidate(raw))
+            self.assertFalse(self.report(raw)['ready_to_send'])
+
+
 if __name__=='__main__':unittest.main()

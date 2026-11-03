@@ -2,6 +2,7 @@
 
 import json
 import re
+import unicodedata
 
 from teambition_readonly import CollectionError, identifier, validate_binding
 
@@ -9,6 +10,10 @@ from teambition_readonly import CollectionError, identifier, validate_binding
 MAX_CONTENT = 65536
 OBSERVED_ACTIONS = frozenset({'create', 'comment', 'involve.add', 'update.taskflowstatus',
                               'standard', 'update_content', 'update_executor'})
+
+
+def unsafe_controls(value):
+    return any(unicodedata.category(char) in ('Cc', 'Cf') and char not in '\r\n\t' for char in value)
 
 
 def _unique_object(pairs):
@@ -58,7 +63,7 @@ def comment_input(raw, event_id, when):
     semantic review. No LLM, instruction execution, or external requests occur.
     """
     content = raw.get('content')
-    evidence_keys = ('attachments', 'dingFiles', 'files', 'images', 'data', 'mentions', 'renderMode')
+    evidence_keys = ('attachments', 'dingFiles', 'files', 'images', 'data', 'mentions', 'renderMode', 'isOnlyNotifyMentions')
     extra = {k: raw[k] for k in evidence_keys if k in raw}
     encoded = json.dumps({'content': content, 'extra': extra}, ensure_ascii=False)
     if len(encoded.encode('utf-8')) > MAX_CONTENT:
@@ -79,28 +84,38 @@ def comment_input(raw, event_id, when):
                         if payload is not None and k in payload}
     mode = payload.get('renderMode') if payload is not None else None
     if payload is not None:
-        if set(payload) - {'comment', 'attachments', 'dingFiles', 'files', 'renderMode', 'mentions'}:
+        if set(payload) - {'comment', 'attachments', 'dingFiles', 'files', 'renderMode', 'mentions', 'isOnlyNotifyMentions'}:
             reasons.append('存在尚未识别的评论字段；完整对象保留')
-        if any(not isinstance(value, list) for value in payload_evidence.values()):
-            reasons.append('附件或提及字段不是已知列表结构')
-        # No nonempty renderMode enum has been verified in the handed-off contract.
-        if mode not in (None, ''):
-            reasons.append('renderMode 语义尚未核验；正文仅作原文字面内容')
+    for source in (payload or {}, extra):
+        for key in ('attachments', 'dingFiles', 'files', 'mentions'):
+            if key in source and not isinstance(source[key], (list, dict) if key == 'mentions' else list):
+                reasons.append('附件或提及字段结构异常；证据保留')
+        if source.get('renderMode') not in (None, '', 'text', 'markdown'):
+            reasons.append('renderMode 尚未支持；正文仅作原文字面内容')
+        if 'isOnlyNotifyMentions' in source and type(source['isOnlyNotifyMentions']) is not bool:
+            reasons.append('isOnlyNotifyMentions 必须为布尔值')
+    if payload is not None:
+        for key in ('renderMode', 'isOnlyNotifyMentions'):
+            if key in payload and key in extra and payload[key] != extra[key]:
+                reasons.append('评论内部与外层元数据冲突')
     plain = isinstance(body, str) and bool(body.strip())
     rich = plain and bool(re.search(r'<[^>]+>|\{\s*"', body))
-    controls = plain and any(ord(c) < 32 and c not in '\r\n\t' for c in body)
+    controls = plain and unsafe_controls(body)
     if not plain:
         reasons.append('comment 正文缺失、为空或不是字符串')
     elif rich or controls:
         reasons.append('正文包含未支持富文本或控制字符；不推断渲染结果')
     normalized = ' '.join(body.split()) if plain and not rich and not controls else None
     # Even a short confirmation can carry substantive attachments or mentions.
-    has_extra = any(extra.values()) or any(payload_evidence.values())
+    has_extra = (any(extra.get(k) for k in ('attachments', 'dingFiles', 'files', 'images', 'data', 'mentions'))
+                 or any(payload_evidence.values())
+                 or any(source.get('isOnlyNotifyMentions') is True for source in (payload or {}, extra)))
     acknowledgement = bool(normalized and not reasons and not has_extra
                            and normalized.casefold() in {'收到', '好的', '谢谢', 'ok', '👍'})
     return {'event_id': event_id, 'create_time': when.isoformat() if when else None,
             'raw_content': content, 'parsed_payload': payload, 'body': body,
             'text': normalized, 'render_mode': mode,
+            'is_only_notify_mentions': payload.get('isOnlyNotifyMentions') if payload is not None else None,
             'extra_evidence': extra, 'payload_evidence': payload_evidence,
             'omit_from_summary': acknowledgement,
             'omission_reason': '仅确认性回复候选；原文保留，需结合上下文复核' if acknowledgement else None,
@@ -157,7 +172,7 @@ def standard_commit_candidate(raw):
         return None
     # Match only the explicit standalone action phrase or a phrase followed by
     # a delimiter. No broad substring match (e.g. "未关联了提交") is accepted.
-    if not re.fullmatch(r'关联了提交(?:[：: \t]+[^\r\n]+)?', title):
+    if unsafe_controls(title) or not re.fullmatch(r'关联了提交(?:[：: \t]+[\s\S]+)?', title):
         return None
     return {'pattern': 'commit-link-title', 'title': title,
             'source_creator_name': creator['name'], 'parsed_payload': data,

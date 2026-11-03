@@ -23,7 +23,7 @@
           "boundToObjectId": "demo-old-task",
           "boundToObjectType": "task",
           "createTime": "2026-01-01T16:00:00Z",
-          "content": "{\"comment\": \"虚构：已定位导出异常，仍待修复。\", \"attachments\": [], \"dingFiles\": [], \"files\": [], \"renderMode\": null}"
+          "content": "{\"comment\": \"虚构：已定位导出异常，仍待修复。\", \"attachments\": [], \"dingFiles\": [], \"files\": [], \"renderMode\": \"text\", \"isOnlyNotifyMentions\": false, \"mentions\": {\"fictional-member\": {\"name\": \"虚构提及\"}}}"
         },
         {
           "id": "demo-event-2",
@@ -31,7 +31,7 @@
           "boundToObjectId": "demo-old-task",
           "boundToObjectType": "task",
           "createTime": "2026-01-02T15:59:59Z",
-          "content": "{\"comment\": \"收到\", \"attachments\": [], \"dingFiles\": [], \"files\": [], \"renderMode\": null}"
+          "content": "{\"comment\": \"收到\", \"attachments\": [], \"dingFiles\": [], \"files\": [], \"renderMode\": \"markdown\", \"isOnlyNotifyMentions\": false, \"mentions\": {}}"
         },
         {
           "id": "demo-event-next-day",

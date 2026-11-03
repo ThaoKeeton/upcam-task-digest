@@ -65,8 +65,12 @@ python -m unittest discover -s tests -v
 评论 content 按 JSON 字符串解析，正文取内部 comment；attachments、dingFiles、files、mentions 保存在 payload_evidence，
 事件外层证据独立保存在 extra_evidence，不合并覆盖。原始字符串及完整已解析对象均保留，未知字段也不会丢弃。
 重复键、非标准数值、损坏 JSON、错误包裹类型、缺失正文或错误附件类型均待复核，不猜测正文。
-renderMode 尚无已核验的非空枚举；非空/未知模式会标记待复核，纯字符串正文可作为字面原文供审核，
-HTML/未知富文本或结构化正文不自动转换或解释，原文仍在 body/parsed_payload/raw_content 中可审查。
+renderMode 支持 text/markdown；两者的普通正文均作为字面文本供审核，再由现有渲染器转义 Markdown 控制符，不执行或直接渲染输入的链接、图片和格式。
+未知模式继续待复核。HTML/未知富文本、结构化正文，以及非换行/制表符的 Unicode 控制/格式字符不进入卡片摘录，
+原文仍在 body/parsed_payload/raw_content 中可审查，包括 NUL、DEL、C1 与双向文本控制字符。
+mentions 支持列表或字典，作为不透明证据完整保留，不解析为已核验姓名或替换正文引用。
+isOnlyNotifyMentions 只接受布尔值并保留；为 true 或存在非空提及/附件时，确认性正文也不从摘要候选中排除。
+内部与外层元数据冲突、未知字段或异常类型仍待复核。
 只对已成功解析、无格式歧义且正文完全匹配“收到/好的/谢谢/ok/👍”、没有附件或提及等额外证据的回复标记 omit_from_summary；这只是候选过滤，
 原文不会从复核输入删除，因为确认回复在上下文中也可能构成实质决定。“好的，但仍有阻塞”等完整保留。
 正文普通文本仅合并显示空白；富文本、结构化内容、缺失内容均保留原始证据并待复核，不尝试猜测格式或丢弃附件。
@@ -116,7 +120,7 @@ historical_event_coverage=false，并进入报告 scope。生成日报时重新�
 - 事件 isDone 只验证结构类型并以 event_is_done 保留，**不假设它表达目标状态，也不要求与解决状态一致**。解决与否由事件目标状态 ID 及已核验映射判断。
 - 同一任务当日状态事件按时间排序，前一目标 ID 必须衔接后一旧状态 ID；任意同时间多次状态变化、事件链断裂、最后目标与当前 tfsId 不符或当前完成标记冲突均待复核。当前状态只用于校验，不能凭它生成昨日解决事件。oldTfsId 与 tfsId 相同的事件标记待复核，即使目标名称为已解决，也不能据此认定进入已解决。
 - update_executor 的 content 按有界、无重复键的 JSON 对象解析，要求 _executorId/_oldExecutorId；姓名仅从 owner_names 的 ID 映射获得，缺失不猜测。content.payload 和事件外层 payload 分开保留；fromAutomation 必须为布尔值，双来源冲突则待复核。该标记只描述来源，不能推断操作人身份。执行人事件按时间排序后检查旧/新 ID 链连续性、任何同一时刻的多条变更、末次目标与当前 executorId 一致性；任一冲突均阻断发送，不能用事件 ID 排序消除同刻歧义。
-- standard 只对 title 精确为“关联了提交”，或以该短语加冒号/空白分隔后续文本，并且有 customCreator.name 的 JSON 识别 commit-link-title 候选。否定句、前置描述、无分隔后缀及其他标题不匹配；未匹配不推断为提交。候选仍需复核，customCreator.name 仅是来源原文，不作为已核验成员或实际提交的证明。
+- standard 只对 title 精确为“关联了提交”，或以该短语加冒号/空白分隔后续文本，并且有 customCreator.name 的 JSON 识别 commit-link-title 候选。该受限前缀后的内容允许 LF/CRLF 多行，原始 title 不归一化、不截断；额外控制字符仍拒绝识别。否定句、前置描述、无分隔后缀及其他标题不匹配；未匹配不推断为提交。候选仍需复核，customCreator.name 仅是来源原文，不作为已核验成员或实际提交的证明。
 - audit.status_transitions 保留状态 ID、原始事件布尔值及事件 ID；audit.parsed_changes 保留执行人/来源/标题候选结构，原始 activity_evidence 始终保留。audit.executor_conflict/status_noop 明确记录执行人冲突及状态 ID 未变化的复核原因。
 - 每条动态必须具有匹配的 boundToObjectId 和 boundToObjectType=task；缺失或跨任务/类型冲突即失败。若同时存在 taskId，也必须一致。
 - `resolved_status_ids`、`status_names`、`owner_names`：已核验 ID 映射；无法识别则待复核。
