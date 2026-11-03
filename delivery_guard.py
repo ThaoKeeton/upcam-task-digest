@@ -5,6 +5,7 @@ validated persistent local filesystem. They do NOT cover ephemeral/recreated
 storage, independent databases, remote side effects, or exactly-once delivery.
 """
 
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -32,7 +33,9 @@ def initialize_ledger(path):
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.close(fd)
     ledger_id = str(uuid.uuid4())
-    with sqlite3.connect(path) as db:
+    # SQLite's context manager commits/rolls back but does not close the connection.
+    # Exit the transaction first, then close on both success and failure.
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("PRAGMA synchronous=FULL")
         db.executescript("""
             CREATE TABLE metadata (identity TEXT NOT NULL);

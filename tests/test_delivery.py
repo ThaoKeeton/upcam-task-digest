@@ -1,4 +1,5 @@
 import concurrent.futures
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -26,7 +27,7 @@ class DeliveryTests(unittest.TestCase):
         return DeliveryGuard(self.path,self.identity,persistent_storage_verified=True)
 
     def state(self):
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             return db.execute('SELECT state FROM deliveries').fetchone()[0]
 
     def test_success_reopen_and_changed_text_cannot_bypass(self):
@@ -70,7 +71,7 @@ class DeliveryTests(unittest.TestCase):
         guard=self.guard()
         with self.assertRaises(DeliveryBlocked):
             guard.attempt(self.report,**self.scope,send=lambda _: (_ for _ in ()).throw(KeyboardInterrupt()))
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("UPDATE deliveries SET state='in_flight'")
         guard.close(); guard=self.guard()
         with self.assertRaises(DeliveryBlocked):
@@ -133,6 +134,52 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaises(DeliveryBlocked):
             guard.attempt(self.report,**self.scope,send=lambda _: self.fail('must not send'))
         guard.close()
+
+
+class InitializationLifetimeTests(unittest.TestCase):
+    def check_connection_closed(self, fail):
+        from unittest.mock import patch
+        real_connect = sqlite3.connect
+        connections = []
+
+        class FailingConnection(sqlite3.Connection):
+            def executescript(self, script):
+                raise sqlite3.OperationalError('fictional initialization failure')
+
+        def connect(*args, **kwargs):
+            if fail:
+                kwargs['factory'] = FailingConnection
+            db = real_connect(*args, **kwargs)
+            connections.append(db)
+            return db
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'ledger.sqlite3'
+            try:
+                with patch('delivery_guard.sqlite3.connect', side_effect=connect):
+                    if fail:
+                        with self.assertRaises(sqlite3.OperationalError):
+                            initialize_ledger(path)
+                    else:
+                        identity = initialize_ledger(path)
+                self.assertEqual(len(connections), 1)
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    connections[0].execute('SELECT 1')
+                if not fail:
+                    db = real_connect(path)
+                    try:
+                        self.assertEqual(db.execute('SELECT identity FROM metadata').fetchall(), [(identity,)])
+                    finally:
+                        db.close()
+            finally:
+                for db in connections:
+                    db.close()
+
+    def test_initialize_closes_connection_after_success_and_commits_identity(self):
+        self.check_connection_closed(fail=False)
+
+    def test_initialize_closes_connection_after_schema_failure(self):
+        self.check_connection_closed(fail=True)
 
 
 if __name__ == '__main__':
