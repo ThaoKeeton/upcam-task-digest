@@ -369,8 +369,9 @@ public sealed partial class MainWindow
     {
         var output = Identify(new TextBox
         {
-            Text = _state.Output, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
-            HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch
+            IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+            HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch,
+            Text = _state.Output
         }, "diagnostic-output");
         ScrollViewer.SetVerticalScrollBarVisibility(output, ScrollBarVisibility.Auto);
         var export = ActionButton("导出脱敏结构", "export-diagnostic", ExportDiagnosticAsync);
