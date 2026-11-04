@@ -15,6 +15,7 @@ from upcam_app.history import HistoryStore
 from upcam_app.secrets import DpapiSecretStore, MemorySecretStore
 from upcam_app.smoke_data import make_smoke_service
 from upcam_app.worker_api import WorkerService, serve
+from upcam_app.workflow import WorkflowBlocked
 
 
 class FakeCatalog:
@@ -185,6 +186,33 @@ class WorkerApiTests(unittest.TestCase):
                 service.dispatch({"op": "run_manual", "payload": {
                     "start": "2026-11-03 16:50", "end": "2026-11-04 08:50"}})
             self.assertEqual(calls, [])
+
+    def test_scheduled_recovery_processes_one_slot_and_never_retries_persisted_block(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service, secrets, catalog, _calls = self.make_service(directory)
+            service.dispatch({"op": "initialize"})
+            settings = service.settings_store.load()
+            settings["auto_send_enabled"] = True
+            settings["auto_send_enabled_since_local"] = (datetime.now() - timedelta(days=1)).isoformat()
+            service.settings_store.save(settings)
+            calls = []
+
+            def factory(_settings, _credentials, _data_dir, *, history, **_kwargs):
+                class SyntheticBlockedWorkflow:
+                    def run(self, start, end, *, schedule_key):
+                        calls.append(schedule_key)
+                        history.create_blocked_attempt(start, end, "Synthetic scheduled block", schedule_key)
+                        raise WorkflowBlocked("Synthetic scheduled block")
+                return SyntheticBlockedWorkflow()
+
+            service.workflow_factory = factory
+            results = [service.dispatch({"op": "run_due"}) for _ in range(3)]
+            self.assertEqual([result["started"] for result in results], [1, 1, 0])
+            self.assertEqual(len(set(calls)), 2)
+            restarted = WorkerService(Path(directory), secret_store=secrets, model_catalog=catalog,
+                                      workflow_factory=factory, startup_configurer=lambda *_args, **_kwargs: None)
+            self.assertEqual(restarted.dispatch({"op": "run_due"})["started"], 0)
+            self.assertEqual(len(calls), 2)
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI requires the Windows CI runner")
     def test_windows_dpapi_legacy_store_round_trip_uses_current_user(self):

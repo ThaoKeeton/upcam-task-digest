@@ -120,12 +120,16 @@ jobs:
           Remove-Item dist/winui/smoke-output -Recurse
           Compress-Archive -Path dist/winui/* -DestinationPath dist/UPCAMTaskDigest-WinUI3-win-x64.zip
       - name: Publish synthetic UI snapshot for review
-        if: success()
+        if: always()
         shell: pwsh
         run: |
-          Write-Output "::group::Synthetic status page snapshot"
-          Write-Output ("UPCAM_STATUS_PNG_BASE64=" + [Convert]::ToBase64String([IO.File]::ReadAllBytes("$PWD/dist/ui-evidence/statuses.png")))
-          Write-Output "::endgroup::"
+          $image = "$PWD/dist/ui-evidence/statuses.png"
+          if (-not (Test-Path $image)) { $image = "$PWD/dist/winui/smoke-output/statuses.png" }
+          if (Test-Path $image) {
+            Write-Output "::group::Synthetic status page snapshot"
+            Write-Output ("UPCAM_STATUS_PNG_BASE64=" + [Convert]::ToBase64String([IO.File]::ReadAllBytes($image)))
+            Write-Output "::endgroup::"
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:

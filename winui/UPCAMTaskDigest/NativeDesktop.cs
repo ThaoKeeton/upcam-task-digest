@@ -11,15 +11,17 @@ internal sealed class NativeDesktop : IDisposable
     private readonly SubclassProc _callback;
     private readonly Action _show;
     private readonly Action _exit;
+    private readonly Func<bool> _closeRequested;
     private readonly uint _taskbarCreated = RegisterWindowMessage("TaskbarCreated");
     private const uint TrayMessage = 0x8000 + 37;
     public bool TrayReady { get; private set; }
 
-    public NativeDesktop(Window window, Action show, Action exit)
+    public NativeDesktop(Window window, Action show, Action exit, Func<bool> closeRequested)
     {
         _hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
         _show = show;
         _exit = exit;
+        _closeRequested = closeRequested;
         _callback = WindowProcedure;
         if (!SetWindowSubclass(_hwnd, _callback, 1, 0))
             throw new InvalidOperationException("无法初始化窗口消息处理。");
@@ -41,6 +43,8 @@ internal sealed class NativeDesktop : IDisposable
 
     private IntPtr WindowProcedure(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam, UIntPtr id, UIntPtr data)
     {
+        if ((message == 0x0010 || message == 0x0112 && (wparam.ToUInt64() & 0xFFF0) == 0xF060) && _closeRequested())
+            return IntPtr.Zero;
         if (message == _taskbarCreated) AddIcon();
         if (message == TrayMessage)
         {
@@ -51,6 +55,8 @@ internal sealed class NativeDesktop : IDisposable
         }
         return DefSubclassProc(hwnd, message, wparam, lparam);
     }
+
+    public void RequestCaptionClose() => PostMessage(_hwnd, 0x0112, (UIntPtr)0xF060, IntPtr.Zero);
 
     private void ShowMenu()
     {

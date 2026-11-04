@@ -55,7 +55,7 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
         _initialized = true;
         try
         {
-            _native = new NativeDesktop(this, ShowMainWindow, () => _ = RequestExitAsync());
+            _native = new NativeDesktop(this, ShowMainWindow, () => _ = RequestExitAsync(), HandleCloseRequest);
             _worker = new WorkerClient(_smoke);
             _state.Apply(await _worker.SendAsync("initialize"));
             _savedAuto = _state.Flag("auto_send_enabled");
@@ -87,7 +87,7 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
                         await RefreshHistoryAsync();
                     }
                     else SetStatus("自动运行已启用；应用正在系统托盘或主窗口运行。");
-                });
+                }, showErrorDialog: false);
             };
             _scheduler.Start();
         }
@@ -147,7 +147,7 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
         if (_state.Dirty || _state.SecretDrafts.Any(x => !string.IsNullOrEmpty(x.Value))) await SaveCoreAsync();
     }
 
-    private async Task<bool> RunOperationAsync(string status, Func<Task> action)
+    private async Task<bool> RunOperationAsync(string status, Func<Task> action, bool showErrorDialog = true)
     {
         if (_busy) { SetStatus("已有操作正在运行，请等待完成。"); return false; }
         _busy = true;
@@ -163,7 +163,7 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
             _state.Output = message;
             SetStatus(message);
             if (_smoke) throw;
-            await ShowMessageAsync("操作未完成", message);
+            if (showErrorDialog) await ShowMessageAsync("操作未完成", message);
             return false;
         }
         finally
@@ -218,16 +218,21 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
     private void Window_Closing(AppWindow sender, AppWindowClosingEventArgs args)
     {
         if (_exitRequested) return;
+        args.Cancel = HandleCloseRequest();
+    }
+
+    private bool HandleCloseRequest()
+    {
+        if (_exitRequested) return false;
         if (_native?.TrayReady == true)
         {
-            args.Cancel = true;
             AppWindow.Hide();
         }
         else
         {
-            args.Cancel = true;
             _ = RequestExitAsync();
         }
+        return true;
     }
 
     private async Task RequestExitAsync()

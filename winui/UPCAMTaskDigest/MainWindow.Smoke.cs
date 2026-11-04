@@ -114,7 +114,7 @@ public sealed partial class MainWindow
             }
             if (_native?.TrayReady == true)
             {
-                Close();
+                _native.RequestCaptionClose();
                 await Task.Delay(100);
                 Assert(!AppWindow.IsVisible, "Close hides to native tray");
                 ShowMainWindow();
