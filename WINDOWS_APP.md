@@ -1,4 +1,6 @@
-# Windows 桌面应用
+# 旧版 Tk 桌面界面操作说明
+
+WinUI 3 新版的启动、升级和完整操作步骤见 [WINUI_APP.md](WINUI_APP.md)。本页保留给仍在使用旧版 Python / Tk 界面的用户。
 
 开发启动：
 

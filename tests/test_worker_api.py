@@ -64,6 +64,7 @@ class WorkerApiTests(unittest.TestCase):
             self.assertTrue(result["secret_presence"]["openai_api_key"])
             self.assertNotIn("synthetic-secret-must-not-return", serialized)
             self.assertEqual(catalog.refresh_calls, 0)
+            self.assertIn("max", result["reasoning_efforts"]["gpt-6-luna"])
 
     def test_save_stores_secret_but_returns_presence_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -151,6 +152,12 @@ class WorkerApiTests(unittest.TestCase):
             self.assertTrue(saved["settings"]["view"]["verified"])
             diagnostic = service.dispatch({"op": "diagnose", "payload": window})
             self.assertTrue(diagnostic["ok"], diagnostic["message"])
+            export_path = Path(directory) / "安全结构.json"
+            service.dispatch({"op": "export_diagnostic_to_file", "payload": {"path": str(export_path)}})
+            exported = export_path.read_text(encoding="utf-8")
+            self.assertIn("ci-synthetic-task", exported)
+            for excluded in ("CI 虚构：验证原生界面布局", "synthetic-app-secret", "虚构成员甲"):
+                self.assertNotIn(excluded, exported)
             run = service.dispatch({"op": "run_manual", "payload": window})
             self.assertEqual(run["state"], "sent")
             history = service.dispatch({"op": "history"})["runs"]
@@ -158,6 +165,23 @@ class WorkerApiTests(unittest.TestCase):
             self.assertEqual(history[0]["state"], "sent")
             with self.assertRaisesRegex(ValueError, "duplicate|confirmed"):
                 service.dispatch({"op": "run_manual", "payload": window})
+
+    def test_missing_ledger_blocks_before_constructing_any_network_workflow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service, _secrets, _catalog, _calls = self.make_service(directory)
+            service.dispatch({"op": "initialize"})
+            (Path(directory) / "delivery_ledger.sqlite3").unlink()
+            calls = []
+
+            def forbidden_workflow(*args, **kwargs):
+                calls.append(True)
+                raise AssertionError("A missing ledger must block before any collection or summary")
+
+            service.workflow_factory = forbidden_workflow
+            with self.assertRaisesRegex(ValueError, "防重账本"):
+                service.dispatch({"op": "run_manual", "payload": {
+                    "start": "2026-11-03 16:50", "end": "2026-11-04 08:50"}})
+            self.assertEqual(calls, [])
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI requires the Windows CI runner")
     def test_windows_dpapi_legacy_store_round_trip_uses_current_user(self):

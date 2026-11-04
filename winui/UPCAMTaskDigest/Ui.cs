@@ -81,7 +81,7 @@ public sealed partial class MainWindow
 
     private FrameworkElement TimeInputs() => Pair(WindowInput(true), WindowInput(false));
 
-    private static Grid Pair(UIElement first, UIElement second)
+    private static Grid Pair(FrameworkElement first, FrameworkElement second)
     {
         var grid = new Grid { ColumnSpacing = 12, RowSpacing = 12 };
         grid.ColumnDefinitions.Add(new ColumnDefinition());
@@ -102,7 +102,7 @@ public sealed partial class MainWindow
         return panel;
     }
 
-    private static Grid FillLayout(UIElement header, UIElement content)
+    private static Grid FillLayout(FrameworkElement header, FrameworkElement content)
     {
         var grid = new Grid { RowSpacing = 12 };
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });

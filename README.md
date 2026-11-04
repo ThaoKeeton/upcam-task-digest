@@ -1,25 +1,23 @@
 # UPCAM 站会日报
 
-Windows 桌面应用把 Teambition 采集、OpenAI 摘要、钉钉发送、模型设置、自动运行时间和本机运行记录集中在一个界面。日报模板和编辑规则由本仓库维护，随程序版本一起发布；用户不需要编写日报格式。当前应用版本为 `0.2.0`，随附规则基线为 `8328ecb72dd6cf0738cb74fe5fb08365392149e3`。
+Windows 桌面应用把 Teambition 采集、OpenAI 摘要、钉钉发送、模型设置、自动运行时间和本机运行记录集中在一个界面。日报模板和编辑规则由本仓库维护，随程序版本一起发布；用户不需要编写日报格式。当前应用版本为 `0.3.0`，随附规则基线为 `8328ecb72dd6cf0738cb74fe5fb08365392149e3`。
 
 ## 启动
 
-需要 Windows、Python 3.10+ 与 Tk。开发启动方式：
+下载成功 Windows 工作流的 **UPCAMTaskDigest-WinUI3-windows-x64** artifact，完整解压 ZIP，运行 `UPCAMTaskDigest.exe`。保留 DLL 和 `worker` 子文件夹。新版采用 C#、XAML、WinUI 3 / Windows App SDK 和 WinUIEx，参考 PowerToys 原生设置窗口。完整升级及操作说明见 [WINUI_APP.md](WINUI_APP.md)。
 
-```powershell
-python desktop_app.py
-```
+开发构建需要 Windows、.NET 8 SDK 和 Python 3.12，具体命令以 Windows 工作流为准。原 Tk 源码保留为旧版维护入口。
 
 设置、模型缓存、运行历史和发送防重账本放在当前 Windows 用户的 `%LOCALAPPDATA%\UPCAM\TaskDigest`。Teambition App ID/Secret、钉钉 Webhook/签名密钥和 OpenAI API Key 使用当前 Windows 用户 DPAPI 加密保存；不会写入仓库、模型缓存或运行日志。模型缓存只保存模型元数据和当前 Key 的 SHA-256 指纹，不保存 Key。
 
 ## 首次配置
 
 1. 在侧边栏“账户与模型”输入 Teambition Tenant ID、Project ID、Teambition App 凭据、钉钉机器人 Webhook/签名密钥和 OpenAI API Key。
-2. 点击“刷新当前 API Key 可用模型”。模型列表只在手动刷新时请求；成功结果在本机缓存，之后启动直接使用。刷新失败保留旧缓存。缓存只对刷新时使用的 API Key 生效。
+2. 点击“刷新当前 Key 可用模型”。模型列表只在手动刷新时请求；成功结果在本机缓存，之后启动直接使用。刷新失败保留旧缓存。缓存只对刷新时使用的 API Key 生效。
 3. 选择模型、reasoning effort 和 API 服务等级。默认模型是 `gpt-6-luna`、默认 reasoning effort 是 `max`、默认服务等级是标准费用。
 4. 在“运行与诊断”选择时间窗，然后于“项目范围”只读验证；在“成员映射”和“状态映射”核对发现的映射 ID，并确认项目范围。这里只设置项目数据映射和视图范围，不配置日报模板；日报版式及筛选编辑规则由仓库维护。未知字段、未知事件或映射不完整会阻断自动发送。
 5. 在“自动运行”页设置时间与采集任务上限；要无人值守时勾选自动执行和当前 Windows 用户登录启动。默认任务上限 300，可设为 1–700，仍受请求、分页、记录、响应大小和运行时长硬限制。
-6. 可在“账户与模型”点击“只读测试 Teambition 连接”。它只查询限定项目数据，不调用 OpenAI，也不发钉钉消息。
+6. 可在“账户与模型”点击“只读测试连接”。它只查询限定项目数据，不调用 OpenAI，也不发钉钉消息。
 
 默认调度是上午 08:50 和下午 16:50。上午采集前一日 16:50 到当日 08:50；下午采集当日 00:00 到 16:50，均使用电脑本机时间。自动执行仅在桌面应用运行且电脑未休眠时工作。应用重开后会补跑最近 24 小时内、且自动执行已启用期间错过的时段，并使用该时段原定采集窗口；启用前或超过 24 小时的时段跳过。已有记录（包括阻断或发送结果不明）不会重跑，避免重复发送。可选当前用户登录启动，启动后在系统托盘运行；只有电脑开机、该用户已登录且联网时才可运行。
 
@@ -41,7 +39,9 @@ OpenAI 文档：[`/v1/models`](https://developers.openai.com/api/reference/resou
 
 ## 代码与本地验证
 
-- `desktop_app.py`：Windows 侧边导航、设置、模型刷新、Teambition 只读测试、运行按钮和应用内调度。
+- `winui/UPCAMTaskDigest/`：C# / XAML 原生窗口、设置卡片、映射列表、对话框、托盘和异步工作进程客户端。
+- `worker_entry.py`、`upcam_app/worker_api.py`：私有本机协议，复用既有业务核心、DPAPI 和存储格式，不返回密钥值。
+- `desktop_app.py`：保留的旧版 Tk 界面。
 - `upcam_app/workflow.py`：本地采集、预检、AI 摘要和自动发送的编排。
 - `teambition_readonly.py`、`digest_pipeline.py`、`activity_adapter.py`：限域只读采集和确定性日报规则。
 - `openai_summarizer.py`、`automated_digest.py`：最小输入、Responses API 结构化摘要和独立验证。
@@ -56,7 +56,7 @@ OpenAI 文档：[`/v1/models`](https://developers.openai.com/api/reference/resou
 python -m unittest discover -s tests -v
 ```
 
-`.github/workflows/windows-build.yml` 在应用、模板或打包代码的 PR 及手动触发时构建 Windows EXE，并在 Windows runner 上启动程序，检查侧边导航页面、项目/成员控件及随附模板，并尝试生成 UI 截图；成功后上传保留 14 天的 EXE 和截图 artifact。该构建不配置服务密钥、不访问企业 API、不发送日报，也不会部署到用户电脑。
+`.github/workflows/windows-build.yml` 构建真实 WinUI 3 应用和自包含 Python 工作进程，执行 Windows DPAPI、原生控件交互和多尺寸布局检查，上传目录 ZIP、截图和报告（14 天）。所有服务均使用隔离虚构配置与模拟传输，不访问生产 API、不发送真实日报、不修改启动注册表，不部署用户电脑。真实高 DPI 和目标电脑验收范围见 [WINUI_APP.md](WINUI_APP.md)。
 
 ## 数据范围与边界
 
