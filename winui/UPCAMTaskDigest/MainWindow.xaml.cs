@@ -16,7 +16,7 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
     private NativeDesktop? _native;
     private DispatcherQueueTimer? _scheduler;
     private bool _initialized, _busy, _exitRequested, _savedAuto, _navigating;
-    private bool _exitInProgress;
+    private bool _exitInProgress, _ready;
     private readonly SemaphoreSlim _dialogGate = new(1, 1);
     private string _page = "home";
     private readonly Dictionary<string, (string Title, string Description)> _routes = new()
@@ -36,7 +36,8 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
         _smoke = smoke;
         _background = background;
         InitializeComponent();
-        Title = "UPCAM 站会日报" + (smoke ? " · CI 虚构数据" : "");
+        Title = "UPCAM 站会日报 · v" + typeof(MainWindow).Assembly.GetName().Version?.ToString(3) +
+            (smoke ? " · CI 虚构数据" : "");
         AppTitleBar.Title = Title;
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
@@ -67,7 +68,7 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
         {
             _native = new NativeDesktop(this, ShowMainWindow, () => _ = RequestExitAsync(), HandleCloseRequest);
             _worker = new WorkerClient(_smoke);
-            _state.Apply(await _worker.SendAsync("initialize"));
+            ApplyInitializationResult(await _worker.SendAsync("initialize"));
             _savedAuto = _state.Flag("auto_send_enabled");
             SaveButton.IsEnabled = true;
             Navigate("home");
@@ -103,20 +104,48 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
         }
         catch (Exception ex)
         {
+            DisableWorkerOperations();
             if (_smoke) { FinishSmoke(false, ex.ToString()); return; }
             SetStatus("应用初始化失败；本机原有配置没有删除。");
             await ShowMessageAsync("无法初始化", "请确认已完整解压应用、worker 文件夹和运行时文件；如果旧版仍在托盘中运行，请先退出旧版。");
         }
     }
 
-    private WorkerClient Worker => _worker ?? throw new InvalidOperationException("本机工作进程尚未就绪。");
+    private void ApplyInitializationResult(JsonObject result)
+    {
+        if (result["application_version"]?.GetValue<string>() != typeof(MainWindow).Assembly.GetName().Version?.ToString(3))
+        {
+            DisableWorkerOperations();
+            throw new InvalidOperationException("应用界面与工作进程版本不一致，请完整解压同一版本。");
+        }
+        _state.Apply(result);
+        _ready = true;
+        Navigation.IsEnabled = true;
+        PageHost.IsEnabled = true;
+        SaveButton.IsEnabled = true;
+    }
+
+    private void DisableWorkerOperations()
+    {
+        _ready = false;
+        _savedAuto = false;
+        _scheduler?.Stop();
+        _worker?.Dispose();
+        _worker = null;
+        Navigation.IsEnabled = false;
+        PageHost.IsEnabled = false;
+        SaveButton.IsEnabled = false;
+    }
+
+    private WorkerClient Worker => _ready && _worker is not null ? _worker :
+        throw new InvalidOperationException("本机工作进程尚未就绪或版本不兼容，请完整解压同一版本并重新启动。");
 
     private void TitleBar_PaneToggleRequested(TitleBar sender, object args) =>
         Navigation.IsPaneOpen = !Navigation.IsPaneOpen;
 
     private void Navigation_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
-        if (!_initialized || _worker is null || _navigating) return;
+        if (!_initialized || !_ready || _worker is null || _navigating) return;
         if (args.SelectedItem is NavigationViewItem item && item.Tag is string route) Navigate(route);
     }
 
@@ -162,6 +191,7 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
 
     private async Task<bool> RunOperationAsync(string status, Func<Task> action, bool showErrorDialog = true)
     {
+        if (!_ready) { SetStatus("工作进程未就绪或版本不兼容，请完整解压同一版本并重新启动。"); return false; }
         if (_busy) { SetStatus("已有操作正在运行，请等待完成。"); return false; }
         _busy = true;
         SaveButton.IsEnabled = false;
@@ -182,8 +212,8 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
         finally
         {
             _busy = false;
-            SaveButton.IsEnabled = true;
-            PageHost.IsEnabled = true;
+            SaveButton.IsEnabled = _ready;
+            PageHost.IsEnabled = _ready;
             BusyRing.IsActive = false;
             BusyRing.Visibility = Visibility.Collapsed;
         }

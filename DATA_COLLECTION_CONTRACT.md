@@ -68,6 +68,8 @@ historical_event_coverage=false，并进入报告 scope。生成日报时重新�
 - 同一任务当日状态事件按时间排序，前一目标 ID 必须衔接后一旧状态 ID；任意同时间多次状态变化、事件链断裂、最后目标与当前 tfsId 不符或当前完成标记冲突均待复核。当前状态只用于校验，不能凭它生成昨日解决事件。oldTfsId 与 tfsId 相同的事件标记待复核，即使目标名称为已解决，也不能据此认定进入已解决。
 - update_executor 的 content 按有界、无重复键的 JSON 对象解析，要求 _executorId/_oldExecutorId；姓名仅从 owner_names 的 ID 映射获得，缺失不猜测。content.payload 和事件外层 payload 分开保留；fromAutomation 必须为布尔值，双来源冲突则待复核。该标记只描述来源，不能推断操作人身份。执行人事件按时间排序后检查旧/新 ID 链连续性、任何同一时刻的多条变更、末次目标与当前 executorId 一致性；任一冲突均阻断发送，不能用事件 ID 排序消除同刻歧义。
 - standard 只对 title 精确为“关联了提交”，或以该短语加冒号/空白分隔后续文本，并且有 customCreator.name 的 JSON 识别 commit-link-title 候选。该受限前缀后的内容允许 LF/CRLF 多行，原始 title 不归一化、不截断；额外控制字符仍拒绝识别。否定句、前置描述、无分隔后缀及其他标题不匹配；未匹配不推断为提交。候选仍需复核，customCreator.name 仅是来源原文，不作为已核验成员或实际提交的证明。
+- 仅附件评论只适配已核验的空字符串正文、空 attachments/dingFiles、无重复 24 字符文件 ID 列表、text/markdown 模式与布尔 isOnlyNotifyMentions；记录文件数与“未读取文件内容”，不下载、不推断内容或进度，不调用 OpenAI。它仍是评论动态，不能输出“无动态”。内外层冲突、未知附件/图片/数据或不明空正文仍阻断。
+- hrefPreview 仅适配精确的不可用预览空信息结构，URL 必须是无凭据 HTTP(S) 并与正文完整 URL 标记匹配；元数据完整保留本机，预览错误文本不进入模型。非空预览信息、额外字段、未绑定链接或来源冲突仍阻断，不据此推断链接内容。
 - audit.status_transitions 保留状态 ID、原始事件布尔值及事件 ID；audit.parsed_changes 保留执行人/来源/标题候选结构，原始 activity_evidence 始终保留。audit.executor_conflict/status_noop 明确记录执行人冲突及状态 ID 未变化的复核原因。
 - 每条动态必须具有匹配的 boundToObjectId 和 boundToObjectType=task；缺失或跨任务/类型冲突即失败。若同时存在 taskId，也必须一致。
 - `resolved_status_ids`、`status_names`、`owner_names`：已核验 ID 映射；无法识别则待复核。

@@ -153,10 +153,10 @@ class WorkerApiTests(unittest.TestCase):
             diagnostic = service.dispatch({"op": "diagnose", "payload": window})
             self.assertTrue(diagnostic["ok"], diagnostic["message"])
             export_path = Path(directory) / "安全结构.json"
-            service.dispatch({"op": "export_diagnostic_to_file", "payload": {"path": str(export_path)}})
+            service.dispatch({"op": "export_diagnostic_to_file", "payload": {**window, "path": str(export_path)}})
             exported = export_path.read_text(encoding="utf-8")
             parsed_export = json.loads(exported)
-            self.assertEqual(parsed_export["format"], "upcam-teambition-safe-shape-v3")
+            self.assertEqual(parsed_export["format"], "upcam-teambition-safe-shape-v4")
             self.assertTrue(parsed_export["tasks"][0]["activities"][0]["in_report_window"])
             self.assertIn("ci-synthetic-task", exported)
             for excluded in ("CI 虚构：验证原生界面布局", "synthetic-app-secret", "虚构成员甲"):

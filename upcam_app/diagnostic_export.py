@@ -6,7 +6,8 @@ import json
 import math
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timezone
+import uuid
 
 from activity_adapter import (
     MAX_CONTENT, OBSERVED_ACTIONS, _unique_object, bounded_object, comment_input,
@@ -14,6 +15,7 @@ from activity_adapter import (
 )
 from report_contract import report_window, updated_selection
 from teambition_readonly import CollectionError, identifier, validate_binding
+from . import APP_VERSION, RULESET_REVISION
 
 
 _MAX_DEPTH = 5
@@ -257,7 +259,7 @@ def _commit_shape_check(activity):
 def safe_structure_export(collection: dict, config: dict, day=None, window=None) -> dict:
     """Return IDs and schema metadata, but no names, titles, comments, credentials, or API bodies.
 
-    IDs are retained to correlate this file with the in-app diagnostic. Every
+    Task/event and unmapped current-owner IDs correlate this file with the UI. Every
     other API value is reduced to a type, length, boolean comparison, or fixed
     diagnostic category. Optional day/window use the report's half-open scope;
     omitted scope yields unknown membership, never an inferred calendar day.
@@ -353,14 +355,24 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
             "task_id": task_id,
             "task_field_shapes": _field_shapes(task, 0).get("fields", {}),
             "current_owner_mapping_present": current_owner_id in owner_names if current_owner_id else False,
+            "unmapped_current_owner_id": (current_owner_id
+                                          if current_owner_id not in owner_names else None),
             "current_status_mapping_present": current_status_id in status_names if current_status_id else False,
             "current_done_type": _type_name(task.get("isDone")),
             "activities": event_shapes,
             "truncated_activity_count": truncated_activities,
         })
     return {
-        "format": "upcam-teambition-safe-shape-v3",
-        "privacy": "task/event IDs, bounded protocol action tokens and field names are included; names, titles, comments, credentials, and other response values are omitted",
+        "format": "upcam-teambition-safe-shape-v4",
+        "diagnostic": {
+            "id": uuid.uuid4().hex,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "application_version": APP_VERSION,
+            "ruleset_revision": RULESET_REVISION,
+            "report_window": ({"start": bounds[0].isoformat(), "end_exclusive": bounds[1].isoformat(),
+                               "timezone": "Asia/Shanghai"} if bounds else None),
+        },
+        "privacy": "diagnostic version/time/window, task/event and unmapped current-owner IDs, bounded protocol action tokens and field names are included; names, titles, comments, credentials, and other response values are omitted",
         "pagination_complete": collection.get("pagination_complete") is True if isinstance(collection, dict) else False,
         "window_evaluation_available": bounds is not None,
         "selection_check": {

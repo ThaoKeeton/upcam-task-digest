@@ -77,6 +77,7 @@ class WorkerService:
         self._handled_schedule_slots: set[str] = set()
         self._setup_probe: dict | None = None
         self._last_diagnostic_shape: dict | None = None
+        self._last_diagnostic_context: str | None = None
         self._shutdown = False
 
     def dispatch(self, request: dict) -> dict:
@@ -395,6 +396,10 @@ class WorkerService:
                 "discovery": discovery}
 
     def _diagnose(self, payload: dict) -> dict:
+        # Any attempted refresh supersedes the previous result, including a
+        # failure before collection (for example, cleared credentials).
+        self._last_diagnostic_shape = None
+        self._last_diagnostic_context = None
         settings = self.settings_store.load()
         secrets = self.secret_store.load()
         if not settings.get("tenant_id") or not settings.get("project_id"):
@@ -411,6 +416,7 @@ class WorkerService:
                 include_archived=settings["include_archived"])
             diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
             self._last_diagnostic_shape = safe_structure_export(collection, config, day, (start, end))
+            self._last_diagnostic_context = _diagnostic_context(settings, secrets, payload)
         except (CollectionError, OSError) as exc:
             self._last_diagnostic_shape = None
             return {"ok": False, "message": collection_validation_message(exc),
@@ -426,27 +432,40 @@ class WorkerService:
             return {"ok": False,
                     "message": "只读诊断未完成；没有调用 OpenAI、没有发送钉钉，详细 API 响应不会写入记录。请检查网络、凭据和项目权限。",
                     "task_count": None, "export_available": False}
+        metadata = self._last_diagnostic_shape["diagnostic"]
+        created = datetime.fromisoformat(metadata["created_at_utc"]).strftime("%Y%m%dT%H%M%SZ")
+        file_stem = f"teambition-diagnostic-v{APP_VERSION}-{created}-{metadata['id'][:8]}"
         return {**diagnostic, "export_available": bool(self._last_diagnostic_shape),
+                "diagnostic_file_stem": file_stem,
+                "diagnostic": metadata,
                 "safety": "未调用 OpenAI；未发送钉钉。"}
 
     def _export_diagnostic(self, payload: dict) -> dict:
-        self._require_empty_payload(payload)
-        if not isinstance(self._last_diagnostic_shape, dict):
-            raise WorkerApiError("没有可导出的诊断；请先运行只读诊断。")
-        return {"shape": self._last_diagnostic_shape}
+        return {"shape": self._checked_diagnostic(payload)}
+
+    def _checked_diagnostic(self, payload: dict) -> dict:
+        message = "诊断缺失，或设置、凭据、时间范围已改变；请重新运行只读诊断后导出。"
+        if not isinstance(self._last_diagnostic_shape, dict) or not self._last_diagnostic_context:
+            raise WorkerApiError(message)
+        try:
+            context = _diagnostic_context(self.settings_store.load(), self.secret_store.load(), payload)
+        except (SettingsError, ValueError, TypeError):
+            raise WorkerApiError(message) from None
+        if context != self._last_diagnostic_context:
+            raise WorkerApiError(message)
+        return self._last_diagnostic_shape
 
     def _export_diagnostic_to_file(self, payload: dict) -> dict:
         target = payload.get("path")
         if not isinstance(target, str) or not target or not Path(target).is_absolute():
             raise WorkerApiError("请选择有效的本机 JSON 文件路径。")
-        if not isinstance(self._last_diagnostic_shape, dict):
-            raise WorkerApiError("没有可导出的诊断；请先运行只读诊断。")
+        shape = self._checked_diagnostic(payload)
         try:
-            content = json.dumps(self._last_diagnostic_shape, ensure_ascii=False, indent=2) + "\n"
+            content = json.dumps(shape, ensure_ascii=False, indent=2) + "\n"
             atomic_write(Path(target), content.encode("utf-8"))
         except OSError:
             raise WorkerApiError("无法写入所选文件，请检查目标文件夹权限和可用空间。") from None
-        return {"status": "已保存脱敏结构；分享前请检查保留的任务和动态 ID。"}
+        return {"status": "已保存当前版本、时间窗和脱敏结构；分享前请检查任务、动态与缺失成员 ID。"}
 
     def _preview_sample(self, payload: dict) -> dict:
         try:
@@ -802,6 +821,23 @@ def _teambition_identity(credentials: dict) -> str | None:
     if not all(isinstance(value, str) and value for value in values):
         return None
     return hashlib.sha256(json.dumps(values, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _diagnostic_context(settings: dict, credentials: dict, payload: dict) -> str:
+    """Bind an in-memory diagnostic to its source and exact half-open window."""
+    start, end = parse_manual_window(payload.get("start", ""), payload.get("end", ""))
+    identity = _teambition_identity(credentials)
+    if identity is None:
+        raise ValueError("Missing Teambition identity")
+    context = {
+        "scope": _scope_signature(settings), "report_config": runtime_config(settings),
+        "collection_limits": collection_client_limits(settings),
+        "identity": identity,
+        "start": start.astimezone(SHANGHAI).isoformat(),
+        "end_exclusive": end.astimezone(SHANGHAI).isoformat(),
+    }
+    return hashlib.sha256(json.dumps(context, ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _probe_matches(probe: dict | None, scope: dict, credential_identity: str | None) -> bool:
