@@ -181,6 +181,35 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.summarizer.calls, 0)
         self.assertEqual(self.ding.calls, [])
 
+    def test_source_validation_failure_is_diagnosed_and_saved_without_raw_content(self):
+        self.collection["records"][0]["activities"].append({
+            "id": "demo-unknown-event",
+            "action": "future.unknown.action",
+            "boundToObjectId": "demo-old-task",
+            "boundToObjectType": "task",
+            "createTime": "2026-01-01T18:00:00Z",
+            "content": "synthetic-private-payload",
+        })
+        workflow = self.workflow()
+
+        with self.assertRaises(WorkflowBlocked) as raised:
+            workflow.run(datetime(2026, 1, 1, 16, 50, tzinfo=SHANGHAI),
+                         datetime(2026, 1, 2, 8, 50, tzinfo=SHANGHAI),
+                         schedule_key="2026-01-02:morning")
+
+        message = str(raised.exception)
+        self.assertIn("future.unknown.action", message)
+        self.assertIn("demo-old-task", message)
+        self.assertIn("未调用 OpenAI", message)
+        self.assertNotIn("synthetic-private-payload", message)
+        self.assertEqual(self.summarizer.calls, 0)
+        self.assertEqual(self.ding.calls, [])
+        runs = workflow.history.list_runs()
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["state"], "blocked")
+        self.assertIn("future.unknown.action", runs[0]["delivery_note"])
+        self.assertNotIn("synthetic-private-payload", runs[0]["delivery_note"])
+
 
 if __name__ == "__main__":
     unittest.main()
