@@ -94,14 +94,14 @@ def build_digest(collection, config, day, window=None):
         raise CollectionError("Unsupported activity schema override")
     issues = []
     if view.get("verified") is not True or not view.get("evidence"):
-        issues.append("昨天视图口径尚未核验")
+        issues.append("项目范围尚未核验")
     if config.get("api_contract_verified") is not True:
-        issues.append("API 字段及事件映射尚未核验")
+        issues.append("API 字段及事件规则尚未核验")
     if isinstance(selection, dict) and selection.get('mode') == 'v3-project-updated-half-open':
         if selection != updated_selection(report_day, start, end):
             raise CollectionError('Selection contract differs from report window')
     else:
-        issues.append("更新时间筛选与昨天视图的等价性尚未核验")
+        issues.append("任务当前更新时间筛选口径尚未核验")
     if collection.get("include_archived") != config.get("include_archived", False):
         raise CollectionError("Archive scope mismatch")
     items, audit, summary_inputs, seen = [], [], [], set()
