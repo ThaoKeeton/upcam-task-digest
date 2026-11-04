@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from automated_digest import AutomatedDigestBlocked, build_automated_digest, requires_openai_summary
+from automated_digest import (
+    AutomatedDigestBlocked, build_automated_digest, collection_validation_message,
+    requires_openai_summary,
+)
 from delivery_guard import DeliveryBlocked, DeliveryGuard
 from digest_pipeline import validate_view
 from report_contract import SHANGHAI
@@ -48,7 +51,7 @@ class DigestWorkflow:
         view = validate_view(config)
         if (config.get("api_contract_verified") is not True or view.get("verified") is not True
                 or not view.get("evidence")):
-            raise WorkflowBlocked("Teambition API fields and project view must be verified in setup")
+            raise WorkflowBlocked("请先在“项目映射与范围”完成 Teambition 只读字段验证、确认项目范围并保存。")
 
         required = tuple(key for key in SECRET_FIELDS if key != "openai_api_key") + INTERNAL_SECRET_FIELDS
         missing = [name for name in required if not self.secrets.get(name)]
@@ -81,16 +84,23 @@ class DigestWorkflow:
                 day=report_day, window=window,
             )
         except CollectionError as exc:
-            raise WorkflowBlocked(str(exc)) from None
+            message = collection_validation_message(exc)
+            self._record_blocked_attempt(start_local, end_local, schedule_key, message)
+            raise WorkflowBlocked(message) from None
         except Exception:
-            raise WorkflowBlocked("Teambition collection failed; no summary was sent to OpenAI") from None
+            message = "Teambition 只读采集失败；未调用 OpenAI、未发送钉钉。检查网络、凭据和项目读取权限后，使用“只读诊断当前数据”重试。"
+            self._record_blocked_attempt(start_local, end_local, schedule_key, message)
+            raise WorkflowBlocked(message) from None
 
         try:
             needs_openai = requires_openai_summary(collection, config, report_day, window)
         except AutomatedDigestBlocked as exc:
+            self._record_blocked_attempt(start_local, end_local, schedule_key, str(exc))
             raise WorkflowBlocked(str(exc)) from None
-        except (ValueError, CollectionError):
-            raise WorkflowBlocked("Automatic source validation failed; no text was sent to OpenAI") from None
+        except (ValueError, CollectionError) as exc:
+            message = collection_validation_message(exc)
+            self._record_blocked_attempt(start_local, end_local, schedule_key, message)
+            raise WorkflowBlocked(message) from None
 
         model = self.settings.get("openai_model")
         effort = self.settings.get("openai_reasoning_effort")
@@ -114,11 +124,16 @@ class DigestWorkflow:
                 client=self.summarizer, window=window, service_tier=service_tier,
             )
         except AutomatedDigestBlocked as exc:
+            self._record_blocked_attempt(start_local, end_local, schedule_key, str(exc))
             raise WorkflowBlocked(str(exc)) from None
         except Exception:
-            raise WorkflowBlocked("Automatic summary failed; this digest was not sent") from None
+            message = "自动摘要或本地校验失败；本次未发送钉钉。检查本机配置和运行记录中的诊断说明。"
+            self._record_blocked_attempt(start_local, end_local, schedule_key, message)
+            raise WorkflowBlocked(message) from None
         if report.get("ready_to_send") is not True or report.get("issues"):
-            raise WorkflowBlocked("Automatic report validation failed; this digest was not sent")
+            message = "自动日报仍含未解决的校验问题；本次未发送钉钉。请使用“只读诊断当前数据”检查范围、映射和事件。"
+            self._record_blocked_attempt(start_local, end_local, schedule_key, message)
+            raise WorkflowBlocked(message)
 
         try:
             run_id = self.history.create_draft(
@@ -160,3 +175,11 @@ class DigestWorkflow:
 
         return {"run_id": run_id, "state": "sent", "report": report,
                 "window_start": start_local, "window_end": end_local}
+
+    def _record_blocked_attempt(self, start_local, end_local, schedule_key, note):
+        """Save only the safe local diagnostic; never persist Teambition records or secrets."""
+        try:
+            self.history.create_blocked_attempt(start_local, end_local, note, schedule_key)
+        except Exception:
+            # Diagnostic persistence must never mask the original fail-closed result.
+            pass

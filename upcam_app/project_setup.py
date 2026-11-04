@@ -34,7 +34,7 @@ class ProjectProbe:
 
 
 def parse_owner_mapping_tsv(source) -> dict[str, str]:
-    """Parse the UI's explicit ID<TAB>name bulk import without partial writes."""
+    """Parse either a JSON object or ID<TAB>name rows without partial writes."""
     if not isinstance(source, str) or not source.strip():
         raise ProjectSetupError("批量成员映射内容为空或超出大小限制。")
     try:
@@ -42,15 +42,30 @@ def parse_owner_mapping_tsv(source) -> dict[str, str]:
             raise ProjectSetupError("批量成员映射内容为空或超出大小限制。")
     except UnicodeError:
         raise ProjectSetupError("批量成员映射内容编码无效。") from None
-    mapping = {}
-    try:
+    normalized = source.lstrip("\ufeff \t\r\n")
+    entries = None
+    if normalized.startswith("{"):
+        try:
+            decoded = json.loads(normalized, object_pairs_hook=_pairs_without_duplicates)
+        except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
+            raise ProjectSetupError("JSON 格式无效或成员 ID 重复；请粘贴“成员 ID”对应“姓名”的 JSON 对象。") from None
+        if not isinstance(decoded, dict):
+            raise ProjectSetupError("JSON 必须是“成员 ID”对应“姓名”的对象。")
+        entries = decoded.items()
+    else:
+        tsv_entries = []
         for line in source.splitlines():
             if not line.strip():
                 continue
             parts = line.split("\t")
             if len(parts) != 2:
-                raise ProjectSetupError("每行必须只有一个制表符。")
-            member_id, name = parts
+                raise ProjectSetupError("每行必须包含且只包含一个制表符，格式为成员 ID<TAB>姓名。")
+            tsv_entries.append((parts[0], parts[1]))
+        entries = tsv_entries
+
+    mapping = {}
+    try:
+        for member_id, name in entries:
             identifier(member_id)
             if (member_id in mapping or not isinstance(name, str) or not name.strip()
                     or name != name.strip()

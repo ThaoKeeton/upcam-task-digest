@@ -14,6 +14,7 @@ class HistoryError(RuntimeError):
 
 
 _STATES = ("preview", "prepared", "sending", "sent", "blocked", "delivery_unknown")
+MAX_DIAGNOSTIC_CHARS = 2000
 
 
 class HistoryStore:
@@ -104,6 +105,28 @@ class HistoryStore:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (run_id, _utc_now(), start.isoformat(timespec="minutes"),
                      end.isoformat(timespec="minutes"), source, state, markdown, digest_hash, schedule_key))
+            except sqlite3.IntegrityError as exc:
+                raise HistoryError("This scheduled slot already has a run record") from exc
+        return run_id
+
+    def create_blocked_attempt(self, start: datetime, end: datetime, note: str,
+                               schedule_key: str | None = None) -> str:
+        """Persist a sanitized pre-send diagnostic without creating a sendable draft."""
+        if (not isinstance(start, datetime) or not isinstance(end, datetime) or end <= start
+                or not isinstance(note, str) or not note.strip()):
+            raise HistoryError("A blocked run needs a valid range and diagnostic")
+        run_id = str(uuid.uuid4())
+        markdown = "未生成日报；本次校验已阻断，未发送任何消息。"
+        digest_hash = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+        with self._connect() as db:
+            try:
+                db.execute("""INSERT INTO digest_runs
+                    (run_id, created_at_utc, window_start_local, window_end_local, source,
+                     state, digest_markdown, digest_sha256, schedule_key, delivery_note)
+                    VALUES (?, ?, ?, ?, 'teambition', 'blocked', ?, ?, ?, ?)""",
+                    (run_id, _utc_now(), start.isoformat(timespec="minutes"),
+                     end.isoformat(timespec="minutes"), markdown, digest_hash,
+                     schedule_key, note[:MAX_DIAGNOSTIC_CHARS]))
             except sqlite3.IntegrityError as exc:
                 raise HistoryError("This scheduled slot already has a run record") from exc
         return run_id
