@@ -225,7 +225,18 @@ def build_digest(collection, config, day, window=None):
             comments.sort(key=lambda c: (c['create_time'] or '', c['event_id']))
             candidates = [c for c in comments if not c['omit_from_summary']]
             excerpts = [c['text'] for c in candidates if c['text']]
-            descriptions.append("评论内容语义归纳待复核")
+            attachment_comments = [c for c in comments if c.get('attachment_only')]
+            # The same local file ID may be referenced by several comments.
+            # Count distinct validated IDs within this task, without reading files.
+            file_ids = {file_id for c in comments if not c['extraction_needs_review']
+                        for file_id in c['payload_evidence'].get('files', c['extra_evidence'].get('files', []))}
+            file_count = len(file_ids)
+            if attachment_comments:
+                descriptions.append(f"仅附件评论 {len(attachment_comments)} 条")
+            if file_count:
+                descriptions.append(f"评论附有 {file_count} 个文件，未读取文件内容")
+            if any(c['semantic_review_required'] for c in candidates):
+                descriptions.append("评论内容语义归纳待复核")
             if excerpts:
                 excerpt = ' / '.join(excerpts)
                 descriptions.append("原文摘录：" + excerpt[:240] + ("…（全文见复核输入）" if len(excerpt) > 240 else ""))

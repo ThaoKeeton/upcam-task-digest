@@ -371,9 +371,15 @@ public sealed partial class MainWindow
             ActionButton("只读诊断", "diagnose", async () =>
             {
                 await EnsureSavedAsync();
+                _state.ExportAvailable = false;
+                _state.DiagnosticFileStem = "";
+                Navigate("run");
                 var result = await Worker.SendAsync("diagnose", _state.WindowPayload());
                 _state.Output = Value(result, "message");
                 _state.ExportAvailable = result["export_available"]?.GetValue<bool>() == true;
+                _state.DiagnosticFileStem = Value(result, "diagnostic_file_stem");
+                if (result["diagnostic"] is JsonObject metadata)
+                    _state.Output += $"\n\n诊断 v{Value(metadata, "application_version")} · UTC {Value(metadata, "created_at_utc")}";
                 Navigate("run"); SetStatus(Value(result, "safety", "未调用 OpenAI；未发送钉钉。"));
             }, accent: true),
             ActionButton("生成并自动发送", "run-manual", async () =>
@@ -425,13 +431,15 @@ public sealed partial class MainWindow
 
     private async Task ExportDiagnosticAsync()
     {
-        var picker = new FileSavePicker { SuggestedFileName = "teambition-safe-structure" };
+        if (!_state.ExportAvailable || string.IsNullOrEmpty(_state.DiagnosticFileStem))
+            throw new InvalidOperationException("请先针对当前设置和时间范围重新运行只读诊断。");
+        var picker = new FileSavePicker { SuggestedFileName = _state.DiagnosticFileStem };
         picker.FileTypeChoices.Add("JSON", new List<string> { ".json" });
         WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
         StorageFile? file = await picker.PickSaveFileAsync();
         if (file is null) return;
-        await Worker.SendAsync("export_diagnostic_to_file", new JsonObject { ["path"] = file.Path });
-        SetStatus("已导出字段名、类型、长度与任务/动态 ID；不含标题、姓名、评论正文或凭据。分享前请检查 ID。");
+        await Worker.SendAsync("export_diagnostic_to_file", _state.DiagnosticExportPayload(file.Path));
+        SetStatus("已导出版本、时间窗、字段结构及任务/动态/缺失成员 ID；不含标题、姓名、评论正文或凭据。分享前请检查 ID。");
     }
 
     private FrameworkElement BuildHistory()

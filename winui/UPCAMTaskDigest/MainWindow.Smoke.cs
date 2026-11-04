@@ -29,6 +29,26 @@ public sealed partial class MainWindow
             ShowMainWindow();
             string output = Path.Combine(AppContext.BaseDirectory, "smoke-output");
             Directory.CreateDirectory(output);
+            try
+            {
+                ApplyInitializationResult(new JsonObject { ["application_version"] = "0.0.0" });
+                throw new InvalidOperationException("Incompatible initialization unexpectedly succeeded");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("版本不一致")) { }
+            Assert(!_ready && _worker is null && !Navigation.IsEnabled && !SaveButton.IsEnabled && !PageHost.IsEnabled,
+                "Incompatible worker is disposed and all business controls are disabled");
+            bool incompatibleActionInvoked = false;
+            bool accepted = await RunOperationAsync("Synthetic incompatible operation", () =>
+            {
+                incompatibleActionInvoked = true;
+                return Task.CompletedTask;
+            });
+            Assert(!accepted && !incompatibleActionInvoked,
+                "Manual action cannot run after incompatible initialization");
+            _worker = new WorkerClient(_smoke);
+            ApplyInitializationResult(await _worker.SendAsync("initialize"));
+            Assert(_ready && Navigation.IsEnabled && PageHost.IsEnabled && SaveButton.IsEnabled,
+                "Compatible synthetic worker restores native operation state");
             var titleBar = Find<TitleBar>("app-titlebar");
             Assert(titleBar is not null && ExtendsContentIntoTitleBar, "Native custom TitleBar replaces colored system title bar");
             Assert(titleBar!.IconSource is BitmapIconSource { ShowAsMonochrome: false }, "TitleBar keeps original icon colors");
@@ -116,6 +136,24 @@ public sealed partial class MainWindow
             Invoke(Find<Button>("diagnose")!);
             await WaitForAsync(() => !_busy);
             Assert(_state.ExportAvailable && _state.Output.Contains("通过"), "Read-only diagnostic button and safe export availability");
+            Assert(Title.Contains("v" + _state.ApplicationVersion) &&
+                _state.ApplicationVersion == typeof(MainWindow).Assembly.GetName().Version?.ToString(3),
+                "Visible native application and worker versions match");
+            Assert(_state.DiagnosticFileStem.StartsWith("teambition-diagnostic-v" + _state.ApplicationVersion),
+                "Diagnostic export suggests versioned unique filename");
+            string diagnosticPath = Path.Combine(output, _state.DiagnosticFileStem + ".json");
+            await Worker.SendAsync("export_diagnostic_to_file", _state.DiagnosticExportPayload(diagnosticPath));
+            JsonNode exported = JsonNode.Parse(File.ReadAllText(diagnosticPath))!;
+            Assert(exported["diagnostic"]?["application_version"]?.GetValue<string>() == _state.ApplicationVersion &&
+                exported["diagnostic"]?["report_window"]?["end_exclusive"] is not null,
+                "Native export writes actual version and explicit report window");
+            string previousStart = _state.ManualStart;
+            _state.ManualStart = DateTime.ParseExact(previousStart, "yyyy-MM-dd HH:mm", null)
+                .AddMinutes(-1).ToString("yyyy-MM-dd HH:mm");
+            Assert(!_state.ExportAvailable, "Changing report window invalidates cached export in native state");
+            Navigate("run");
+            Assert(!Find<Button>("export-diagnostic")!.IsEnabled, "Stale export button is disabled");
+            _state.ManualStart = previousStart;
             Invoke(Find<Button>("run-manual")!);
             await WaitForAsync(() => !_busy);
             Assert(_state.History.Count == 1, "Synthetic workflow and local history");

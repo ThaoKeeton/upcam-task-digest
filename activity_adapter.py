@@ -3,6 +3,7 @@
 import json
 import re
 import unicodedata
+from urllib.parse import unquote, urlsplit
 
 from teambition_readonly import CollectionError, identifier, validate_binding
 
@@ -106,18 +107,87 @@ def status_transition(content, config):
         return None
 
 
+def _comment_file_ids(value):
+    """Recognize references only; an ID says nothing about the file contents."""
+    if not isinstance(value, list):
+        return None
+    try:
+        if any(len(identifier(item)) != 24 for item in value) or len(set(value)) != len(value):
+            return None
+    except (CollectionError, TypeError):
+        return None
+    return value
+
+
+def _preview_text(value):
+    """Check opaque local metadata encoding and controls, without interpreting it."""
+    if not isinstance(value, str) or unsafe_controls(value):
+        return False
+    try:
+        value.encode('utf-8')
+    except UnicodeError:
+        return False
+    return True
+
+
+def _unavailable_preview(value, body):
+    """Validate only the observed empty-information stub, without fetching href."""
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(body, str) or not body.strip():
+        return False
+    preview = value[0]
+    if not isinstance(preview, dict) or set(preview) != {'href', 'type', 'info'}:
+        return False
+    # The captured contract establishes a string shape, not a renderer enum.
+    # Keep this opaque metadata local; never use it to infer preview contents.
+    if not _preview_text(preview['type']) or len(preview['type']) != 8:
+        return False
+    info = preview['info']
+    if (not isinstance(info, dict) or set(info) != {'describe', 'icon', 'title', 'extra'}
+            or any(info[key] is not None for key in ('describe', 'icon', 'title'))):
+        return False
+    extra = info['extra']
+    if (not isinstance(extra, dict) or set(extra) != {'contentType', 'errorMsg'}
+            or extra['contentType'] is not None or not _preview_text(extra['errorMsg'])):
+        return False
+    href = preview['href']
+    if (not isinstance(href, str) or not href.startswith(('http://', 'https://'))
+            or any(char.isspace() or char in '<>\\' for char in href)):
+        return False
+    try:
+        href.encode('utf-8')
+        decoded = unquote(href, errors='strict')
+        parsed = urlsplit(href)
+        if (unsafe_controls(decoded) or any(char in '\r\n\t<>\\' for char in decoded)
+                or not parsed.hostname or parsed.username is not None or parsed.password is not None
+                or '%' in parsed.netloc or (parsed.port is not None and not 1 <= parsed.port <= 65535)):
+            return False
+    except (ValueError, UnicodeError):
+        return False
+    # Compare complete URL tokens, never a prefix, nested query URL, or quote.
+    # A bare URL retains parentheses; only an explicit Markdown link supplies
+    # delimiters. This prevents matching the prefix of href + '(other-path)'.
+    body_urls = re.findall(r'''(?:^|[\s，。；！？、：])(https?://[^\s<>"'`，。；！？、]+)''', body)
+    body_urls += re.findall(r'''\[[^\[\]\r\n]*\]\((https?://[^\s()<>"'`]+)\)''', body)
+    return href in body_urls
+
+
 def comment_input(raw, event_id, when):
-    """Keep complete evidence; suppress only exact acknowledgement-only candidates.
+    """Keep complete evidence; select only validated author text for summary.
 
     Suppression affects summary input selection, never the audit evidence. An
-    acknowledgement may still be meaningful in context, so all comments require
-    semantic review. No LLM, instruction execution, or external requests occur.
+    attachment-only comment supplies a deterministic count, never file contents.
+    No LLM, instruction execution, preview lookup or file download occurs.
     """
     content = raw.get('content')
-    evidence_keys = ('attachments', 'dingFiles', 'files', 'images', 'data', 'mentions', 'renderMode', 'isOnlyNotifyMentions', 'quote')
+    evidence_keys = ('attachments', 'dingFiles', 'files', 'images', 'data', 'mentions', 'renderMode',
+                     'isOnlyNotifyMentions', 'quote', 'hrefPreview')
     extra = {k: raw[k] for k in evidence_keys if k in raw}
-    encoded = json.dumps({'content': content, 'extra': extra}, ensure_ascii=False)
-    if len(encoded.encode('utf-8')) > MAX_CONTENT:
+    try:
+        encoded = json.dumps({'content': content, 'extra': extra}, ensure_ascii=False, allow_nan=False)
+        too_large = len(encoded.encode('utf-8')) > MAX_CONTENT
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise CollectionError('Comment evidence cannot be safely encoded') from None
+    if too_large:
         raise CollectionError('Comment evidence exceeds review size budget')
     reasons, payload = [], None
     if isinstance(content, str):
@@ -131,11 +201,14 @@ def comment_input(raw, event_id, when):
     else:
         reasons.append('content 必须是 JSON 字符串')
     body = payload.get('comment') if payload is not None else None
+    # Only this exact observed tag is normalized. All original evidence is retained.
+    normalized_body = body.replace('<br>', '\n') if isinstance(body, str) else None
     payload_evidence = {k: payload[k] for k in ('attachments', 'dingFiles', 'files', 'mentions')
                         if payload is not None and k in payload}
     mode = payload.get('renderMode') if payload is not None else None
     if payload is not None:
-        if set(payload) - {'comment', 'attachments', 'dingFiles', 'files', 'renderMode', 'mentions', 'isOnlyNotifyMentions', 'quote'}:
+        if set(payload) - {'comment', 'attachments', 'dingFiles', 'files', 'renderMode', 'mentions',
+                           'isOnlyNotifyMentions', 'quote', 'hrefPreview'}:
             reasons.append('存在尚未识别的评论字段；完整对象保留')
     quotes = {source_name: source['quote'] for source_name, source in
               (('content', payload or {}), ('event', extra)) if 'quote' in source}
@@ -152,32 +225,55 @@ def comment_input(raw, event_id, when):
     structured = [item for item in quote_contexts.values() if item['format'] == 'id-content-json']
     if len(structured) > 1 and any(item != structured[0] for item in structured[1:]):
         reasons.append('评论内部与外层引用身份或内容冲突')
-    for source in (payload or {}, extra):
+    file_sources, previews = {}, {}
+    for source_name, source in (('content', payload or {}), ('event', extra)):
         for key in ('attachments', 'dingFiles', 'files', 'mentions'):
             if key in source and not isinstance(source[key], (list, dict) if key == 'mentions' else list):
                 reasons.append('附件或提及字段结构异常；证据保留')
+        if any(source.get(key) for key in ('attachments', 'dingFiles', 'images', 'data')):
+            reasons.append('存在尚未支持的非空附件、图片或数据；不推断内容')
+        for key in ('images', 'data'):
+            if (key in source and source[key] is not None
+                    and not (isinstance(source[key], (list, dict)) and not source[key])):
+                reasons.append('图片或数据字段仅支持空容器或 null；其他结构待复核')
+        if 'files' in source:
+            file_sources[source_name] = _comment_file_ids(source['files'])
+            if file_sources[source_name] is None:
+                reasons.append('files 必须是无重复的 24 字符文件 ID 列表；不读取文件内容')
+        if 'hrefPreview' in source:
+            previews[source_name] = source['hrefPreview']
+            if not _unavailable_preview(source['hrefPreview'], normalized_body):
+                reasons.append('hrefPreview 不符合已核验的不可用预览结构或正文 URL；不读取链接内容')
         if source.get('renderMode') not in (None, '', 'text', 'markdown'):
             reasons.append('renderMode 尚未支持；正文仅作原文字面内容')
         if 'isOnlyNotifyMentions' in source and type(source['isOnlyNotifyMentions']) is not bool:
             reasons.append('isOnlyNotifyMentions 必须为布尔值')
     if payload is not None:
-        for key in ('renderMode', 'isOnlyNotifyMentions'):
+        for key in ('renderMode', 'isOnlyNotifyMentions', 'files', 'attachments', 'dingFiles', 'hrefPreview'):
             if key in payload and key in extra and payload[key] != extra[key]:
                 reasons.append('评论内部与外层元数据冲突')
-    # Only this exact observed tag is normalized. All original evidence is retained.
-    normalized_body = body.replace('<br>', '\n') if isinstance(body, str) else None
+    valid_files = (next(iter(file_sources.values())) if file_sources
+                   and all(value is not None for value in file_sources.values()) else [])
+    file_count = len(valid_files)
+    attachment_shape = bool(payload is not None and body == ''
+                            and payload.get('attachments') == [] and payload.get('dingFiles') == []
+                            and _comment_file_ids(payload.get('files')) and mode in ('text', 'markdown')
+                            and type(payload.get('isOnlyNotifyMentions')) is bool
+                            and not quotes and not previews
+                            and not any(source.get('mentions') for source in (payload, extra)))
     plain = isinstance(normalized_body, str) and bool(normalized_body.strip())
     rich = plain and unsupported_markup(normalized_body)
     controls = plain and unsafe_controls(body)
-    if not plain:
+    if not plain and not attachment_shape:
         reasons.append('comment 正文缺失、为空或不是字符串')
     elif rich or controls:
         reasons.append('正文包含未支持富文本或控制字符；不推断渲染结果')
     normalized = ' '.join(normalized_body.split()) if plain and not rich and not controls else None
+    attachment_only = attachment_shape and not reasons
     # Even a short confirmation can carry substantive attachments or mentions.
     has_extra = (any(extra.get(k) for k in ('attachments', 'dingFiles', 'files', 'images', 'data', 'mentions'))
                  or any(payload_evidence.values())
-                 or any(quotes.values())
+                 or any(quotes.values()) or bool(previews)
                  or any(source.get('isOnlyNotifyMentions') is True for source in (payload or {}, extra)))
     acknowledgement = bool(normalized and not reasons and not has_extra
                            and normalized.casefold() in {'收到', '好的', '谢谢', 'ok', '👍'})
@@ -185,13 +281,15 @@ def comment_input(raw, event_id, when):
             'raw_content': content, 'parsed_payload': payload, 'body': body,
             'normalized_body': normalized_body,
             'quote_evidence': quotes, 'quote_role': QUOTE_ROLE, 'quote_contexts': quote_contexts,
+            'preview_evidence': previews, 'file_count': file_count, 'attachment_only': attachment_only,
             'text': normalized, 'render_mode': mode,
             'is_only_notify_mentions': payload.get('isOnlyNotifyMentions') if payload is not None else None,
             'extra_evidence': extra, 'payload_evidence': payload_evidence,
-            'omit_from_summary': acknowledgement,
-            'omission_reason': '仅确认性回复候选；原文保留，需结合上下文复核' if acknowledgement else None,
+            'omit_from_summary': acknowledgement or attachment_only,
+            'omission_reason': ('仅附件评论；统计文件数，未读取文件内容' if attachment_only else
+                                '仅确认性回复候选；原文保留，需结合上下文复核' if acknowledgement else None),
             'review_reasons': reasons, 'extraction_needs_review': bool(reasons),
-            'semantic_review_required': True}
+            'semantic_review_required': not attachment_only}
 
 
 

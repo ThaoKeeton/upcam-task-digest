@@ -67,7 +67,7 @@ class SafeStructureExportTests(unittest.TestCase):
         self.assertIsNone(events[2]["action_token"])
         self.assertIsNone(events[3]["action_token"])
         self.assertIsNone(events[4]["action_token"])
-        self.assertEqual(report["format"], "upcam-teambition-safe-shape-v3")
+        self.assertEqual(report["format"], "upcam-teambition-safe-shape-v4")
         self.assertNotIn("PRIVATE_ACTION_VALUE", json.dumps(report))
 
     def event(self, action, content, **extra):

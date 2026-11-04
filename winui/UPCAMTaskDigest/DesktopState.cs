@@ -24,10 +24,27 @@ internal sealed class DesktopState
     public string ApplicationVersion { get; set; } = "";
     public string RulesetRevision { get; set; } = "";
     public string ModelCacheStatus { get; set; } = "尚未刷新当前 API Key 可用模型。";
-    public string ManualStart { get; set; } = DateTime.Now.Date.ToString("yyyy-MM-dd HH:mm");
-    public string ManualEnd { get; set; } = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+    private string _manualStart = DateTime.Now.Date.ToString("yyyy-MM-dd HH:mm");
+    private string _manualEnd = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+    public string ManualStart
+    {
+        get => _manualStart;
+        set { if (_manualStart != value) InvalidateDiagnostic(); _manualStart = value; }
+    }
+    public string ManualEnd
+    {
+        get => _manualEnd;
+        set { if (_manualEnd != value) InvalidateDiagnostic(); _manualEnd = value; }
+    }
     public string Output { get; set; } = "选择时间范围后，先运行只读诊断。";
     public bool ExportAvailable { get; set; }
+    public string DiagnosticFileStem { get; set; } = "";
+
+    private void InvalidateDiagnostic()
+    {
+        ExportAvailable = false;
+        DiagnosticFileStem = "";
+    }
 
     public string Text(string key, string fallback = "") => Settings[key]?.GetValue<string>() ?? fallback;
     public bool Flag(string key) => Settings[key]?.GetValue<bool>() ?? false;
@@ -36,6 +53,8 @@ internal sealed class DesktopState
     {
         Settings[key] = value;
         Dirty = true;
+        if (key is "owner_names" or "status_names" or "resolved_status_ids" or "max_tasks_per_run")
+            InvalidateDiagnostic();
         if (key is "tenant_id" or "project_id" or "include_archived") InvalidateScope();
     }
     public JsonObject Map(string key) => Settings[key] as JsonObject ?? new JsonObject();
@@ -56,6 +75,7 @@ internal sealed class DesktopState
 
     private void InvalidateScope()
     {
+        InvalidateDiagnostic();
         Settings["api_contract_verified"] = false;
         if (Settings["view"] is JsonObject view)
         {
@@ -77,7 +97,11 @@ internal sealed class DesktopState
 
     public void Apply(JsonObject result)
     {
-        if (result["settings"] is JsonObject settings) Settings = (JsonObject)settings.DeepClone();
+        if (result["settings"] is JsonObject settings)
+        {
+            Settings = (JsonObject)settings.DeepClone();
+            InvalidateDiagnostic();
+        }
         if (result["secret_presence"] is JsonObject presence) SecretPresence = (JsonObject)presence.DeepClone();
         if (result["scope_probe"] is JsonObject probe) ApplyProbe(probe);
         LedgerReady = result["ledger_ready"]?.GetValue<bool>() ?? LedgerReady;
@@ -119,6 +143,13 @@ internal sealed class DesktopState
                 payload[key] = Settings[key]?.DeepClone();
             payload["task_equals"] = Filters.DeepClone();
         }
+        return payload;
+    }
+
+    public JsonObject DiagnosticExportPayload(string path)
+    {
+        var payload = WindowPayload();
+        payload["path"] = path;
         return payload;
     }
 }
