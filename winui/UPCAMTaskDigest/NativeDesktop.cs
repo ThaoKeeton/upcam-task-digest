@@ -14,6 +14,7 @@ internal sealed class NativeDesktop : IDisposable
     private readonly Func<bool> _closeRequested;
     private readonly string _iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Teambition.ico");
     private IntPtr _trayIcon;
+    private IntPtr _largeWindowIcon;
     private readonly uint _taskbarCreated = RegisterWindowMessage("TaskbarCreated");
     private const uint TrayMessage = 0x8000 + 37;
     public bool TrayReady { get; private set; }
@@ -29,11 +30,18 @@ internal sealed class NativeDesktop : IDisposable
             throw new InvalidOperationException("无法初始化窗口消息处理。");
         try
         {
-            _trayIcon = LoadAssetIcon(GetDpiForWindow(_hwnd));
+            uint dpi = GetDpiForWindow(_hwnd);
+            _trayIcon = LoadAssetIcon(dpi);
+            _largeWindowIcon = LoadAssetIcon(dpi, small: false);
+            SetWindowIcons();
             AddIcon();
         }
         catch
         {
+            SendMessage(_hwnd, 0x0080, UIntPtr.Zero, IntPtr.Zero);
+            SendMessage(_hwnd, 0x0080, (UIntPtr)1, IntPtr.Zero);
+            if (_trayIcon != IntPtr.Zero) DestroyIcon(_trayIcon);
+            if (_largeWindowIcon != IntPtr.Zero) DestroyIcon(_largeWindowIcon);
             RemoveWindowSubclass(_hwnd, _callback, 1);
             throw;
         }
@@ -52,10 +60,10 @@ internal sealed class NativeDesktop : IDisposable
         TrayReady = ShellNotifyIcon(0, ref data);
     }
 
-    private IntPtr LoadAssetIcon(uint dpi)
+    private IntPtr LoadAssetIcon(uint dpi, bool small = true)
     {
         IntPtr icon = LoadImage(IntPtr.Zero, _iconPath, 1,
-            GetSystemMetricsForDpi(49, dpi), GetSystemMetricsForDpi(50, dpi), 0x10);
+            GetSystemMetricsForDpi(small ? 49 : 11, dpi), GetSystemMetricsForDpi(small ? 50 : 12, dpi), 0x10);
         if (icon == IntPtr.Zero) throw new InvalidOperationException("无法读取应用图标；请完整解压 Assets 文件夹。");
         return icon;
     }
@@ -63,12 +71,27 @@ internal sealed class NativeDesktop : IDisposable
     private void UpdateIconForDpi(uint dpi)
     {
         IntPtr replacement = LoadAssetIcon(dpi);
+        IntPtr large;
+        try { large = LoadAssetIcon(dpi, small: false); }
+        catch { DestroyIcon(replacement); throw; }
         IntPtr previous = _trayIcon;
+        IntPtr previousLarge = _largeWindowIcon;
         _trayIcon = replacement;
+        _largeWindowIcon = large;
+        SetWindowIcons();
         NotifyIconData data = Data();
         TrayReady = ShellNotifyIcon(1, ref data);
         if (!TrayReady) AddIcon();
         if (previous != IntPtr.Zero) DestroyIcon(previous);
+        if (previousLarge != IntPtr.Zero) DestroyIcon(previousLarge);
+    }
+
+    private void SetWindowIcons()
+    {
+        // Select exact small/large frames instead of letting AppWindow resize a
+        // different frame. The small window and tray share the same owned HICON.
+        SendMessage(_hwnd, 0x0080, UIntPtr.Zero, _trayIcon);
+        SendMessage(_hwnd, 0x0080, (UIntPtr)1, _largeWindowIcon);
     }
 
     internal IntPtr TrayIconHandle => _trayIcon;
@@ -106,9 +129,11 @@ internal sealed class NativeDesktop : IDisposable
         if (message == _taskbarCreated) AddIcon();
         if (message == 0x02E0)
         {
+            IntPtr result = DefSubclassProc(hwnd, message, wparam, lparam);
             // A missing moved asset must not throw across a native window callback.
             try { UpdateIconForDpi((uint)(wparam.ToUInt64() & 0xFFFF)); }
             catch (InvalidOperationException) { }
+            return result;
         }
         if (message == TrayMessage)
         {
@@ -121,6 +146,7 @@ internal sealed class NativeDesktop : IDisposable
     }
 
     public void RequestCaptionClose() => PostMessage(_hwnd, 0x0112, (UIntPtr)0xF060, IntPtr.Zero);
+    internal void RequestSystemCommand(uint command) => PostMessage(_hwnd, 0x0112, (UIntPtr)command, IntPtr.Zero);
 
     private void ShowMenu()
     {
@@ -159,7 +185,10 @@ internal sealed class NativeDesktop : IDisposable
         NotifyIconData data = Data();
         ShellNotifyIcon(2, ref data);
         RemoveWindowSubclass(_hwnd, _callback, 1);
+        SendMessage(_hwnd, 0x0080, UIntPtr.Zero, IntPtr.Zero);
+        SendMessage(_hwnd, 0x0080, (UIntPtr)1, IntPtr.Zero);
         if (_trayIcon != IntPtr.Zero) { DestroyIcon(_trayIcon); _trayIcon = IntPtr.Zero; }
+        if (_largeWindowIcon != IntPtr.Zero) { DestroyIcon(_largeWindowIcon); _largeWindowIcon = IntPtr.Zero; }
         TrayReady = false;
     }
 

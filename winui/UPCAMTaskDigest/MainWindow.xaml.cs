@@ -225,6 +225,8 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
 
     private void ShowMainWindow()
     {
+        if (AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized } presenter)
+            presenter.Restore();
         AppWindow.Show();
         Activate();
     }

@@ -15,6 +15,8 @@ class SafeStructureExportTests(unittest.TestCase):
             '{"comment":"one","comment":"two"}',
             '{"comment":NaN}',
             json.dumps('{"text":"PRIVATE_DOUBLE_ENCODED"}'),
+            '{"comment":1e999}',
+            '{"comment":-1e999}',
         ]
         report = safe_structure_export(self.collection([
             self.event("comment", {"comment": "PRIVATE_NEW_BODY", "quote": value}, id=f"quote-{i}")
@@ -25,7 +27,7 @@ class SafeStructureExportTests(unittest.TestCase):
         self.assertTrue(checks[0]["json_shape"]["json_valid"])
         self.assertEqual(checks[0]["json_shape"]["fields"]["comment"]["type"], "string")
         self.assertEqual(checks[0]["json_shape"]["fields"]["author"]["fields"]["name"]["type"], "string")
-        self.assertTrue(all(not checks[i]["json_shape"]["json_valid"] for i in (1, 2, 3)))
+        self.assertTrue(all(not checks[i]["json_shape"]["json_valid"] for i in (1, 2, 3, 5, 6)))
         self.assertEqual(checks[4]["json_shape"]["json_scalar_type"], "string")
         self.assertEqual(checks[4]["decoded_string_shape"]["fields"]["text"]["type"], "string")
         self.assertTrue(all(e["comment_check"]["needs_review"] for e in report["tasks"][0]["activities"][:4]))
@@ -50,6 +52,8 @@ class SafeStructureExportTests(unittest.TestCase):
             self.event("update_tasklist", {"from": {}, "to": {}}),
             self.event("PRIVATE_ACTION_VALUE", {}, id="private-action"),
             self.event("not an api token", {}, id="invalid-action"),
+            self.event("synthetic.private.person", {}, id="private-lowercase-action"),
+            self.event("synthetic-api-key-012345", {}, id="private-token-action"),
         ])
         report = safe_structure_export(collection, {}, "2026-01-02")
         events = report["tasks"][0]["activities"]
@@ -58,6 +62,8 @@ class SafeStructureExportTests(unittest.TestCase):
         self.assertEqual(events[0]["action_token"], "update_tasklist")
         self.assertIsNone(events[1]["action_token"])
         self.assertIsNone(events[2]["action_token"])
+        self.assertIsNone(events[3]["action_token"])
+        self.assertIsNone(events[4]["action_token"])
         self.assertEqual(report["format"], "upcam-teambition-safe-shape-v3")
         self.assertNotIn("PRIVATE_ACTION_VALUE", json.dumps(report))
 

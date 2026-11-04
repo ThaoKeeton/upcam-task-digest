@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import unicodedata
 from datetime import datetime
@@ -22,7 +23,7 @@ _MAX_TASKS = 1000
 _MAX_ACTIVITIES_PER_TASK = 1000
 _SAFE_FIELD = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}\Z")
 _OBSERVED_UNDERSCORE_FIELDS = frozenset({"_executorId", "_oldExecutorId"})
-_ACTION_TOKEN = re.compile(r"[a-z][a-z0-9_.-]{0,47}\Z")
+_EXPORT_ACTION_TOKENS = OBSERVED_ACTIONS | frozenset({"update_tasklist"})
 _QUOTE_FIELDS = frozenset({
     "id", "_id", "comment", "content", "text", "quote", "renderMode", "attachments",
     "dingFiles", "files", "images", "mentions", "isOnlyNotifyMentions", "author", "creator",
@@ -52,6 +53,13 @@ def _type_name(value) -> str:
     if isinstance(value, list):
         return "array"
     return "unsupported"
+
+
+def _finite_float(value):
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError("Numeric value exceeds the finite parser range")
+    return result
 
 
 def _field_shapes(value, depth: int, allowed_fields=None):
@@ -91,6 +99,7 @@ def _parse_json_shape(value, allowed_fields=None):
         return result
     try:
         decoded = json.loads(value, object_pairs_hook=_unique_object,
+                             parse_float=_finite_float,
                              parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()))
     except (ValueError, TypeError, RecursionError, UnicodeError):
         return result
@@ -305,7 +314,7 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
             shaped = {
                 "event_id": event_id,
                 "action": safe_action,
-                "action_token": action if isinstance(action, str) and _ACTION_TOKEN.fullmatch(action) else None,
+                "action_token": action if isinstance(action, str) and action in _EXPORT_ACTION_TOKENS else None,
                 "outer_field_names": sorted(key for key in activity if _safe_field_name(key))[:_MAX_FIELDS],
                 "create_time_type": _type_name(activity.get("createTime")),
                 "create_time_has_timezone": _aware_timestamp(activity.get("createTime")),

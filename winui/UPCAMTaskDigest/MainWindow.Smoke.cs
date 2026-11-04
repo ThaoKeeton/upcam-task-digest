@@ -1,4 +1,5 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
@@ -26,6 +27,8 @@ public sealed partial class MainWindow
         try
         {
             ShowMainWindow();
+            string output = Path.Combine(AppContext.BaseDirectory, "smoke-output");
+            Directory.CreateDirectory(output);
             var titleBar = Find<TitleBar>("app-titlebar");
             Assert(titleBar is not null && ExtendsContentIntoTitleBar, "Native custom TitleBar replaces colored system title bar");
             Assert(titleBar!.IconSource is BitmapIconSource { ShowAsMonochrome: false }, "TitleBar keeps original icon colors");
@@ -40,8 +43,21 @@ public sealed partial class MainWindow
             }
             Assert(_native!.WindowIconHandle != IntPtr.Zero && _native.TrayIconHandle != IntPtr.Zero,
                 "Window and tray both contain actual native icon handles");
+            await NativeUiEvidence.CaptureIconAsync(_native.WindowIconHandle, 32, Path.Combine(output, "window-icon.png"));
+            await NativeUiEvidence.CaptureIconAsync(_native.TrayIconHandle, 32, Path.Combine(output, "tray-icon.png"));
             Assert(NativeUiEvidence.IconPixels(_native.WindowIconHandle, 16).SequenceEqual(
                 NativeUiEvidence.IconPixels(_native.TrayIconHandle, 16)), "Actual window and tray icon pixels match");
+            _native.RequestSystemCommand(0xF030);
+            await WaitForAsync(() => AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Maximized });
+            Assert(true, "Native maximize system command remains functional");
+            _native.RequestSystemCommand(0xF120);
+            await WaitForAsync(() => AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Restored });
+            Assert(true, "Native restore system command remains functional");
+            _native.RequestSystemCommand(0xF020);
+            await WaitForAsync(() => AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized });
+            ShowMainWindow();
+            await WaitForAsync(() => AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Restored });
+            Assert(true, "Tray show restores a minimized native window");
             await VerifyUtf8PipeBoundariesAsync();
             _state.ManualStart = DateTime.Now.AddHours(-2).ToString("yyyy-MM-dd HH:mm");
             _state.ManualEnd = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
@@ -95,8 +111,6 @@ public sealed partial class MainWindow
             await WaitForAsync(() => !_busy);
             Assert(_state.History.Count == 1, "Synthetic workflow and local history");
 
-            string output = Path.Combine(AppContext.BaseDirectory, "smoke-output");
-            Directory.CreateDirectory(output);
             foreach (var size in new[] { new SizeInt32(1180, 800), new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540) })
             {
                 AppWindow.Resize(size);
@@ -108,7 +122,7 @@ public sealed partial class MainWindow
                     Navigation.DisplayMode == NavigationViewDisplayMode.Expanded, "Navigation uses inline pane at " + size.Width);
                 Rect pageBounds = PageHost.TransformToVisual(RootGrid).TransformBounds(new Rect(0, 0, PageHost.ActualWidth, PageHost.ActualHeight));
                 Assert(pageBounds.Left >= Navigation.OpenPaneLength, "Expanded navigation reserves content space at " + size.Width);
-                Button? toggle = FindIn<Button>(AppTitleBar, x => x is FrameworkElement fe && fe.Name == "PaneToggleButton");
+                Button? toggle = FindIn<Button>(AppTitleBar, x => x is FrameworkElement fe && fe.Name == "PART_PaneToggleButton");
                 Assert(toggle is not null, "Native title bar pane button exists");
                 Invoke(toggle!);
                 await Task.Delay(100);
