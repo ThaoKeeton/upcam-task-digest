@@ -1,0 +1,95 @@
+using System.Text.Json.Nodes;
+
+namespace Upcam.Desktop;
+
+internal sealed class DesktopState
+{
+    public JsonObject Settings { get; private set; } = new();
+    public JsonObject SecretPresence { get; private set; } = new();
+    public JsonObject Efforts { get; set; } = new();
+    public JsonArray Models { get; set; } = new();
+    public JsonArray FastModels { get; set; } = new();
+    public JsonArray History { get; set; } = new();
+    public Dictionary<string, string> SecretDrafts { get; } = new();
+    public HashSet<string> CandidateOwners { get; } = new();
+    public HashSet<string> CandidateStatuses { get; } = new();
+    public Dictionary<string, string> StatusSuggestions { get; } = new();
+    public bool ScopeConfirmed { get; set; }
+    public bool Dirty { get; set; }
+    public bool LedgerReady { get; set; }
+    public string LedgerMessage { get; set; } = "";
+    public string DataDirectory { get; set; } = "";
+    public string ApplicationVersion { get; set; } = "";
+    public string RulesetRevision { get; set; } = "";
+    public string ModelCacheStatus { get; set; } = "尚未刷新当前 API Key 可用模型。";
+    public string ManualStart { get; set; } = DateTime.Now.Date.ToString("yyyy-MM-dd HH:mm");
+    public string ManualEnd { get; set; } = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+    public string Output { get; set; } = "选择时间范围后，先运行只读诊断。";
+    public bool ExportAvailable { get; set; }
+
+    public string Text(string key, string fallback = "") => Settings[key]?.GetValue<string>() ?? fallback;
+    public bool Flag(string key) => Settings[key]?.GetValue<bool>() ?? false;
+    public int Number(string key, int fallback) => Settings[key]?.GetValue<int>() ?? fallback;
+    public void Set(string key, JsonNode? value)
+    {
+        Settings[key] = value;
+        Dirty = true;
+        if (key is "tenant_id" or "project_id" or "include_archived") ScopeConfirmed = false;
+    }
+    public JsonObject Map(string key) => Settings[key] as JsonObject ?? new JsonObject();
+    public JsonObject Filters => (Settings["view"] as JsonObject)?["task_equals"] as JsonObject ?? new JsonObject();
+    public void SetFilters(JsonObject filters)
+    {
+        if (Settings["view"] is not JsonObject) Settings["view"] = new JsonObject();
+        Settings["view"]!["task_equals"] = filters.DeepClone();
+        ScopeConfirmed = false;
+        Dirty = true;
+    }
+
+    public void Apply(JsonObject result)
+    {
+        if (result["settings"] is JsonObject settings) Settings = (JsonObject)settings.DeepClone();
+        if (result["secret_presence"] is JsonObject presence) SecretPresence = (JsonObject)presence.DeepClone();
+        ScopeConfirmed = (Settings["view"] as JsonObject)?["verified"]?.GetValue<bool>() == true;
+        LedgerReady = result["ledger_ready"]?.GetValue<bool>() ?? LedgerReady;
+        LedgerMessage = result["ledger_message"]?.GetValue<string>() ?? LedgerMessage;
+        DataDirectory = result["data_directory"]?.GetValue<string>() ?? DataDirectory;
+        ApplicationVersion = result["application_version"]?.GetValue<string>() ?? ApplicationVersion;
+        RulesetRevision = result["ruleset_revision"]?.GetValue<string>() ?? RulesetRevision;
+        if (result["models"] is JsonArray) ApplyModels(result);
+        if (result["history"] is JsonArray history) History = (JsonArray)history.DeepClone();
+        SecretDrafts.Clear();
+        Dirty = false;
+    }
+
+    public void ApplyModels(JsonObject result)
+    {
+        Models = result["models"]?.DeepClone().AsArray() ?? new JsonArray();
+        Efforts = result["reasoning_efforts"]?.DeepClone().AsObject() ?? new JsonObject();
+        FastModels = result["fast_models"]?.DeepClone().AsArray() ?? new JsonArray();
+        string? fetched = result["fetched_at_utc"]?.GetValue<string>() ?? result["model_cache_fetched_at_utc"]?.GetValue<string>();
+        bool matches = result["model_cache_matches_key"]?.GetValue<bool>() == true;
+        ModelCacheStatus = result["model_cache_error"]?.GetValue<string>() ??
+            (fetched is null ? "尚无本机模型缓存；点击刷新后获取当前 API Key 可用模型。" :
+             $"缓存 {Models.Count} 个 API 模型 · {fetched}" + (matches ? "" : " · 当前 Key 尚未匹配，请手动刷新。"));
+    }
+
+    public JsonObject SavePayload() => new()
+    {
+        ["settings"] = Settings.DeepClone(),
+        ["secret_values"] = new JsonObject(SecretDrafts.Select(p => KeyValuePair.Create<string, JsonNode?>(p.Key, JsonValue.Create(p.Value)))),
+        ["clear_secrets"] = new JsonArray(),
+        ["scope_confirmed"] = ScopeConfirmed
+    };
+    public JsonObject WindowPayload(bool scope = false)
+    {
+        var payload = new JsonObject { ["start"] = ManualStart, ["end"] = ManualEnd };
+        if (scope)
+        {
+            foreach (string key in new[] { "tenant_id", "project_id", "include_archived", "max_tasks_per_run" })
+                payload[key] = Settings[key]?.DeepClone();
+            payload["task_equals"] = Filters.DeepClone();
+        }
+        return payload;
+    }
+}

@@ -5,3 +5,10 @@ __pycache__/
 *.sqlite3
 *.sqlite3-*
 runtime/
+dist/
+build/
+*.spec
+winui/**/bin/
+winui/**/obj/
+.vs/
+*.user

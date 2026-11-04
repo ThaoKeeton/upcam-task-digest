@@ -2,6 +2,7 @@
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -139,7 +140,9 @@ class ManualReviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'draft.json'
             write_private(path, {'synthetic': True})
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if os.name == 'posix':
+                # Windows user ACLs are not represented by POSIX mode bits.
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             with self.assertRaises(FileExistsError): write_private(path, {})
         with self.assertRaises(ValueError): write_private(FIXTURES / 'must-not-write.json', {})
 

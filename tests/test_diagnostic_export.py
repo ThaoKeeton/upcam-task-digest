@@ -8,6 +8,124 @@ from upcam_app.diagnostic_export import safe_structure_export
 
 
 class SafeStructureExportTests(unittest.TestCase):
+    def event(self, action, content, **extra):
+        return {
+            "id": "synthetic-event", "action": action,
+            "boundToObjectId": "synthetic-task", "boundToObjectType": "task",
+            "createTime": "2026-01-02T01:00:00Z",
+            "content": json.dumps(content, ensure_ascii=False), **extra,
+        }
+
+    def collection(self, activities, **task_fields):
+        return {
+            "pagination_complete": True, "selection": updated_selection("2026-01-02"),
+            "records": [{"task": {"id": "synthetic-task", "executorId": "synthetic-new",
+                                   "tfsId": "synthetic-done", "isDone": True, **task_fields},
+                         "activities": activities}],
+        }
+
+    def test_window_membership_is_half_open_and_unknown_without_valid_time_or_scope(self):
+        times = ["2026-01-01T15:59:59Z", "2026-01-01T16:00:00Z",
+                 "2026-01-02T15:59:59Z", "2026-01-02T16:00:00Z", "2026-01-02T12:00:00", None]
+        collection = self.collection([
+            self.event("create", {}, id=f"synthetic-event-{index}", createTime=value)
+            for index, value in enumerate(times)
+        ])
+        report = safe_structure_export(collection, {}, "2026-01-02")
+        self.assertEqual([event["in_report_window"] for event in report["tasks"][0]["activities"]],
+                         [False, True, True, False, None, None])
+        self.assertTrue(report["selection_check"]["matches_report_window"])
+        self.assertTrue(report["window_evaluation_available"])
+        legacy_call = safe_structure_export(collection, {})
+        self.assertFalse(legacy_call["window_evaluation_available"])
+        self.assertIsNone(legacy_call["selection_check"]["matches_report_window"])
+        self.assertTrue(all(event["in_report_window"] is None
+                            for event in legacy_call["tasks"][0]["activities"]))
+        encoded = json.dumps(report)
+        for value in times[:-1]:
+            self.assertNotIn(value, encoded)
+
+    def test_custom_window_checks_selection_and_reports_binding_without_ids_or_values(self):
+        window = ("2026-01-01T20:00:00Z", "2026-01-02T12:00:00Z")
+        collection = self.collection([
+            self.event("create", {}, createTime="2026-01-02T12:00:00Z"),
+            self.event("create", {}, id="synthetic-misbound", boundToObjectId="PRIVATE_OTHER_TASK"),
+        ])
+        report = safe_structure_export(collection, {}, "2026-01-02", window)
+        self.assertFalse(report["selection_check"]["matches_report_window"])
+        events = report["tasks"][0]["activities"]
+        self.assertFalse(events[0]["in_report_window"])
+        self.assertTrue(events[0]["task_binding_valid"])
+        self.assertFalse(events[1]["task_binding_valid"])
+        self.assertNotIn("PRIVATE_OTHER_TASK", json.dumps(report))
+        collection["selection"] = updated_selection("2026-01-02", *window)
+        self.assertTrue(safe_structure_export(collection, {}, "2026-01-02", window)
+                        ["selection_check"]["matches_report_window"])
+
+    def test_executor_id_fields_are_allowlisted_and_hidden_fields_remain_counted(self):
+        private_name = "SYNTHETIC_PRIVATE_EXECUTOR_NAME"
+        collection = self.collection([self.event("update_executor", {
+            "_executorId": "synthetic-new", "_oldExecutorId": "synthetic-old",
+            "_privateField": "SYNTHETIC_PRIVATE_PAYLOAD", "actionVersion": 1,
+            "payload": {"fromAutomation": True},
+        }, payload={"fromAutomation": False})])
+        config = {"owner_names": {"synthetic-new": private_name, "synthetic-old": private_name}}
+        report = safe_structure_export(collection, config)
+        event = report["tasks"][0]["activities"][0]
+        self.assertEqual(event["content_shape"]["fields"]["_executorId"]["type"], "string")
+        self.assertEqual(event["content_shape"]["fields"]["_oldExecutorId"]["type"], "string")
+        self.assertEqual(event["content_shape"]["other_field_count"], 1)
+        self.assertTrue(event["executor_check"]["previous_executor"]["mapping_present"])
+        self.assertTrue(event["executor_check"]["target_executor"]["id_valid"])
+        self.assertFalse(event["executor_check"]["automation_flags_match"])
+        self.assertTrue(event["executor_check"]["needs_review"])
+        encoded = json.dumps(report)
+        for value in (private_name, "synthetic-new", "synthetic-old", "_privateField",
+                      "SYNTHETIC_PRIVATE_PAYLOAD"):
+            self.assertNotIn(value, encoded)
+
+    def test_comment_text_checks_distinguish_supported_breaks_markup_and_control_categories(self):
+        collection = self.collection([
+            self.event("comment", {"comment": "PRIVATE_BODY<br>still pending",
+                                   "quote": "PRIVATE_QUOTE<br>context", "renderMode": "markdown"}),
+            self.event("comment", {"comment": "PRIVATE_BODY<p>SYNTHETIC_PRIVATE_RICH_TEXT</p>\u202e",
+                                   "quote": "PRIVATE_QUOTE\x00\u0085", "renderMode": "markdown"},
+                       id="synthetic-rich-comment"),
+        ])
+        report = safe_structure_export(collection, {})
+        plain, rich = [event["comment_check"] for event in report["tasks"][0]["activities"]]
+        self.assertEqual(plain["body_check"]["markup_categories"], ["exact_br"])
+        self.assertEqual(plain["quote_checks"]["content"]["markup_categories"], ["exact_br"])
+        self.assertEqual(plain["body_check"]["control_categories"], [])
+        self.assertTrue(plain["needs_review"])  # Diagnostics never relax extraction gates.
+        self.assertEqual(rich["body_check"]["markup_categories"], ["other_tag_like"])
+        self.assertEqual(rich["body_check"]["control_categories"], ["unicode_format"])
+        self.assertEqual(rich["quote_checks"]["content"]["control_categories"],
+                         ["ascii_control", "unicode_control"])
+        encoded = json.dumps(report)
+        for value in ("PRIVATE_BODY", "PRIVATE_QUOTE", "still pending", "context", "SYNTHETIC_PRIVATE_RICH_TEXT"):
+            self.assertNotIn(value, encoded)
+
+    def test_standard_rejection_reasons_distinguish_structure_from_title_pattern(self):
+        collection = self.collection([
+            self.event("standard", {"title": "关联了提交: SYNTHETIC_PRIVATE_COMMIT",
+                                    "customCreator": {"name": "SYNTHETIC_PRIVATE_SOURCE"}}),
+            self.event("standard", {"title": "SYNTHETIC_PRIVATE_OTHER_TITLE",
+                                    "customCreator": {"name": "SYNTHETIC_PRIVATE_SOURCE"}},
+                       id="synthetic-other-standard"),
+            self.event("standard", {"title": "关联了提交"}, id="synthetic-missing-creator"),
+        ])
+        report = safe_structure_export(collection, {})
+        checks = [event["commit_check"] for event in report["tasks"][0]["activities"]]
+        self.assertTrue(checks[0]["candidate_recognized"])
+        self.assertEqual(checks[0]["rejection_reasons"], ["title_pattern_does_not_prove_source"])
+        self.assertEqual(checks[1]["rejection_reasons"], ["unrecognized_title_pattern"])
+        self.assertEqual(checks[2]["rejection_reasons"], ["creator_name_unavailable"])
+        self.assertTrue(all(check["automatic_review_required"] for check in checks))
+        encoded = json.dumps(report, ensure_ascii=False)
+        for value in ("SYNTHETIC_PRIVATE_COMMIT", "SYNTHETIC_PRIVATE_SOURCE", "SYNTHETIC_PRIVATE_OTHER_TITLE"):
+            self.assertNotIn(value, encoded)
+
     def test_export_reports_nested_json_shapes_and_mapping_match_without_values(self):
         private_body = "SYNTHETIC_PRIVATE_COMMENT_SHOULD_NOT_LEAK"
         private_title = "SYNTHETIC_PRIVATE_TASK_TITLE_SHOULD_NOT_LEAK"

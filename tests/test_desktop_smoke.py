@@ -1,6 +1,7 @@
 import tempfile
 from pathlib import Path
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from desktop_app import DigestDesktopApp, verify_desktop_smoke
@@ -46,6 +47,7 @@ class _FakeApp:
         self.owner_bulk_text = object()
         self.owner_import_button = object()
         self.source_diagnostic_button = object()
+        self._tray_icon = SimpleNamespace(visible=True, menu=object())
 
 
 class _FakeSecretStore:

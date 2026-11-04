@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
@@ -31,7 +32,7 @@ class HistoryStore:
         return db
 
     def _initialize(self):
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             existing = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='digest_runs'").fetchone()
             if existing:
                 columns = {row[1] for row in db.execute("PRAGMA table_info(digest_runs)")}
@@ -97,7 +98,7 @@ class HistoryStore:
         run_id = str(uuid.uuid4())
         digest_hash = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
         state = "prepared" if source == "teambition" else "preview"
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             try:
                 db.execute("""INSERT INTO digest_runs
                     (run_id, created_at_utc, window_start_local, window_end_local, source,
@@ -118,7 +119,7 @@ class HistoryStore:
         run_id = str(uuid.uuid4())
         markdown = "未生成日报；本次校验已阻断，未发送任何消息。"
         digest_hash = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             try:
                 db.execute("""INSERT INTO digest_runs
                     (run_id, created_at_utc, window_start_local, window_end_local, source,
@@ -133,7 +134,7 @@ class HistoryStore:
 
     def start_delivery(self, run_id: str) -> dict:
         """Move a validated run directly to sending; no approval transition exists."""
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             cur = db.execute("UPDATE digest_runs SET state='sending', delivery_note=NULL "
                              "WHERE run_id=? AND state='prepared' AND source='teambition'", (run_id,))
             if cur.rowcount != 1:
@@ -144,7 +145,7 @@ class HistoryStore:
     def finish_delivery(self, run_id: str, state: str, note: str) -> None:
         if state not in ("sent", "blocked", "delivery_unknown"):
             raise HistoryError("Unsupported delivery result")
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             cur = db.execute("UPDATE digest_runs SET state=?, delivery_note=? WHERE run_id=? AND state='sending'",
                              (state, note[:240], run_id))
         if cur.rowcount != 1:
@@ -152,25 +153,25 @@ class HistoryStore:
 
     def recover_interrupted_sends(self) -> int:
         """A crash during a send is ambiguous; never auto-send it again."""
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             cur = db.execute("UPDATE digest_runs SET state='delivery_unknown', delivery_note=? WHERE state='sending'",
                              ("The app closed while delivery was in progress; verify DingTalk before action.",))
             return cur.rowcount
 
     def get(self, run_id: str) -> dict | None:
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             row = db.execute("SELECT * FROM digest_runs WHERE run_id=?", (run_id,)).fetchone()
         return dict(row) if row else None
 
     def has_schedule_key(self, schedule_key: str) -> bool:
         """Whether this slot has any local record, including a blocked or unknown delivery."""
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             row = db.execute("SELECT 1 FROM digest_runs WHERE schedule_key=? LIMIT 1",
                              (schedule_key,)).fetchone()
         return row is not None
 
     def list_runs(self, limit: int = 200) -> list[dict]:
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             rows = db.execute("SELECT * FROM digest_runs ORDER BY created_at_utc DESC LIMIT ?",
                               (max(1, min(limit, 1000)),)).fetchall()
         return [dict(row) for row in rows]
