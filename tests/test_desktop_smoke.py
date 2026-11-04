@@ -29,6 +29,10 @@ class _FakeNotebook:
 class _FakeApp:
     def __init__(self, labels):
         self.tabs = _FakeNotebook(labels)
+        self.project_probe_button = object()
+        self.owner_tree = object()
+        self.status_tree = object()
+        self.startup_check = object()
 
 
 class _FakeSecretStore:

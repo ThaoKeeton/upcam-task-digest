@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -12,7 +14,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from render_digest import render_digest
-from runtime_mappings import parse_config_json
+from runtime_mappings import validate_mappings
 from teambition_readonly import Client, CollectionError
 from upcam_app import APP_NAME, APP_VERSION, OPENAI_MODEL, OPENAI_REASONING_EFFORT, RULESET_REVISION
 from upcam_app.config import (
@@ -20,6 +22,13 @@ from upcam_app.config import (
     recoverable_schedule_occurrences, scheduled_window, user_data_dir, validate_settings,
 )
 from upcam_app.history import HistoryError, HistoryStore
+from upcam_app.project_setup import (
+    ProjectSetupError, analyze_project_probe, merge_owner_mappings, parse_owner_mapping_tsv,
+)
+from upcam_app.windows_integration import (
+    StartupIntegrationError, WindowsSingleInstance, configure_user_startup,
+    parse_launch_options,
+)
 from upcam_app.openai_models import (
     ModelCatalogError, OpenAIModelCatalog, cache_matches_key, reasoning_efforts,
 )
@@ -27,14 +36,19 @@ from openai_summarizer import KNOWN_FAST_MODELS
 from upcam_app.secrets import DpapiSecretStore, SECRET_FIELDS, SecretStoreError
 from upcam_app.workflow import DigestWorkflow, WorkflowBlocked
 from delivery_guard import DeliveryBlocked, DeliveryGuard, initialize_ledger
-from report_contract import SHANGHAI
+from report_contract import SHANGHAI, updated_selection
 
 
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 SAMPLE = ROOT / "examples" / "digest.json"
-MAPPING_KEYS = {
-    "api_contract_verified", "include_archived", "view", "owner_names",
-    "status_names", "resolved_status_ids",
+VIEW_FILTERS = {
+    "执行人 ID": "executorId",
+    "任务列表 ID": "tasklistId",
+    "阶段 ID": "stageId",
+    "状态 ID": "tfsId",
+    "自定义字段配置 ID": "scenariofieldconfigId",
+    "可见性": "visible",
+    "父任务 ID": "parentTaskId",
 }
 SMOKE_TEST_TABS = (
     "首次配置 / 自动运行",
@@ -44,7 +58,7 @@ SMOKE_TEST_TABS = (
 )
 
 
-def verify_desktop_smoke(app, sample_path=SAMPLE) -> bool:
+def verify_desktop_smoke(app, sample_path=SAMPLE, *, assert_hidden=False) -> bool:
     """Check the packaged UI's core tabs and bundled report template without network calls."""
     try:
         labels = tuple(app.tabs.tab(index, "text") for index in range(app.tabs.index("end")))
@@ -52,8 +66,20 @@ def verify_desktop_smoke(app, sample_path=SAMPLE) -> bool:
         raise RuntimeError("The desktop window did not initialize its tabs") from exc
     if labels != SMOKE_TEST_TABS:
         raise RuntimeError("The desktop window is missing a required application tab")
+    if not all(hasattr(app, name) for name in ("project_probe_button", "owner_tree", "status_tree", "startup_check")):
+        raise RuntimeError("The desktop window is missing project setup or Windows startup controls")
+    if hasattr(app, "mapping_editor"):
+        raise RuntimeError("The project setup UI must not require editing mapping JSON")
     if not Path(sample_path).is_file():
         raise RuntimeError("The packaged report template is missing")
+    if os.name == "nt" and (getattr(app, "_tray_icon", None) is None
+                             or not bool(getattr(app._tray_icon, "visible", False))
+                             or getattr(app._tray_icon, "menu", None) is None):
+        raise RuntimeError("The Windows system tray icon or its menu did not initialize")
+    if assert_hidden and (getattr(app, "_tray_icon", None) is None
+                          or not bool(getattr(app._tray_icon, "visible", False))
+                          or app.root.state() != "withdrawn"):
+        raise RuntimeError("The application did not start hidden with a working tray icon")
     return True
 
 
@@ -66,7 +92,7 @@ class DigestDesktopApp:
         "openai_api_key": "OpenAI API Key",
     }
 
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, *, start_hidden=False, tray_enabled=True):
         self.root = root
         self.root.title(f"{APP_NAME} · {APP_VERSION}")
         self.root.geometry("1080x850")
@@ -97,12 +123,92 @@ class DigestDesktopApp:
         self._job_lock = threading.Lock()
         self._scheduled_active: set[str] = set()
         self._handled_schedule_slots: set[str] = set()
+        self._tray_icon = None
         self._build()
         self._load_form()
         self._refresh_history()
+        self.root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
         self._set_status(self.ledger_message if not self.ledger_ready else
                          "请先完成 Teambition 项目映射，再保存配置并启用自动运行。")
+        if tray_enabled and os.name == "nt":
+            self._start_tray()
+        if start_hidden and self._tray_icon is not None:
+            self.root.after_idle(self.root.withdraw)
+            self._check_background_tray_ready(0)
+        elif start_hidden:
+            self._set_status("托盘不可用，已显示主窗口以避免隐藏后无法退出。")
         self.root.after(1000, self._schedule_tick)
+
+    def _start_tray(self):
+        try:
+            import pystray
+            from PIL import Image, ImageDraw
+            image = Image.new("RGB", (64, 64), "#163b5c")
+            draw = ImageDraw.Draw(image)
+            draw.rounded_rectangle((8, 8, 56, 56), radius=12, fill="#2f80b7")
+            draw.line((19, 34, 28, 43, 46, 21), fill="white", width=6)
+            menu = pystray.Menu(
+                pystray.MenuItem("显示主窗口", lambda _icon, _item: self.root.after(0, self._show_window),
+                                 default=True),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("退出应用", lambda _icon, _item: self.root.after(0, self._quit_application)),
+            )
+            self._tray_icon = pystray.Icon(APP_NAME, image, APP_NAME, menu)
+            self._tray_icon.run_detached()
+        except Exception:
+            self._tray_icon = None
+            self._set_status("系统托盘初始化失败；关闭窗口会退出应用，请重新启动程序检查安装。")
+
+    def _show_window(self):
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+
+    def _tray_ready(self):
+        return self._tray_icon is not None and bool(getattr(self._tray_icon, "visible", False))
+
+    def _check_background_tray_ready(self, attempts):
+        if self._tray_ready():
+            return
+        if attempts >= 10:
+            self._show_window()
+            self._set_status("系统托盘启动超时；已显示主窗口，避免应用隐藏后无法操作。")
+            return
+        try:
+            self.root.after(500, lambda: self._check_background_tray_ready(attempts + 1))
+        except tk.TclError:
+            pass
+
+    def _hide_to_tray(self):
+        if not self._tray_ready():
+            self._quit_application()
+            return
+        try:
+            self.root.withdraw()
+        except tk.TclError:
+            pass
+
+    def _quit_application(self):
+        if getattr(self, "_job_lock", None) is not None and self._job_lock.locked():
+            self._show_window()
+            if not messagebox.askyesno(
+                    "退出应用",
+                    "当前有日报任务正在运行。退出后，发送结果可能记为“结果不明”，程序不会自动重发。仍要退出？",
+                    parent=self.root):
+                return
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+            self._tray_icon = None
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
     def _prepare_ledger(self):
         path = self.data_dir / "delivery_ledger.sqlite3"
@@ -248,7 +354,15 @@ class DigestDesktopApp:
                         variable=self.values["auto_send_enabled"]).grid(
                             row=row, column=0, columnspan=4, sticky="w", pady=(8, 2))
         row += 1
-        ttk.Label(form, text="应用重开后会补跑过去 24 小时内、且自动执行已启用期间错过的时段；更早或启用前的时段跳过。应用关闭期间不能自行开机启动，需手动重开；已有记录（含结果不明）不会重发。",
+        self.values["start_with_windows"] = tk.BooleanVar(value=False)
+        self.startup_check = ttk.Checkbutton(
+            form, text="当前 Windows 用户登录时自动启动应用并最小化到系统托盘",
+            variable=self.values["start_with_windows"])
+        self.startup_check.grid(row=row, column=0, columnspan=4, sticky="w", pady=(2, 2))
+        if os.name != "nt":
+            self.startup_check.configure(state="disabled")
+        row += 1
+        ttk.Label(form, text="自动补跑仅限应用重新打开后 24 小时内、且自动执行已启用期间错过的时段。开机启动需要 Windows 已开机并且该用户登录；关机、休眠或未联网时不会执行。已有记录（含结果不明）不会重发。",
                   foreground="#8a4b00", wraplength=900).grid(
                       row=row, column=0, columnspan=4, sticky="w", pady=(0, 4))
         row += 1
@@ -265,26 +379,372 @@ class DigestDesktopApp:
         ttk.Button(actions, text="清除已保存服务密钥…", command=self._clear_secrets).pack(side="left")
 
     def _build_mapping(self):
-        tab = self.mapping_tab
-        tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(2, weight=1)
-        ttk.Label(tab, text="Teambition 项目映射与采集范围",
-                  font=("Microsoft YaHei UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(tab, text="日报格式和筛选规则由仓库模板维护。这里仅保存你自己的项目状态、成员 ID 映射和项目视图口径。完成核验后再勾选 api_contract_verified 与 view.verified。",
-                  foreground="#536174", wraplength=900).grid(row=1, column=0, sticky="w", pady=(6, 8))
-        frame = ttk.Frame(tab)
-        frame.grid(row=2, column=0, sticky="nsew")
-        frame.rowconfigure(0, weight=1)
-        frame.columnconfigure(0, weight=1)
-        self.mapping_editor = tk.Text(frame, wrap="none", font=("Consolas", 10), height=26)
-        yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.mapping_editor.yview)
-        xscroll = ttk.Scrollbar(frame, orient="horizontal", command=self.mapping_editor.xview)
-        self.mapping_editor.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
-        self.mapping_editor.grid(row=0, column=0, sticky="nsew")
-        yscroll.grid(row=0, column=1, sticky="ns")
-        xscroll.grid(row=1, column=0, sticky="ew")
-        ttk.Label(tab, text="字段示例：owner_names/status_names 是“Teambition ID: 显示名”；resolved_status_ids 列出哪些状态代表已解决。未匹配或未知事件会自动阻断发送。",
-                  foreground="#8a4b00", wraplength=900).grid(row=3, column=0, sticky="w", pady=(8, 0))
+        form = self._scrollable_frame(self.mapping_tab)
+        form.columnconfigure(0, weight=1)
+        form.columnconfigure(1, weight=1)
+        ttk.Label(form, text="Teambition 项目初始化与映射",
+                  font=("Microsoft YaHei UI", 12, "bold")).grid(
+                      row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(form,
+                  text="不需要编写 JSON。应用只使用仓库已批准的只读接口：从你选择的时间窗读取任务与动态样本，发现实际出现的 ID；不会调用 OpenAI 或发送钉钉。",
+                  foreground="#536174", wraplength=900).grid(
+                      row=1, column=0, columnspan=2, sticky="w", pady=(5, 8))
+
+        self.values["include_archived"] = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form, text="将已归档任务纳入采集范围", variable=self.values["include_archived"],
+                        command=self._scope_controls_changed).grid(
+                            row=2, column=0, sticky="w", pady=(0, 5))
+        probe_row = ttk.Frame(form)
+        probe_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        self.project_probe_button = ttk.Button(
+            probe_row, text="只读验证项目并发现映射 ID", command=self._probe_project)
+        self.project_probe_button.pack(side="left")
+        self.project_probe_status = tk.StringVar(value="尚未完成只读项目验证。")
+        ttk.Label(probe_row, textvariable=self.project_probe_status, foreground="#536174",
+                  wraplength=700).pack(side="left", padx=(10, 0))
+        ttk.Label(form,
+                  text="验证使用“自选时间 / 运行”页当前的开始和结束时间。为核对动态字段，请选择至少包含一条任务动态的区间。查询完整但无样本时不会解除门禁。",
+                  foreground="#8a4b00", wraplength=900).grid(
+                      row=4, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        ttk.Separator(form).grid(row=5, column=0, columnspan=2, sticky="ew", pady=6)
+        ttk.Label(form, text="项目视图范围",
+                  font=("Microsoft YaHei UI", 10, "bold")).grid(
+                      row=6, column=0, columnspan=2, sticky="w", pady=(2, 3))
+        ttk.Label(form,
+                  text="默认范围是此 Project ID 下、日报时间窗内所有符合仓库规则的任务。需要缩小范围时，可添加稳定字段等值条件。当前 API 不会替你判断网页里的自定义视图是否等价。",
+                  foreground="#536174", wraplength=900).grid(
+                      row=7, column=0, columnspan=2, sticky="w", pady=(0, 5))
+        filter_controls = ttk.Frame(form)
+        filter_controls.grid(row=8, column=0, columnspan=2, sticky="ew")
+        self.view_filter_label = tk.StringVar(value=next(iter(VIEW_FILTERS)))
+        ttk.Combobox(filter_controls, textvariable=self.view_filter_label,
+                     values=tuple(VIEW_FILTERS), state="readonly", width=23).pack(side="left")
+        self.view_filter_value = tk.StringVar()
+        ttk.Label(filter_controls, text="字段值 / ID").pack(side="left", padx=(10, 4))
+        ttk.Entry(filter_controls, textvariable=self.view_filter_value, width=32).pack(side="left")
+        ttk.Button(filter_controls, text="添加 / 更新条件", command=self._add_view_filter).pack(side="left", padx=7)
+        ttk.Button(filter_controls, text="删除选中条件", command=self._remove_view_filter).pack(side="left")
+        self.view_filter_tree = ttk.Treeview(form, columns=("field", "value"), show="headings", height=3)
+        self.view_filter_tree.heading("field", text="项目内筛选字段")
+        self.view_filter_tree.heading("value", text="字段值")
+        self.view_filter_tree.column("field", width=230, anchor="w")
+        self.view_filter_tree.column("value", width=380, anchor="w")
+        self.view_filter_tree.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(4, 2))
+        self.scope_confirm_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form,
+                        text="我已确认：以上项目、归档选项和筛选条件就是日报应覆盖的范围。",
+                        variable=self.scope_confirm_var).grid(
+                            row=10, column=0, columnspan=2, sticky="w", pady=(3, 4))
+
+        ttk.Separator(form).grid(row=11, column=0, columnspan=2, sticky="ew", pady=8)
+        ttk.Label(form, text="成员映射",
+                  font=("Microsoft YaHei UI", 10, "bold")).grid(
+                      row=12, column=0, sticky="w", pady=(2, 3))
+        ttk.Label(form, text="应用可发现采集样本里出现的成员 ID；已批准接口不会返回完整成员名册，姓名需从项目成员页核对。",
+                  foreground="#536174", wraplength=440).grid(
+                      row=13, column=0, sticky="w", pady=(0, 5))
+        owner_table = ttk.Frame(form)
+        owner_table.grid(row=14, column=0, sticky="nsew", padx=(0, 8))
+        owner_table.columnconfigure(0, weight=1)
+        self.owner_tree = ttk.Treeview(owner_table, columns=("id", "name", "source"), show="headings", height=5)
+        for column, title, width in (("id", "成员 ID", 190), ("name", "姓名", 130), ("source", "来源", 140)):
+            self.owner_tree.heading(column, text=title)
+            self.owner_tree.column(column, width=width, anchor="w")
+        self.owner_tree.grid(row=0, column=0, sticky="nsew")
+        owner_scroll = ttk.Scrollbar(owner_table, orient="vertical", command=self.owner_tree.yview)
+        owner_scroll.grid(row=0, column=1, sticky="ns")
+        self.owner_tree.configure(yscrollcommand=owner_scroll.set)
+        self.owner_tree.bind("<<TreeviewSelect>>", self._select_owner_mapping)
+        owner_controls = ttk.Frame(form)
+        owner_controls.grid(row=15, column=0, sticky="ew", padx=(0, 8), pady=(4, 2))
+        self.owner_id_input = tk.StringVar()
+        self.owner_name_input = tk.StringVar()
+        ttk.Label(owner_controls, text="成员 ID").grid(row=0, column=0, sticky="w")
+        ttk.Entry(owner_controls, textvariable=self.owner_id_input, width=26).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Label(owner_controls, text="姓名").grid(row=1, column=0, sticky="w")
+        ttk.Entry(owner_controls, textvariable=self.owner_name_input, width=26).grid(row=1, column=1, sticky="ew", padx=4)
+        ttk.Button(owner_controls, text="保存成员映射", command=self._save_owner_mapping).grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Button(owner_controls, text="删除选中映射", command=self._delete_owner_mapping).grid(row=2, column=1, sticky="w", pady=3)
+        ttk.Label(owner_controls, text="批量粘贴格式：每行一个“成员 ID<TAB>姓名”",
+                  foreground="#536174").grid(row=3, column=0, columnspan=2, sticky="w", pady=(3, 1))
+        self.owner_bulk_text = tk.Text(owner_controls, height=4, width=55, wrap="none", font=("Consolas", 9))
+        self.owner_bulk_text.grid(row=4, column=0, columnspan=2, sticky="ew")
+        ttk.Button(owner_controls, text="导入成员映射", command=self._import_owner_mappings).grid(
+            row=5, column=0, sticky="w", pady=3)
+
+        ttk.Label(form, text="状态映射与“已解决”标记",
+                  font=("Microsoft YaHei UI", 10, "bold")).grid(
+                      row=12, column=1, sticky="w", pady=(2, 3))
+        ttk.Label(form,
+                  text="样本动态返回的名称仅作建议；选中状态后可填入建议，核对名称并明确勾选哪些状态代表已解决，再保存。",
+                  foreground="#536174", wraplength=440).grid(
+                      row=13, column=1, sticky="w", pady=(0, 5))
+        status_table = ttk.Frame(form)
+        status_table.grid(row=14, column=1, sticky="nsew", padx=(8, 0))
+        status_table.columnconfigure(0, weight=1)
+        self.status_tree = ttk.Treeview(status_table, columns=("id", "name", "suggestion", "resolved"), show="headings", height=5)
+        for column, title, width in (("id", "状态 ID", 150), ("name", "已保存名称", 105),
+                                     ("suggestion", "样本名称建议", 125), ("resolved", "已解决", 60)):
+            self.status_tree.heading(column, text=title)
+            self.status_tree.column(column, width=width, anchor="w")
+        self.status_tree.grid(row=0, column=0, sticky="nsew")
+        status_scroll = ttk.Scrollbar(status_table, orient="vertical", command=self.status_tree.yview)
+        status_scroll.grid(row=0, column=1, sticky="ns")
+        self.status_tree.configure(yscrollcommand=status_scroll.set)
+        self.status_tree.bind("<<TreeviewSelect>>", self._select_status_mapping)
+        status_controls = ttk.Frame(form)
+        status_controls.grid(row=15, column=1, sticky="ew", padx=(8, 0), pady=(4, 2))
+        self.status_id_input = tk.StringVar()
+        self.status_name_input = tk.StringVar()
+        self.status_resolved_var = tk.BooleanVar(value=False)
+        ttk.Label(status_controls, text="状态 ID").grid(row=0, column=0, sticky="w")
+        ttk.Entry(status_controls, textvariable=self.status_id_input, width=24).grid(row=0, column=1, sticky="ew", padx=4)
+        ttk.Label(status_controls, text="名称").grid(row=1, column=0, sticky="w")
+        ttk.Entry(status_controls, textvariable=self.status_name_input, width=24).grid(row=1, column=1, sticky="ew", padx=4)
+        ttk.Checkbutton(status_controls, text="此状态代表已解决", variable=self.status_resolved_var).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Button(status_controls, text="采用选中状态的样本建议", command=self._use_status_suggestion).grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=2)
+        ttk.Button(status_controls, text="保存状态映射", command=self._save_status_mapping).grid(
+            row=4, column=0, sticky="w", pady=2)
+        ttk.Button(status_controls, text="删除选中映射", command=self._delete_status_mapping).grid(
+            row=4, column=1, sticky="w", pady=2)
+
+        ttk.Separator(form).grid(row=16, column=0, columnspan=2, sticky="ew", pady=8)
+        ttk.Label(form,
+                  text="保存后，系统仍会对每日报表中的未知成员、未知状态、未完整翻页和不匹配项目范围实行阻断。当前只读接口不提供完整成员/状态列表；无法从样本可靠确认的内容必须在表格中补齐。",
+                  foreground="#8a4b00", wraplength=900).grid(
+                      row=17, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        self.owner_map = {}
+        self.status_map = {}
+        self.resolved_status_ids = set()
+        self.owner_candidate_ids = set()
+        self.status_candidate_ids = set()
+        self.status_suggestions = {}
+        self.status_conflicts = set()
+        self.view_filters = {}
+        self._setup_probe = None
+        self._setup_probe_filters = None
+        self._render_setup_tables()
+
+    def _render_setup_tables(self):
+        if hasattr(self, "view_filter_tree"):
+            for item in self.view_filter_tree.get_children():
+                self.view_filter_tree.delete(item)
+            inverse = {value: key for key, value in VIEW_FILTERS.items()}
+            for key, value in sorted(self.view_filters.items()):
+                self.view_filter_tree.insert("", "end", iid=key, values=(inverse.get(key, key), value))
+        if hasattr(self, "owner_tree"):
+            for item in self.owner_tree.get_children():
+                self.owner_tree.delete(item)
+            for member_id in sorted(set(self.owner_map) | self.owner_candidate_ids):
+                name = self.owner_map.get(member_id, "")
+                source = "已保存" if name else "样本发现 ID；待核对姓名"
+                self.owner_tree.insert("", "end", iid=member_id,
+                                       values=(member_id, name, source))
+        if hasattr(self, "status_tree"):
+            for item in self.status_tree.get_children():
+                self.status_tree.delete(item)
+            for status_id in sorted(set(self.status_map) | self.status_candidate_ids):
+                suggestion = ("样本名称冲突；请核对" if status_id in self.status_conflicts
+                              else self.status_suggestions.get(status_id, ""))
+                self.status_tree.insert(
+                    "", "end", iid=status_id,
+                    values=(status_id, self.status_map.get(status_id, ""),
+                            suggestion,
+                            "是" if status_id in self.resolved_status_ids else "否"))
+
+    def _scope_controls_changed(self):
+        if hasattr(self, "scope_confirm_var"):
+            self.scope_confirm_var.set(False)
+
+    def _add_view_filter(self):
+        key = VIEW_FILTERS.get(self.view_filter_label.get())
+        value = self.view_filter_value.get().strip()
+        if not key or not value:
+            messagebox.showerror("筛选条件无效", "请选择字段并填写字段值或 ID。", parent=self.root)
+            return
+        self.view_filters[key] = value
+        self.view_filter_value.set("")
+        self.scope_confirm_var.set(False)
+        self._render_setup_tables()
+
+    def _remove_view_filter(self):
+        selection = self.view_filter_tree.selection()
+        if not selection:
+            return
+        self.view_filters.pop(selection[0], None)
+        self.scope_confirm_var.set(False)
+        self._render_setup_tables()
+
+    def _select_owner_mapping(self, _event=None):
+        selection = self.owner_tree.selection()
+        if selection:
+            member_id = selection[0]
+            self.owner_id_input.set(member_id)
+            self.owner_name_input.set(self.owner_map.get(member_id, ""))
+
+    def _save_owner_mapping(self):
+        member_id, name = self.owner_id_input.get().strip(), self.owner_name_input.get()
+        try:
+            validate_mappings({"owner_names": {member_id: name}, "status_names": {}, "resolved_status_ids": []})
+        except (CollectionError, ValueError, TypeError):
+            messagebox.showerror("成员映射无效", "请输入有效的成员 ID 和姓名；姓名不能留空。", parent=self.root)
+            return
+        self.owner_map[member_id] = name
+        self.owner_candidate_ids.add(member_id)
+        self._render_setup_tables()
+        self._set_status("成员映射已加入本机待保存配置。")
+
+    def _delete_owner_mapping(self):
+        selection = self.owner_tree.selection()
+        member_id = selection[0] if selection else self.owner_id_input.get().strip()
+        if member_id:
+            self.owner_map.pop(member_id, None)
+            self._render_setup_tables()
+
+    def _import_owner_mappings(self):
+        source = self.owner_bulk_text.get("1.0", "end-1c")
+        try:
+            parsed = parse_owner_mapping_tsv(source)
+            merged = merge_owner_mappings(self.owner_map, parsed)
+        except ProjectSetupError as exc:
+            messagebox.showerror(
+                "成员映射导入失败",
+                str(exc) + " 请按每行“成员 ID<TAB>姓名”填写；未导入任何行。",
+                parent=self.root)
+            return
+        self.owner_map = merged
+        self.owner_candidate_ids.update(parsed)
+        self.owner_bulk_text.delete("1.0", "end")
+        self._render_setup_tables()
+        self._set_status(f"已导入 {len(parsed)} 条成员映射；保存本机配置后生效。")
+
+    def _select_status_mapping(self, _event=None):
+        selection = self.status_tree.selection()
+        if selection:
+            status_id = selection[0]
+            self.status_id_input.set(status_id)
+            self.status_name_input.set(self.status_map.get(status_id, ""))
+            self.status_resolved_var.set(status_id in self.resolved_status_ids)
+
+    def _use_status_suggestion(self):
+        selection = self.status_tree.selection()
+        status_id = selection[0] if selection else self.status_id_input.get().strip()
+        if status_id in self.status_suggestions:
+            self.status_name_input.set(self.status_suggestions[status_id])
+            self._set_status("已填入 Teambition 动态样本返回的状态名称；请核对后点击“保存状态映射”。")
+
+    def _save_status_mapping(self):
+        status_id, name = self.status_id_input.get().strip(), self.status_name_input.get()
+        resolved = self.status_resolved_var.get()
+        try:
+            validate_mappings({"owner_names": {}, "status_names": {status_id: name},
+                               "resolved_status_ids": [status_id] if resolved else []})
+        except (CollectionError, ValueError, TypeError):
+            messagebox.showerror("状态映射无效", "请输入有效的状态 ID 和名称。", parent=self.root)
+            return
+        self.status_map[status_id] = name
+        self.status_candidate_ids.add(status_id)
+        if resolved:
+            self.resolved_status_ids.add(status_id)
+        else:
+            self.resolved_status_ids.discard(status_id)
+        self._render_setup_tables()
+        self._set_status("状态映射已加入本机待保存配置。")
+
+    def _delete_status_mapping(self):
+        selection = self.status_tree.selection()
+        status_id = selection[0] if selection else self.status_id_input.get().strip()
+        if status_id:
+            self.status_map.pop(status_id, None)
+            self.resolved_status_ids.discard(status_id)
+            self._render_setup_tables()
+
+    def _probe_project(self):
+        settings = dict(self.settings)
+        settings["tenant_id"] = self.values["tenant_id"].get().strip()
+        settings["project_id"] = self.values["project_id"].get().strip()
+        settings["include_archived"] = bool(self.values["include_archived"].get())
+        secrets = dict(self.saved_secrets)
+        secrets.update({key: self.values[key].get() for key in
+                        ("teambition_app_id", "teambition_app_secret") if self.values[key].get()})
+        if not settings["tenant_id"] or not settings["project_id"] or any(
+                not secrets.get(key) for key in ("teambition_app_id", "teambition_app_secret")):
+            messagebox.showinfo("需要配置", "请先填写 Tenant ID、Project ID、App ID 和 App Secret。",
+                                parent=self.root)
+            return
+        try:
+            start_local, end_local = parse_manual_window(self.manual_start.get(), self.manual_end.get())
+            start, end = start_local.astimezone(SHANGHAI), end_local.astimezone(SHANGHAI)
+            report_day = end.date().isoformat()
+            selection = updated_selection(report_day, start, end)
+        except (SettingsError, TypeError, ValueError) as exc:
+            messagebox.showerror("时间窗口无效", str(exc), parent=self.root)
+            return
+        settings["api_contract_verified"] = False
+        self._setup_probe = None
+        probe_filters = dict(self.view_filters)
+        self.project_probe_status.set("正在只读查询所选区间；不会请求 OpenAI 或发送钉钉……")
+        self._set_status("正在验证当前租户、项目和所选时间窗的只读查询。")
+        self.project_probe_button.configure(state="disabled")
+
+        def worker():
+            try:
+                client = Client(settings["tenant_id"], credentials=lambda: (
+                    secrets["teambition_app_id"], secrets["teambition_app_secret"]))
+                collection = client.collect(settings["project_id"], day=report_day,
+                                            window=(start, end),
+                                            include_archived=settings["include_archived"])
+                probe = analyze_project_probe(
+                    collection, tenant_id=settings["tenant_id"], project_id=settings["project_id"],
+                    expected_selection=selection, include_archived=settings["include_archived"])
+                result, error = probe, None
+            except ProjectSetupError as exc:
+                result, error = None, str(exc)
+            except (CollectionError, OSError):
+                result, error = None, "只读查询未完成或响应不完整；没有更改本机核验状态。请检查权限并选择包含完整任务动态的时间区间。"
+            except Exception:
+                result, error = None, "只读项目验证失败；详细响应未写入日志，也没有更改本机核验状态。"
+            self.root.after(0, lambda: self._project_probe_finished(
+                result, error, settings["tenant_id"], settings["project_id"],
+                settings["include_archived"], probe_filters, selection))
+
+        threading.Thread(target=worker, daemon=True, name="teambition-project-setup").start()
+
+    def _project_probe_finished(self, probe, error, tenant_id, project_id, include_archived,
+                                filters, selection):
+        self.project_probe_button.configure(state="normal")
+        if error:
+            self.project_probe_status.set(error)
+            self._set_status(error)
+            messagebox.showerror("项目验证未完成", error, parent=self.root)
+            return
+        self._setup_probe = {
+            "probe": probe, "tenant_id": tenant_id, "project_id": project_id,
+            "include_archived": include_archived, "filters": filters,
+            "selection": selection,
+        }
+        self.scope_confirm_var.set(False)
+        self.owner_candidate_ids.update(probe.owner_ids)
+        self.status_candidate_ids.update(probe.status_ids)
+        self.status_conflicts = set(probe.conflicting_status_ids)
+        for status_id, name in probe.status_name_suggestions.items():
+            if status_id not in probe.conflicting_status_ids:
+                self.status_suggestions[status_id] = name
+        self._render_setup_tables()
+        self.project_probe_status.set(
+            f"只读样本通过：{probe.task_count} 个任务、{probe.activity_count} 条动态；"
+            f"发现 {len(probe.owner_ids)} 个成员 ID、{len(probe.status_ids)} 个状态 ID。")
+        self._set_status("API 响应字段样本已核验。请检查映射，并勾选确认项目范围后保存。")
+        messagebox.showinfo(
+            "只读验证通过",
+            f"已完整读取所选区间的 {probe.task_count} 个任务和 {probe.activity_count} 条动态。\n"
+            f"发现 {len(probe.owner_ids)} 个成员 ID 与 {len(probe.status_ids)} 个状态 ID。\n\n"
+            "成员姓名不能从当前批准的接口可靠发现；请对照项目成员页填写。状态名称建议来自动态样本，仍需核对。\n"
+            "最后请确认上方项目视图范围并保存配置。",
+            parent=self.root)
 
     def _build_preview(self):
         tab = self.preview_tab
@@ -341,6 +801,8 @@ class DigestDesktopApp:
     def _text_field(self, parent, row, label_column, label, key, width=28):
         value = tk.StringVar()
         self.values[key] = value
+        if key in ("tenant_id", "project_id"):
+            value.trace_add("write", lambda *_args: self._scope_controls_changed())
         ttk.Label(parent, text=label).grid(row=row, column=label_column, sticky="w", padx=(0, 8), pady=4)
         entry = ttk.Entry(parent, textvariable=value, width=width)
         entry.grid(row=row, column=label_column + 1, sticky="ew", padx=(0, 18), pady=4)
@@ -356,28 +818,26 @@ class DigestDesktopApp:
         self.secret_entries[key] = entry
         setattr(self, f"_secret_state_{key}", state)
 
-    def _mapping_from_settings(self, settings):
-        return {key: settings.get(key, DEFAULT_SETTINGS[key]) for key in sorted(MAPPING_KEYS)}
-
     def _load_form(self):
         for key, variable in self.values.items():
             if key in self.settings:
                 variable.set(self.settings[key])
-        self.mapping_editor.delete("1.0", "end")
-        self.mapping_editor.insert("1.0", json.dumps(self._mapping_from_settings(self.settings),
-                                                      ensure_ascii=False, indent=2))
+        self.owner_map = dict(self.settings.get("owner_names", {}))
+        self.status_map = dict(self.settings.get("status_names", {}))
+        self.resolved_status_ids = set(self.settings.get("resolved_status_ids", []))
+        self.owner_candidate_ids = set(self.owner_map)
+        self.status_candidate_ids = set(self.status_map)
+        view = self.settings.get("view", DEFAULT_SETTINGS["view"])
+        self.view_filters = dict(view.get("task_equals", {}))
+        self.scope_confirm_var.set(view.get("verified") is True and bool(view.get("evidence")))
+        if view.get("verified") is True and view.get("evidence"):
+            self.project_probe_status.set("已保存的项目范围验证有效；若更改租户、项目、归档选项或筛选条件，需要重新验证。")
+        self._render_setup_tables()
         self._load_model_cache()
         self._configure_effort_options()
         for key in SECRET_FIELDS:
             getattr(self, f"_secret_state_{key}").configure(
                 text="本机已加密保存" if self.saved_secrets.get(key) else "本机未保存")
-
-    def _mapping_document(self):
-        source = self.mapping_editor.get("1.0", "end-1c")
-        mapping = parse_config_json(source)
-        if set(mapping) != MAPPING_KEYS:
-            raise SettingsError("项目映射 JSON 字段不完整或包含未知字段")
-        return mapping
 
     def _validate_auto_ready(self, settings, secrets):
         if not self.ledger_ready or not secrets.get("delivery_ledger_id"):
@@ -422,21 +882,65 @@ class DigestDesktopApp:
                 proposed["auto_send_enabled_since_local"] = (
                     datetime.now().replace(microsecond=0).isoformat(timespec="seconds")
                     if proposed["auto_send_enabled"] else "")
-            proposed.update(self._mapping_document())
+            proposed["owner_names"] = dict(self.owner_map)
+            proposed["status_names"] = dict(self.status_map)
+            proposed["resolved_status_ids"] = sorted(self.resolved_status_ids)
+            old_view = self.settings.get("view", DEFAULT_SETTINGS["view"])
+            filters = dict(self.view_filters)
+            identity_unchanged = all(
+                proposed.get(key) == self.settings.get(key, DEFAULT_SETTINGS[key])
+                for key in ("tenant_id", "project_id"))
+            scope_unchanged = (identity_unchanged
+                               and proposed["include_archived"] == self.settings.get("include_archived", False)
+                               and filters == old_view.get("task_equals", {}))
+            probe_matches = bool(self._setup_probe and
+                proposed["tenant_id"] == self._setup_probe["tenant_id"]
+                and proposed["project_id"] == self._setup_probe["project_id"]
+                and proposed["include_archived"] == self._setup_probe["include_archived"]
+                and filters == self._setup_probe_filters_for_current_scope())
+            prior_api_verified = self.settings.get("api_contract_verified") is True and identity_unchanged
+            proposed["api_contract_verified"] = prior_api_verified or probe_matches
+            prior_view_verified = (old_view.get("verified") is True and bool(old_view.get("evidence"))
+                                   and scope_unchanged)
+            view_verified = bool(self.scope_confirm_var.get() and (probe_matches or prior_view_verified))
+            evidence = old_view.get("evidence", "") if prior_view_verified else ""
+            if view_verified and probe_matches:
+                probe = self._setup_probe["probe"]
+                scope_hash = hashlib.sha256(json.dumps(
+                    {"tenant_id": proposed["tenant_id"], "project_id": proposed["project_id"],
+                     "include_archived": proposed["include_archived"], "task_equals": filters},
+                    ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+                evidence = ("desktop-readonly-probe/v1; "
+                            f"tasks={probe.task_count}; activities={probe.activity_count}; "
+                            f"selection={probe.selection['start']}/{probe.selection['end_exclusive']}; "
+                            f"scope_sha256={scope_hash}; operator_confirmed=true")
+            proposed["view"] = {"verified": view_verified, "evidence": evidence if view_verified else "",
+                                 "task_equals": filters}
             proposed["schema_version"] = 1
             clean = validate_settings(proposed)
         except (SettingsError, ValueError, TypeError) as exc:
             messagebox.showerror("无法保存配置", str(exc), parent=self.root)
             return
         entered = {key: self.values[key].get() for key in SECRET_FIELDS if self.values[key].get()}
+        previous_startup = bool(self.settings.get("start_with_windows", False))
+        startup_changed = clean["start_with_windows"] != previous_startup
+        startup_applied = False
         try:
             merged = self.secret_store.load()
             merged.update(entered)
             if clean["auto_send_enabled"]:
                 self._validate_auto_ready(clean, merged)
+            if startup_changed:
+                configure_user_startup(clean["start_with_windows"])
+                startup_applied = True
             self.secret_store.save(merged)
             self.settings_store.save(clean)
-        except (SettingsError, SecretStoreError, OSError) as exc:
+        except (SettingsError, SecretStoreError, StartupIntegrationError, OSError) as exc:
+            if startup_applied:
+                try:
+                    configure_user_startup(previous_startup)
+                except StartupIntegrationError:
+                    pass
             messagebox.showerror("无法保存配置", str(exc), parent=self.root)
             return
         self.settings, self.saved_secrets = clean, merged
@@ -450,7 +954,12 @@ class DigestDesktopApp:
                 text="本机已加密保存" if self.saved_secrets.get(key) else "本机未保存")
         self._load_model_cache()
         self._set_status("本机设置已保存。" + ("自动执行已启用。" if clean["auto_send_enabled"] else "自动执行当前关闭。"))
-        messagebox.showinfo("保存完成", "设置已保存在本机。服务密钥使用 Windows DPAPI 加密。", parent=self.root)
+        startup_note = ("开机启动已启用。" if clean["start_with_windows"] else "开机启动当前关闭。")
+        messagebox.showinfo("保存完成", "设置已保存在本机。" + startup_note +
+                            "服务密钥使用 Windows DPAPI 加密。", parent=self.root)
+
+    def _setup_probe_filters_for_current_scope(self):
+        return self._setup_probe["filters"] if self._setup_probe else None
 
     def _clear_secrets(self):
         if not messagebox.askyesno("清除密钥", "清除本机保存的 Teambition、钉钉与 OpenAI 密钥？防重复账本身份会保留。",
@@ -731,15 +1240,49 @@ class DigestDesktopApp:
 
 
 def main():
-    smoke_test = sys.argv[1:] == ["--ui-smoke-test"]
-    root = tk.Tk()
-    app = DigestDesktopApp(root)
-    if smoke_test:
-        root.update_idletasks()
-        verify_desktop_smoke(app)
-        root.after(300, root.destroy)
-    root.mainloop()
-    return 0
+    try:
+        options = parse_launch_options(sys.argv[1:])
+    except ValueError:
+        return 2
+    current = {"app": None, "pending_show": False}
+
+    def request_show():
+        app = current["app"]
+        if app is None:
+            current["pending_show"] = True
+            return
+        try:
+            app.root.after(0, app._show_window)
+        except tk.TclError:
+            pass
+
+    instance = WindowsSingleInstance(request_show)
+    try:
+        if not instance.acquire():
+            return 0
+        root = tk.Tk()
+        app = DigestDesktopApp(root, start_hidden=options.background, tray_enabled=True)
+        current["app"] = app
+        if current["pending_show"]:
+            root.after_idle(app._show_window)
+        smoke_exit_code = {"value": 0}
+        if options.smoke_test:
+            def finish_smoke_test():
+                try:
+                    root.update_idletasks()
+                    verify_desktop_smoke(app, assert_hidden=options.background)
+                except Exception:
+                    smoke_exit_code["value"] = 4
+                finally:
+                    app._quit_application()
+
+            root.after(700, finish_smoke_test)
+        root.mainloop()
+        return smoke_exit_code["value"]
+    except StartupIntegrationError:
+        return 3
+    finally:
+        instance.close()
 
 
 if __name__ == "__main__":
