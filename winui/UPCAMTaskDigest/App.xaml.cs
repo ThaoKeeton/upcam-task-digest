@@ -10,7 +10,16 @@ public partial class App : Application
     public App()
     {
         RequestedTheme = ApplicationTheme.Dark;
-        InitializeComponent();
+        UnhandledException += (_, args) =>
+        {
+            if (IsSyntheticRun) RecordSyntheticFailure(args.Exception);
+        };
+        try { InitializeComponent(); }
+        catch (Exception ex)
+        {
+            if (IsSyntheticRun) RecordSyntheticFailure(ex);
+            throw;
+        }
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
@@ -30,8 +39,27 @@ public partial class App : Application
             Exit();
             return;
         }
-        _window = new MainWindow(smoke, arguments.Contains("--background"));
-        _window.Closed += (_, _) => _instance.Dispose();
-        _window.Activate();
+        try
+        {
+            _window = new MainWindow(smoke, arguments.Contains("--background"));
+            _window.Closed += (_, _) => _instance.Dispose();
+            _window.Activate();
+        }
+        catch (Exception ex)
+        {
+            if (smoke) RecordSyntheticFailure(ex);
+            throw;
+        }
+    }
+
+    private static bool IsSyntheticRun => Environment.GetCommandLineArgs().Contains("--ui-smoke-test");
+
+    private static void RecordSyntheticFailure(Exception exception)
+    {
+        // This flag starts an isolated worker with fixtures only, never a user profile.
+        string directory = Path.Combine(AppContext.BaseDirectory, "smoke-output");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "result.txt"), exception.ToString());
+        Environment.Exit(1);
     }
 }

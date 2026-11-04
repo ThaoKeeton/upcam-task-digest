@@ -52,6 +52,11 @@ class SyntheticDingTalk:
         return True
 
 
+class SyntheticSummarizer:
+    def summarize(self, _key, _model, _effort, rows, _rules, service_tier="default"):
+        return {row["task_key"]: "CI 虚构摘要" for row in rows}
+
+
 def make_smoke_service(directory: Path) -> WorkerService:
     """Never read an actual user profile, credentials, registry, or environment secrets."""
     directory = Path(directory)
@@ -82,6 +87,7 @@ def make_smoke_service(directory: Path) -> WorkerService:
     def workflow(settings, credentials, data_dir, **kwargs):
         return DigestWorkflow(settings, credentials, data_dir,
                               client_factory=SyntheticClient,
+                              summarizer=SyntheticSummarizer(),
                               ding_sender=SyntheticDingTalk(), **kwargs)
 
     return WorkerService(

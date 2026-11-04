@@ -93,7 +93,12 @@ jobs:
             throw "WinUI interaction smoke timed out"
           }
           if (Test-Path dist/winui/smoke-output/result.txt) { Get-Content dist/winui/smoke-output/result.txt }
-          if ($process.ExitCode -ne 0) { throw "WinUI smoke failed: $($process.ExitCode)" }
+          if ($process.ExitCode -ne 0) {
+            Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-4)} -ErrorAction SilentlyContinue |
+              Where-Object { $_.ProviderName -in @('.NET Runtime', 'Application Error') } |
+              ForEach-Object { $_.Message }
+            throw "WinUI smoke failed: $($process.ExitCode)"
+          }
           $report = Get-Content dist/winui/smoke-output/report.json | ConvertFrom-Json
           if (-not $report.success -or $report.steps.Count -lt 30) { throw "WinUI smoke report incomplete" }
           Copy-Item dist/winui/smoke-output -Destination dist/ui-evidence -Recurse
