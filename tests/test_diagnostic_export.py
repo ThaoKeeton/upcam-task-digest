@@ -17,6 +17,8 @@ class SafeStructureExportTests(unittest.TestCase):
             json.dumps('{"text":"PRIVATE_DOUBLE_ENCODED"}'),
             '{"comment":1e999}',
             '{"comment":-1e999}',
+            json.dumps('{"comment":1e999}'),
+            json.dumps('{"comment":-1e999}'),
         ]
         report = safe_structure_export(self.collection([
             self.event("comment", {"comment": "PRIVATE_NEW_BODY", "quote": value}, id=f"quote-{i}")
@@ -30,6 +32,7 @@ class SafeStructureExportTests(unittest.TestCase):
         self.assertTrue(all(not checks[i]["json_shape"]["json_valid"] for i in (1, 2, 3, 5, 6)))
         self.assertEqual(checks[4]["json_shape"]["json_scalar_type"], "string")
         self.assertEqual(checks[4]["decoded_string_shape"]["fields"]["text"]["type"], "string")
+        self.assertTrue(all(not checks[i]["decoded_string_shape"]["json_valid"] for i in (7, 8)))
         self.assertTrue(all(e["comment_check"]["needs_review"] for e in report["tasks"][0]["activities"][:4]))
         encoded = json.dumps(report)
         for value in ("PRIVATE_QUOTED_BODY", "PRIVATE_QUOTED_NAME", "PRIVATE_DOUBLE_ENCODED", "PRIVATE_NEW_BODY"):

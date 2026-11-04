@@ -29,15 +29,15 @@
 ### Task 1: Targeted safe diagnostic evidence
 
 - [x] Add failing strict-quote, privacy and protocol-token tests.
-- [ ] Add diagnostic v3: bounded strict nested quote shape parsing, decoded text categories and safe protocol action token. Preserve all source-validation blocks.
-- [ ] Run the complete Python suite and update export docs.
+- [x] Add diagnostic v3: bounded strict nested quote shape parsing, decoded text categories and safe protocol action token. Preserve all source-validation blocks.
+- [x] Run the complete Python suite and update export docs.
 
 ### Task 2: Native title bar and common branding
 
 - [x] Obtain official public favicon from https://open.teambition.com/favicon.ico (PNG, 128x128 RGBA).
 - [x] Add failing authentic-asset / transparency / multi-size tests.
-- [ ] Add native UI regression assertions for title bar, inline pane, same asset icons and OS caption behavior; confirm old UI fails in Windows CI.
-- [ ] Use the native TitleBar control and reserve a 48 DIP top row. Use inline Left pane; move toggle to title bar.
-- [ ] Set EXE and AppWindow icon from Assets/Teambition.ico; load DPI-specific owned tray handles from that same ICO, replacing/discarding them correctly.
+- [x] Add native UI regression assertions for title bar, inline pane, same asset icons and OS caption behavior; confirm old UI fails in Windows CI.
+- [x] Use the native TitleBar control and reserve a 48 DIP top row. Use inline Left pane; move toggle to title bar.
+- [x] Embed the EXE icon and set native window/tray frames from Assets/Teambition.ico, replacing/discarding owned handles correctly.
 - [ ] Publish and exercise the real Windows UI, archive round-trip, native window/tray screenshots, DPI evidence and existing controls with synthetic services.
 - [ ] Review, re-run tests, merge into main under the existing authorization, verify remote tree and publish the artifact link with exact remaining limits.

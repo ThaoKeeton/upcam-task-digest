@@ -47,7 +47,6 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
         AppWindow.TitleBar.ButtonInactiveForegroundColor = Windows.UI.Color.FromArgb(255, 153, 153, 153);
         AppWindow.TitleBar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(255, 58, 58, 58);
         AppWindow.TitleBar.ButtonHoverForegroundColor = Microsoft.UI.Colors.White;
-        AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "Teambition.ico"));
         AppWindow.Resize(new SizeInt32(1180, 800));
         AppWindow.Closing += Window_Closing;
         Closed += (_, _) =>
