@@ -13,13 +13,14 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from automated_digest import collection_validation_message, diagnose_automatic_source
 from render_digest import render_digest
 from runtime_mappings import validate_mappings
 from teambition_readonly import Client, CollectionError
 from upcam_app import APP_NAME, APP_VERSION, OPENAI_MODEL, OPENAI_REASONING_EFFORT, RULESET_REVISION
 from upcam_app.config import (
     DEFAULT_SETTINGS, SCHEDULE_RECOVERY_WINDOW, SettingsError, SettingsStore, parse_manual_window,
-    recoverable_schedule_occurrences, scheduled_window, user_data_dir, validate_settings,
+    recoverable_schedule_occurrences, runtime_config, scheduled_window, user_data_dir, validate_settings,
 )
 from upcam_app.history import HistoryError, HistoryStore
 from upcam_app.project_setup import (
@@ -58,7 +59,8 @@ SMOKE_TEST_TABS = (
 )
 
 
-def verify_desktop_smoke(app, sample_path=SAMPLE, *, assert_hidden=False) -> bool:
+def verify_desktop_smoke(app, sample_path=SAMPLE, *, assert_hidden=False,
+                         exercise_controls=False) -> bool:
     """Check the packaged UI's core tabs and bundled report template without network calls."""
     try:
         labels = tuple(app.tabs.tab(index, "text") for index in range(app.tabs.index("end")))
@@ -66,7 +68,10 @@ def verify_desktop_smoke(app, sample_path=SAMPLE, *, assert_hidden=False) -> boo
         raise RuntimeError("The desktop window did not initialize its tabs") from exc
     if labels != SMOKE_TEST_TABS:
         raise RuntimeError("The desktop window is missing a required application tab")
-    if not all(hasattr(app, name) for name in ("project_probe_button", "owner_tree", "status_tree", "startup_check")):
+    if not all(hasattr(app, name) for name in (
+            "project_probe_button", "owner_tree", "status_tree", "startup_check",
+            "mapping_canvas", "owner_bulk_text", "owner_import_button",
+            "source_diagnostic_button")):
         raise RuntimeError("The desktop window is missing project setup or Windows startup controls")
     if hasattr(app, "mapping_editor"):
         raise RuntimeError("The project setup UI must not require editing mapping JSON")
@@ -80,7 +85,65 @@ def verify_desktop_smoke(app, sample_path=SAMPLE, *, assert_hidden=False) -> boo
                           or not bool(getattr(app._tray_icon, "visible", False))
                           or app.root.state() != "withdrawn"):
         raise RuntimeError("The application did not start hidden with a working tray icon")
+    if exercise_controls:
+        _exercise_mapping_controls(app, assert_hidden=assert_hidden)
     return True
+
+
+def _exercise_mapping_controls(app, *, assert_hidden=False):
+    """Exercise the real Windows mapping widgets using synthetic values only."""
+    root, canvas, button = app.root, app.mapping_canvas, app.owner_import_button
+    original_owner_map = dict(app.owner_map)
+    original_candidates = set(app.owner_candidate_ids)
+    original_filters = dict(app.view_filters)
+    try:
+        app.tabs.select(app.mapping_tab)
+        root.deiconify()
+        root.update_idletasks()
+        canvas.yview_moveto(1.0)
+        root.update_idletasks()
+        top, bottom = canvas.winfo_rooty(), canvas.winfo_rooty() + canvas.winfo_height()
+        button_top, button_bottom = button.winfo_rooty(), button.winfo_rooty() + button.winfo_height()
+        if (not button.winfo_ismapped() or button_top < top or button_bottom > bottom):
+            raise RuntimeError("The member import button cannot be reached by scrolling the project tab")
+
+        synthetic = '{"smoke-member-01":"虚构成员甲","smoke-member-02":"虚构成员乙"}'
+        app.owner_bulk_text.delete("1.0", "end")
+        app.owner_bulk_text.insert("1.0", synthetic)
+        button.invoke()
+        root.update_idletasks()
+        if any(app.owner_map.get(key) != value for key, value in (
+                ("smoke-member-01", "虚构成员甲"), ("smoke-member-02", "虚构成员乙"))):
+            raise RuntimeError("Pasting JSON did not import the synthetic member mappings")
+        for member_id, name in (("smoke-member-01", "虚构成员甲"),
+                                ("smoke-member-02", "虚构成员乙")):
+            if member_id not in app.owner_tree.get_children():
+                raise RuntimeError("An imported member mapping is missing from the visible table")
+            if app.owner_tree.item(member_id, "values")[1] != name:
+                raise RuntimeError("The member table does not show the pasted synthetic name")
+
+        app.view_filter_label.set("执行人 ID")
+        app.view_filter_value.set("smoke-executor-01")
+        app._add_view_filter()
+        if app.view_filters.get("executorId") != "smoke-executor-01":
+            raise RuntimeError("Adding an optional project filter did not update the project scope")
+
+        app.tabs.select(app.preview_tab)
+        root.update_idletasks()
+        if not app.source_diagnostic_button.winfo_ismapped():
+            raise RuntimeError("The read-only diagnostic button is not visible on the run tab")
+        app.tabs.select(app.history_tab)
+        root.update_idletasks()
+        if "note" not in app.history_view.cget("columns"):
+            raise RuntimeError("The run history does not expose local validation explanations")
+    finally:
+        app.owner_map = original_owner_map
+        app.owner_candidate_ids = original_candidates
+        app.view_filters = original_filters
+        app._render_setup_tables()
+        if assert_hidden:
+            root.withdraw()
+            root.update_idletasks()
 
 
 class DigestDesktopApp:
@@ -270,6 +333,8 @@ class DigestDesktopApp:
         frame.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
+        if parent is getattr(self, "mapping_tab", None):
+            self.mapping_canvas = canvas
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         return frame
@@ -470,8 +535,9 @@ class DigestDesktopApp:
                   foreground="#536174").grid(row=3, column=0, columnspan=2, sticky="w", pady=(3, 1))
         self.owner_bulk_text = tk.Text(owner_controls, height=4, width=55, wrap="none", font=("Consolas", 9))
         self.owner_bulk_text.grid(row=4, column=0, columnspan=2, sticky="ew")
-        ttk.Button(owner_controls, text="导入成员映射", command=self._import_owner_mappings).grid(
-            row=5, column=0, sticky="w", pady=3)
+        self.owner_import_button = ttk.Button(
+            owner_controls, text="导入成员映射", command=self._import_owner_mappings)
+        self.owner_import_button.grid(row=5, column=0, sticky="w", pady=3)
 
         ttk.Label(form, text="状态映射与“已解决”标记",
                   font=("Microsoft YaHei UI", 10, "bold")).grid(
@@ -612,7 +678,7 @@ class DigestDesktopApp:
         except ProjectSetupError as exc:
             messagebox.showerror(
                 "成员映射导入失败",
-                str(exc) + " 请按每行“成员 ID<TAB>姓名”填写；未导入任何行。",
+                str(exc) + " 支持 JSON 对象（{\"成员 ID\":\"姓名\"}）或每行“成员 ID<TAB>姓名”。未导入任何行。",
                 parent=self.root)
             return
         self.owner_map = merged
@@ -749,7 +815,7 @@ class DigestDesktopApp:
     def _build_preview(self):
         tab = self.preview_tab
         tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(4, weight=1)
+        tab.rowconfigure(5, weight=1)
         ttk.Label(tab, text="自选采集起止时间", font=("Microsoft YaHei UI", 12, "bold")).grid(
             row=0, column=0, sticky="w")
         ttk.Label(tab, text="使用本机时间 YYYY-MM-DD HH:MM。自动日报按仓库模板生成；发送前由程序校验来源、窗口、映射、未知事件和模型输出。",
@@ -765,10 +831,18 @@ class DigestDesktopApp:
         ttk.Entry(controls, textvariable=self.manual_end, width=18).pack(side="left", padx=(6, 16))
         ttk.Button(controls, text="运行并自动发送", command=self._run_manual).pack(side="left")
         ttk.Button(controls, text="预览虚构样例", command=self._preview_sample).pack(side="left", padx=8)
+        diagnostic_controls = ttk.Frame(tab)
+        diagnostic_controls.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        self.source_diagnostic_button = ttk.Button(
+            diagnostic_controls, text="只读诊断当前数据（不调用模型 / 不发送）",
+            command=self._diagnose_manual)
+        self.source_diagnostic_button.pack(side="left")
+        ttk.Label(diagnostic_controls, text="使用已保存的项目和映射配置。",
+                  foreground="#536174").pack(side="left", padx=(10, 0))
         ttk.Label(tab, text="立即运行同样无需人工审核；如果自动校验失败、AI 拒绝或发送结果不明，程序会停止且不会自动重试。",
-                  foreground="#8a4b00", wraplength=920).grid(row=3, column=0, sticky="w", pady=(10, 10))
+                  foreground="#8a4b00", wraplength=920).grid(row=4, column=0, sticky="w", pady=(8, 10))
         frame = ttk.Frame(tab)
-        frame.grid(row=4, column=0, sticky="nsew")
+        frame.grid(row=5, column=0, sticky="nsew")
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
         self.preview = tk.Text(frame, wrap="word", font=("Consolas", 10), state="disabled", height=24)
@@ -783,20 +857,31 @@ class DigestDesktopApp:
         tab.rowconfigure(1, weight=1)
         ttk.Label(tab, text="运行与发送状态", font=("Microsoft YaHei UI", 12, "bold")).grid(
             row=0, column=0, sticky="w", pady=(0, 8))
-        columns = ("created", "period", "source", "state")
+        columns = ("created", "period", "source", "state", "note")
         self.history_view = ttk.Treeview(tab, columns=columns, show="headings", height=20)
         labels = {"created": "创建时间（UTC）", "period": "采集窗口（本机时间）",
-                  "source": "来源", "state": "状态"}
-        widths = {"created": 170, "period": 300, "source": 100, "state": 150}
+                  "source": "来源", "state": "状态", "note": "本机诊断 / 结果说明"}
+        widths = {"created": 155, "period": 280, "source": 90, "state": 110, "note": 390}
         for column in columns:
             self.history_view.heading(column, text=labels[column])
             self.history_view.column(column, width=widths[column], anchor="w")
         self.history_view.grid(row=1, column=0, sticky="nsew")
+        self.history_view.bind("<Double-1>", self._show_history_detail)
         scrollbar = ttk.Scrollbar(tab, orient="vertical", command=self.history_view.yview)
         scrollbar.grid(row=1, column=1, sticky="ns")
         self.history_view.configure(yscrollcommand=scrollbar.set)
         ttk.Label(tab, text="发送结果不明或机器人拒绝时，该运行点会锁定，不自动重发；先处理账本状态再恢复。",
                   foreground="#536174", wraplength=900).grid(row=2, column=0, sticky="w", pady=(8, 0))
+
+    def _show_history_detail(self, _event=None):
+        selection = self.history_view.selection()
+        if not selection:
+            return
+        row = self.history.get(selection[0])
+        if not row:
+            return
+        note = row.get("delivery_note") or "没有附加错误说明。"
+        messagebox.showinfo("本机运行记录", f"状态：{row['state']}\n\n{note}", parent=self.root)
 
     def _text_field(self, parent, row, label_column, label, key, width=28):
         value = tk.StringVar()
@@ -1108,6 +1193,70 @@ class DigestDesktopApp:
             return
         self._launch_run(start, end, schedule_key=None, scheduled=False)
 
+    def _diagnose_manual(self):
+        """Read Teambition and run local source/event checks only; never summarize or send."""
+        try:
+            start_local, end_local = parse_manual_window(self.manual_start.get(), self.manual_end.get())
+        except SettingsError as exc:
+            messagebox.showerror("时间窗口无效", str(exc), parent=self.root)
+            return
+        if not self._job_lock.acquire(blocking=False):
+            self._set_status("已有日报或诊断任务正在运行；请等待完成后再检查。")
+            return
+        required = ("teambition_app_id", "teambition_app_secret")
+        if (not self.settings.get("tenant_id") or not self.settings.get("project_id")
+                or any(not self.saved_secrets.get(key) for key in required)):
+            self._job_lock.release()
+            messagebox.showinfo(
+                "需要已保存的 Teambition 配置",
+                "请先在“首次配置 / 自动运行”填写并保存 Tenant ID、Project ID、Teambition App ID 和 App Secret。此项诊断不需要 OpenAI 或钉钉密钥。",
+                parent=self.root)
+            return
+        settings, secrets = dict(self.settings), dict(self.saved_secrets)
+        self.source_diagnostic_button.configure(state="disabled")
+        self._set_status("正在只读读取 Teambition 并本地核验；不会调用 OpenAI 或发送钉钉……")
+
+        def worker():
+            try:
+                start, end = start_local.astimezone(SHANGHAI), end_local.astimezone(SHANGHAI)
+                day = end.date().isoformat()
+                config = runtime_config(settings)
+                client = Client(settings["tenant_id"], credentials=lambda: (
+                    secrets["teambition_app_id"], secrets["teambition_app_secret"]))
+                collection = client.collect(
+                    settings["project_id"], day=day, window=(start, end),
+                    include_archived=settings["include_archived"])
+                diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
+            except (CollectionError, OSError) as exc:
+                diagnostic = {"ok": False, "message": collection_validation_message(exc), "task_count": None}
+            except SettingsError as exc:
+                diagnostic = {"ok": False,
+                              "message": "本机设置未通过校验：" + str(exc) + "。先保存正确配置后重新诊断。",
+                              "task_count": None}
+            except Exception:
+                diagnostic = {"ok": False,
+                              "message": "只读诊断未完成；没有调用 OpenAI、没有发送钉钉，详细 API 响应不会写入记录。请检查本机网络、Teambition 凭据与项目读取权限。",
+                              "task_count": None}
+            finally:
+                self._job_lock.release()
+            try:
+                self.root.after(0, lambda: self._diagnostic_finished(diagnostic))
+            except tk.TclError:
+                pass
+
+        threading.Thread(target=worker, daemon=True, name="upcam-readonly-diagnostic").start()
+
+    def _diagnostic_finished(self, diagnostic):
+        self.source_diagnostic_button.configure(state="normal")
+        message = diagnostic["message"]
+        self._show_preview(message)
+        self._set_status(message.splitlines()[0])
+        if diagnostic["ok"]:
+            messagebox.showinfo("只读诊断通过", message, parent=self.root)
+        else:
+            messagebox.showwarning("只读诊断发现问题", message, parent=self.root)
+        self._refresh_history()
+
     def _launch_run(self, start, end, *, schedule_key, scheduled):
         if not self.ledger_ready:
             self._set_status(self.ledger_message)
@@ -1232,8 +1381,10 @@ class DigestDesktopApp:
             state = {"prepared": "等待发送", "sending": "发送中", "sent": "已确认",
                      "blocked": "校验阻断", "delivery_unknown": "结果不明", "preview": "样例"}.get(
                          run["state"], run["state"])
-            self.history_view.insert("", "end", values=(run["created_at_utc"], period,
-                                                            run["source"], state))
+            note = run.get("delivery_note") or "—"
+            self.history_view.insert("", "end", iid=run["run_id"],
+                                     values=(run["created_at_utc"], period,
+                                             run["source"], state, note))
 
     def _set_status(self, message):
         self.status_var.set(message)
@@ -1270,7 +1421,8 @@ def main():
             def finish_smoke_test():
                 try:
                     root.update_idletasks()
-                    verify_desktop_smoke(app, assert_hidden=options.background)
+                    verify_desktop_smoke(app, assert_hidden=options.background,
+                                         exercise_controls=True)
                 except Exception:
                     smoke_exit_code["value"] = 4
                 finally:
