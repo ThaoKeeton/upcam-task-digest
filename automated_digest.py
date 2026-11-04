@@ -47,12 +47,24 @@ def _summary_inputs(base_report: dict) -> tuple[list[dict], dict[str, str], dict
         entry = by_task.get(task_id)
         if not entry:
             continue
-        comments = [comment for comment in entry["comments"] if not comment.get("omit_from_summary")]
-        texts = [comment.get("text") for comment in comments if isinstance(comment.get("text"), str) and comment["text"]]
+        comments = [comment for comment in entry["comments"] if not comment.get("omit_from_summary")
+                    and isinstance(comment.get("text"), str) and comment["text"]]
+        texts = [comment["text"] for comment in comments]
         if not texts:
             continue
         task_key = f"task-{index}"
-        request_rows.append({"task_key": task_key, "title": task["title"], "comment_bodies": texts})
+        row = {"task_key": task_key, "title": task["title"], "comment_bodies": texts}
+        contexts, seen_contexts = [], set()
+        for comment_index, comment in enumerate(comments):
+            for context in comment.get("quote_contexts", {}).values():
+                text = context["text"]
+                if not text.strip() or (comment_index, text) in seen_contexts:
+                    continue
+                seen_contexts.add((comment_index, text))
+                contexts.append({"comment_index": comment_index, "role": context["role"], "text": text})
+        if contexts:
+            row["quoted_contexts"] = contexts
+        request_rows.append(row)
         row_to_task[task_key] = task_id
         substantive[task_id] = texts
     return request_rows, row_to_task, substantive

@@ -334,7 +334,9 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
                         "needs_review": comment["extraction_needs_review"],
                         "review_reasons": list(comment["review_reasons"]),
                         "body_check": _text_check(comment["body"]),
-                        "quote_checks": {source: _quote_check(value) for source, value
+                        "quote_checks": {source: dict(_quote_check(value),
+                                                      adapter_supported=source in comment["quote_contexts"])
+                                         for source, value
                                          in comment["quote_evidence"].items()},
                     }
                 except (CollectionError, TypeError, ValueError):

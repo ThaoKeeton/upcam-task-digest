@@ -76,7 +76,6 @@ class WorkerApiTests(unittest.TestCase):
                 "settings": settings,
                 "secret_values": {"openai_api_key": "synthetic-secret-never-echo"},
                 "clear_secrets": [],
-                "scope_confirmed": False,
             }})
 
             self.assertEqual(secrets.load()["openai_api_key"], "synthetic-secret-never-echo")
@@ -149,7 +148,7 @@ class WorkerApiTests(unittest.TestCase):
             probe = service.dispatch({"op": "probe_project", "payload": window})
             self.assertEqual(probe["task_count"], 1)
             saved = service.dispatch({"op": "save", "payload": {
-                "settings": initial["settings"], "scope_confirmed": True}})
+                "settings": initial["settings"], "verification_window": window}})
             self.assertTrue(saved["settings"]["view"]["verified"])
             diagnostic = service.dispatch({"op": "diagnose", "payload": window})
             self.assertTrue(diagnostic["ok"], diagnostic["message"])
@@ -162,6 +161,7 @@ class WorkerApiTests(unittest.TestCase):
             self.assertIn("ci-synthetic-task", exported)
             for excluded in ("CI 虚构：验证原生界面布局", "synthetic-app-secret", "虚构成员甲"):
                 self.assertNotIn(excluded, exported)
+            service.dispatch({"op": "refresh_models"})
             run = service.dispatch({"op": "run_manual", "payload": window})
             self.assertEqual(run["state"], "sent")
             history = service.dispatch({"op": "history"})["runs"]

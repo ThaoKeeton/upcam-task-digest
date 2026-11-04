@@ -20,7 +20,7 @@ public sealed partial class MainWindow
             Card(Column(Paragraph("项目与映射", size: 18),
                 Paragraph(string.IsNullOrEmpty(_state.Text("project_id")) ? "尚未选择项目" : _state.Text("project_id"), true),
                 Paragraph($"{_state.Map("owner_names").Count} 位成员 · {_state.Map("status_names").Count} 个状态"),
-                Paragraph(_state.ScopeConfirmed ? "项目范围已核验并确认" : "需要完成项目只读验证和范围确认", true))),
+                Paragraph(_state.ScopeVerified ? "项目范围只读核验已通过" : "保存配置以自动核验当前项目范围", true))),
             Card(Column(Paragraph("下一步与运行时间", size: 18),
                 Paragraph($"上午 {_state.Text("morning_run_at")} · 下午 {_state.Text("afternoon_run_at")}"),
                 Paragraph(_state.LedgerMessage, true),
@@ -81,7 +81,7 @@ public sealed partial class MainWindow
             PlaceholderText = saved ? "本机已加密保存 · 留空保留" : "本机未保存",
             PasswordRevealMode = PasswordRevealMode.Peek
         }, "secret-" + key);
-        input.PasswordChanged += (_, _) => _state.SecretDrafts[key] = input.Password;
+        input.PasswordChanged += (_, _) => _state.SetSecretDraft(key, input.Password);
         return input;
     }
 
@@ -155,29 +155,20 @@ public sealed partial class MainWindow
     private FrameworkElement BuildProject()
     {
         var archived = Identify(new CheckBox { Content = "纳入已归档任务", IsChecked = _state.Flag("include_archived") }, "include-archived");
-        var confirmed = Identify(new CheckBox
-        {
-            Content = "我已确认：以上项目、归档选项和筛选条件就是日报应覆盖的范围。",
-            IsChecked = _state.ScopeConfirmed
-        }, "confirm-scope");
-        archived.Click += (_, _) => { _state.Set("include_archived", archived.IsChecked == true); confirmed.IsChecked = false; };
-        confirmed.Click += (_, _) => { _state.ScopeConfirmed = confirmed.IsChecked == true; _state.Dirty = true; };
+        archived.Click += (_, _) => _state.Set("include_archived", archived.IsChecked == true);
         var scope = Card(Column(
             Paragraph($"项目：{_state.Text("project_id", "尚未配置")}", size: 18),
             Paragraph("推荐范围：指定 Project ID 下，当前真实 updated 时间落在日报半开窗口内的任务；默认不含归档，不添加其他条件。它不等同于网页“昨天/今天动态”视图。", true),
-            archived, BuildFilterEditor(), confirmed));
-        var probe = Card(Column(Paragraph("只读初始化", size: 18), TimeInputs(),
-            Paragraph("选择确有任务更新和动态的区间。接口完整翻页并通过字段样本校验后，才能确认范围；不会自动猜成员姓名。", true),
+            Paragraph("保存配置即采用当前项目、归档选项和筛选条件。范围或 Teambition 凭据变化时，会使用下面的时间区间自动只读核验；核验未通过时仍保存编辑，自动运行会关闭。", true),
+            archived, BuildFilterEditor()));
+        var probe = Card(Column(Paragraph("只读核验与映射发现", size: 18), TimeInputs(),
+            Paragraph("选择确有任务更新和动态的区间。保存时会校验完整翻页、来源与字段样本，并发现映射 ID。成员姓名和状态名称仍需核对。", true),
             ActionButton("只读验证项目并发现映射 ID", "probe-project", async () =>
             {
                 if (_state.SecretDrafts.Any(x => !string.IsNullOrEmpty(x.Value))) await SaveCoreAsync();
                 var result = await Worker.SendAsync("probe_project", _state.WindowPayload(scope: true));
-                foreach (JsonNode? id in result["owner_ids"]!.AsArray()) _state.CandidateOwners.Add(id!.GetValue<string>());
-                foreach (JsonNode? id in result["status_ids"]!.AsArray()) _state.CandidateStatuses.Add(id!.GetValue<string>());
-                foreach (var item in result["status_name_suggestions"]!.AsObject())
-                    _state.StatusSuggestions[item.Key] = item.Value!.GetValue<string>();
-                _state.ScopeConfirmed = false;
-                _state.Output = $"完整读取 {result["task_count"]} 个任务、{result["activity_count"]} 条动态。核对成员/状态映射，确认项目范围后保存配置。";
+                _state.ApplyProbe(result);
+                _state.Output = $"完整读取 {result["task_count"]} 个任务、{result["activity_count"]} 条动态。核对成员/状态映射后保存配置，保存时会采用当前项目范围。";
                 Navigate("project");
                 SetStatus(_state.Output);
             }, accent: true)));
@@ -211,7 +202,7 @@ public sealed partial class MainWindow
                         ["value"] = value.Text, ["filters"] = _state.Filters.DeepClone()
                     });
                     _state.SetFilters(result["filters"]!.AsObject()); Navigate("project");
-                    SetStatus("筛选条件已编辑；请重新只读验证并保存。");
+                    SetStatus("筛选条件已编辑；保存配置时会自动只读核验当前范围。");
                 }),
                 ActionButton("删除选中条件", "filter-remove", async () =>
                 {

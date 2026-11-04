@@ -82,14 +82,23 @@ public sealed partial class MainWindow
             Assert(_state.Map("status_names")["ci-status"]?.GetValue<string>() == "CI 虚构状态", "Native status editor dialog");
 
             Navigate("project");
+            Assert(Find<CheckBox>("confirm-scope") is null, "Project page has no scope confirmation checkbox");
+            JsonObject savePayload = _state.SavePayload();
+            Assert(!savePayload.ContainsKey("scope_confirmed") &&
+                savePayload["verification_window"]?["start"]?.GetValue<string>() == _state.ManualStart &&
+                savePayload["verification_window"]?["end"]?.GetValue<string>() == _state.ManualEnd,
+                "Save supplies the current verification window without a manual confirmation field");
+            Invoke(SaveButton);
+            await WaitForAsync(() => !_busy);
+            Assert(_state.ScopeVerified && _state.Flag("api_contract_verified"),
+                "Save automatically verifies the scope with a real read-only synthetic query");
+            Assert(_state.CandidateOwners.Contains("demo-person") && _state.CandidateStatuses.Contains("demo-open"),
+                "Automatic save also discovers mapping IDs");
+            Assert(_state.Number("schema_version", 0) == 1 && !_state.Flag("auto_send_enabled") && _state.History.Count == 0,
+                "Automatic scope validation preserves legacy settings and does not send");
             Invoke(Find<Button>("probe-project")!);
             await WaitForAsync(() => !_busy);
             Assert(_state.CandidateOwners.Contains("demo-person"), "Read-only synthetic project probe");
-            var check = Find<CheckBox>("confirm-scope")!;
-            ((IToggleProvider)new CheckBoxAutomationPeer(check).GetPattern(PatternInterface.Toggle)).Toggle();
-            Invoke(SaveButton);
-            await WaitForAsync(() => !_busy);
-            Assert(_state.ScopeConfirmed, "Save recomputed scope proof and legacy settings format");
 
             Task<ContentDialogResult> firstDialog = ShowMessageAsync("CI 对话框一", "虚构并发提示", "继续");
             Button firstPrimary = await WaitForPrimaryAsync();
