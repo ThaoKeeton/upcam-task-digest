@@ -168,7 +168,7 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
     unknown_actions, undated_tasks = set(), set()
     malformed_comments, status_schema_errors = {}, {}
     status_name_mismatches = set()
-    bad_executor_events, bad_commit_events = set(), set()
+    bad_executor_events, bad_commit_events, unrecognized_standard_events = set(), set(), set()
     status_conflicts, status_conflict_details = set(), {}
     executor_conflicts, no_window_events = set(), set()
     generic_tasks = set()
@@ -311,7 +311,7 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
             elif action == "standard":
                 candidate = standard_commit_candidate(activity)
                 if candidate is None:
-                    bad_commit_events.add(task_id)
+                    unrecognized_standard_events.add(task_id)
                 else:
                     # A title pattern alone does not prove the linked commit/source.
                     bad_commit_events.add(task_id)
@@ -358,6 +358,9 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
     if bad_commit_events:
         reasons.append("关联提交动态仅有标题模式，无法证明提交来源：" + _display_ids(bad_commit_events) +
                        "。在仓库规则补充可验证的提交证据前，该动态会继续阻断发送。")
+    if unrecognized_standard_events:
+        reasons.append("standard 动态尚未符合已核验结构或标题规则：" + _display_ids(unrecognized_standard_events) +
+                       "。不能认定该动态是关联提交；核对动态结构与标题规则后再诊断。")
     if bad_executor_events:
         reasons.append("执行人变更动态结构或来源标记无法核实：" + _display_ids(bad_executor_events) +
                        "。核对动态字段及成员映射后重新只读诊断。")

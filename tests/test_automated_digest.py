@@ -190,6 +190,61 @@ class AutomatedDigestTests(unittest.TestCase):
         self.assertNotIn("synthetic-wrong-name", diagnostic["message"])
         self.assertNotIn("synthetic status marker", diagnostic["message"])
 
+    def test_unrecognized_standard_event_is_not_claimed_as_linked_commit_evidence(self):
+        self.collection["records"][0]["activities"] = [{
+            "id": "synthetic-unrecognized-standard", "action": "standard",
+            "boundToObjectId": "demo-old-task", "boundToObjectType": "task",
+            "createTime": "2026-01-02T11:00:00Z",
+            "content": json.dumps({"title": "SYNTHETIC_PRIVATE_OTHER_TITLE",
+                                   "customCreator": {"name": "SYNTHETIC_PRIVATE_SOURCE"}}),
+        }]
+
+        diagnostic = diagnose_automatic_source(self.collection, self.config, "2026-01-02")
+
+        self.assertFalse(diagnostic["ok"])
+        self.assertIn("standard 动态尚未符合已核验结构或标题规则", diagnostic["message"])
+        self.assertNotIn("关联提交动态仅有标题模式", diagnostic["message"])
+        self.assertNotIn("SYNTHETIC_PRIVATE_OTHER_TITLE", diagnostic["message"])
+        self.assertNotIn("SYNTHETIC_PRIVATE_SOURCE", diagnostic["message"])
+
+    def test_out_of_window_comment_and_standard_content_do_not_block_current_report(self):
+        record = self.collection["records"][0]
+        record["activities"] = [
+            {"id": "synthetic-current-create", "action": "create",
+             "boundToObjectId": "demo-old-task", "boundToObjectType": "task",
+             "createTime": "2026-01-02T01:00:00Z", "content": "{}"},
+            {"id": "synthetic-historical-comment", "action": "comment",
+             "boundToObjectId": "demo-old-task", "boundToObjectType": "task",
+             "createTime": "2026-01-01T01:00:00Z", "content": "SYNTHETIC_INVALID_COMMENT_JSON"},
+            {"id": "synthetic-future-standard", "action": "standard",
+             "boundToObjectId": "demo-old-task", "boundToObjectType": "task",
+             "createTime": "2026-01-03T01:00:00Z", "content": "SYNTHETIC_INVALID_STANDARD_JSON"},
+        ]
+
+        diagnostic = diagnose_automatic_source(self.collection, self.config, "2026-01-02")
+        report = self.build(RecordingSummarizer())
+
+        self.assertTrue(diagnostic["ok"])
+        self.assertTrue(report["ready_to_send"])
+        self.assertEqual(report["audit"][0]["event_ids"], ["synthetic-current-create"])
+
+    def test_out_of_window_identity_binding_and_unknown_time_still_block(self):
+        record = self.collection["records"][0]
+        record["activities"] = [{
+            "id": "synthetic-historical-comment", "action": "comment",
+            "boundToObjectId": "synthetic-other-task", "boundToObjectType": "task",
+            "createTime": "2026-01-01T01:00:00Z", "content": "SYNTHETIC_INVALID_COMMENT_JSON",
+        }]
+        with self.assertRaises(CollectionError):
+            self.build(RecordingSummarizer())
+        record["activities"][0].update(boundToObjectId="demo-old-task", createTime="2026-01-01T01:00:00")
+
+        diagnostic = diagnose_automatic_source(self.collection, self.config, "2026-01-02")
+
+        self.assertFalse(diagnostic["ok"])
+        self.assertIn("createTime", diagnostic["message"])
+        self.assertNotIn("SYNTHETIC_INVALID_COMMENT_JSON", diagnostic["message"])
+
     def test_verified_empty_window_renders_no_activity_without_openai_request(self):
         self.collection["records"] = []
         client = RecordingSummarizer()

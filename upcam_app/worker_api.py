@@ -368,7 +368,7 @@ class WorkerService:
                 settings["project_id"], day=day, window=(start, end),
                 include_archived=settings["include_archived"])
             diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
-            self._last_diagnostic_shape = safe_structure_export(collection, config)
+            self._last_diagnostic_shape = safe_structure_export(collection, config, day, (start, end))
         except (CollectionError, OSError) as exc:
             self._last_diagnostic_shape = None
             return {"ok": False, "message": collection_validation_message(exc),

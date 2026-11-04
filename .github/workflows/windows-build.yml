@@ -75,6 +75,9 @@ jobs:
       - name: Assemble self-contained application
         shell: pwsh
         run: |
+          if (-not (Test-Path dist/winui/UPCAMTaskDigest.pri)) {
+            throw "Compiled application XAML resource index was not published"
+          }
           Copy-Item dist/UPCAMWorker -Destination dist/winui/worker -Recurse
           $manifest = @{
             sourceCommit = (git rev-parse HEAD)

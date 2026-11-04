@@ -1384,7 +1384,7 @@ class DigestDesktopApp:
                     include_archived=settings["include_archived"])
                 diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
                 try:
-                    safe_shape = safe_structure_export(collection, config)
+                    safe_shape = safe_structure_export(collection, config, day, (start, end))
                 except Exception:
                     diagnostic["message"] += (
                         "\n当前诊断可查看，但安全结构文件生成失败；不会导出原始响应。"
