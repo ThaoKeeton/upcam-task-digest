@@ -92,8 +92,8 @@ public sealed partial class MainWindow
         var ids = _state.Models.Select(x => Value(x, "id")).Append(current).Distinct().OrderBy(x => x).ToArray();
         foreach (string id in ids) model.Items.Add(id);
         model.SelectedItem = current;
-        var effort = Identify(new ComboBox { Header = "推理程度", HorizontalAlignment = HorizontalAlignment.Stretch }, "reasoning-effort");
-        var tier = Identify(new ComboBox { Header = "服务等级", HorizontalAlignment = HorizontalAlignment.Stretch }, "service-tier");
+        var effort = Identify(new ComboBox { Header = "推理程度", PlaceholderText = "请选择已核验的选项", HorizontalAlignment = HorizontalAlignment.Stretch }, "reasoning-effort");
+        var tier = Identify(new ComboBox { Header = "服务等级", PlaceholderText = "请选择已核验的选项", HorizontalAlignment = HorizontalAlignment.Stretch }, "service-tier");
         void SetOptions()
         {
             string selected = model.SelectedItem as string ?? current;
@@ -102,12 +102,12 @@ public sealed partial class MainWindow
             if (_state.Efforts[selected] is JsonArray values)
                 foreach (JsonNode? value in values) effort.Items.Add(value!.GetValue<string>());
             string chosen = _state.Text("openai_reasoning_effort", "default");
-            effort.SelectedItem = effort.Items.Contains(chosen) ? chosen : "default";
+            effort.SelectedItem = effort.Items.Contains(chosen) ? chosen : null;
             tier.Items.Clear();
             tier.Items.Add("default");
             if (_state.FastModels.Any(x => x?.GetValue<string>() == selected)) tier.Items.Add("fast");
             string chosenTier = _state.Text("openai_service_tier", "default");
-            tier.SelectedItem = tier.Items.Contains(chosenTier) ? chosenTier : "default";
+            tier.SelectedItem = tier.Items.Contains(chosenTier) ? chosenTier : null;
         }
         SetOptions();
         model.SelectionChanged += (_, _) =>
@@ -190,7 +190,12 @@ public sealed partial class MainWindow
         foreach (var item in _state.Filters)
             filters.Items.Add(new ListViewItem { Tag = item.Key, Content = Paragraph($"{item.Key} = {item.Value?.GetValue<string>()}") });
         var field = new ComboBox { Header = "稳定字段", HorizontalAlignment = HorizontalAlignment.Stretch };
-        foreach (string key in new[] { "executorId", "tasklistId", "stageId", "tfsId", "scenariofieldconfigId", "visible", "parentTaskId" }) field.Items.Add(key);
+        foreach (var item in new Dictionary<string, string>
+        {
+            ["executorId"] = "执行人 ID", ["tasklistId"] = "任务列表 ID", ["stageId"] = "阶段 ID",
+            ["tfsId"] = "状态 ID", ["scenariofieldconfigId"] = "自定义字段配置 ID",
+            ["visible"] = "可见性", ["parentTaskId"] = "父任务 ID"
+        }) field.Items.Add(new ComboBoxItem { Tag = item.Key, Content = item.Value });
         field.SelectedIndex = 0;
         var value = new TextBox { Header = "字段值 / API ID" };
         return new Expander
@@ -202,7 +207,7 @@ public sealed partial class MainWindow
                 {
                     var result = await Worker.SendAsync("update_view_filter", new JsonObject
                     {
-                        ["action"] = "put", ["field"] = field.SelectedItem as string,
+                        ["action"] = "put", ["field"] = (field.SelectedItem as ComboBoxItem)?.Tag as string,
                         ["value"] = value.Text, ["filters"] = _state.Filters.DeepClone()
                     });
                     _state.SetFilters(result["filters"]!.AsObject()); Navigate("project");
@@ -400,13 +405,12 @@ public sealed partial class MainWindow
 
     private async Task ExportDiagnosticAsync()
     {
-        var result = await Worker.SendAsync("export_diagnostic");
         var picker = new FileSavePicker { SuggestedFileName = "teambition-safe-structure" };
         picker.FileTypeChoices.Add("JSON", new List<string> { ".json" });
         WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
         StorageFile? file = await picker.PickSaveFileAsync();
         if (file is null) return;
-        await FileIO.WriteTextAsync(file, result["shape"]!.ToJsonString(new() { WriteIndented = true }));
+        await Worker.SendAsync("export_diagnostic_to_file", new JsonObject { ["path"] = file.Path });
         SetStatus("已导出字段名、类型、长度与任务/动态 ID；不含标题、姓名、评论正文或凭据。分享前请检查 ID。");
     }
 

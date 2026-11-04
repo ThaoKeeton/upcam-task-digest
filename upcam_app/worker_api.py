@@ -19,7 +19,7 @@ from teambition_readonly import Client, CollectionError
 
 from .config import (
     SettingsError, SettingsStore, collection_client_limits,
-    parse_manual_window, recoverable_schedule_occurrences, runtime_config,
+    atomic_write, parse_manual_window, recoverable_schedule_occurrences, runtime_config,
     scheduled_window, user_data_dir, validate_settings,
 )
 from .diagnostic_export import safe_structure_export
@@ -96,6 +96,7 @@ class WorkerService:
             "probe_project": self._probe_project,
             "diagnose": self._diagnose,
             "export_diagnostic": self._export_diagnostic,
+            "export_diagnostic_to_file": self._export_diagnostic_to_file,
             "preview_sample": self._preview_sample,
             "test_teambition": self._test_teambition,
             "validate_dingtalk_config": self._validate_dingtalk_config,
@@ -136,8 +137,8 @@ class WorkerService:
             "model_cache_fetched_at_utc": cache.get("fetched_at_utc") if cache else None,
             "model_cache_matches_key": cache_matches_key(cache, credentials.get("openai_api_key", "")),
             "model_cache_error": cache_error,
-            "reasoning_efforts": {item["id"]: list(reasoning_efforts(item["id"]))
-                                  for item in cached_models},
+            "reasoning_efforts": {model_id: list(reasoning_efforts(model_id)) for model_id in
+                                  {item["id"] for item in cached_models} | {settings["openai_model"]}},
             "fast_models": sorted(KNOWN_FAST_MODELS),
             "history": [_safe_history_row(row) for row in self.history.list_runs(100)],
             "ledger_ready": ledger_ready,
@@ -390,6 +391,19 @@ class WorkerService:
             raise WorkerApiError("没有可导出的诊断；请先运行只读诊断。")
         return {"shape": self._last_diagnostic_shape}
 
+    def _export_diagnostic_to_file(self, payload: dict) -> dict:
+        target = payload.get("path")
+        if not isinstance(target, str) or not target or not Path(target).is_absolute():
+            raise WorkerApiError("请选择有效的本机 JSON 文件路径。")
+        if not isinstance(self._last_diagnostic_shape, dict):
+            raise WorkerApiError("没有可导出的诊断；请先运行只读诊断。")
+        try:
+            content = json.dumps(self._last_diagnostic_shape, ensure_ascii=False, indent=2) + "\n"
+            atomic_write(Path(target), content.encode("utf-8"))
+        except OSError:
+            raise WorkerApiError("无法写入所选文件，请检查目标文件夹权限和可用空间。") from None
+        return {"status": "已保存脱敏结构；分享前请检查保留的任务和动态 ID。"}
+
     def _preview_sample(self, payload: dict) -> dict:
         try:
             _start, end = parse_manual_window(payload.get("start", ""), payload.get("end", ""))
@@ -498,6 +512,9 @@ class WorkerService:
         try:
             settings = self.settings_store.load()
             secrets = self.secret_store.load()
+            ready, message = self._ensure_ledger(secrets)
+            if not ready:
+                raise WorkerApiError(message)
             result = self.workflow_factory(settings, secrets, self.data_dir,
                                            history=self.history,
                                            model_catalog=self.model_catalog).run(
@@ -531,7 +548,7 @@ class WorkerService:
         api_key = credentials["openai_api_key"]
         model = settings["openai_model"]
         if not cache_matches_key(cache, api_key):
-            raise WorkerApiError("请先用当前保存的 OpenAI API Key 刷新模型列表。")
+            raise WorkerApiError("模型缓存未匹配。若在更换 Key，请先在“自动运行”关闭并保存，再保存新 Key、刷新模型，最后重新开启自动运行。")
         if model not in {item["id"] for item in cache["models"]}:
             raise WorkerApiError("所选模型不在当前 API Key 的缓存列表中。")
         if settings["openai_reasoning_effort"] not in ("default",) + reasoning_efforts(model):
