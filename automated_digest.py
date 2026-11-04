@@ -21,6 +21,9 @@ from teambition_readonly import CollectionError, identifier, record_id
 
 
 MAX_SUMMARY_CHARS = 200
+MAX_DIAGNOSTIC_CHARS = 12000
+MAX_UNKNOWN_ACTION_GROUPS = 32
+MAX_DIAGNOSTIC_TASK_SAMPLES = 3
 
 
 class AutomatedDigestBlocked(RuntimeError):
@@ -177,7 +180,7 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
         records[task_id] = row
 
     missing_owners, missing_statuses = set(), set()
-    unknown_actions, undated_tasks = set(), set()
+    unknown_actions, undated_tasks = {}, set()
     malformed_comments, status_schema_errors = {}, {}
     status_name_mismatches = set()
     bad_executor_events, bad_commit_events, unrecognized_standard_events = set(), set(), set()
@@ -263,7 +266,7 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
                 continue
             action = activity.get("action")
             if not isinstance(action, str) or action not in OBSERVED_ACTIONS:
-                unknown_actions.add((task_id, _safe_action(action)))
+                unknown_actions.setdefault(_safe_action(action), set()).add(task_id)
                 continue
             if action == "comment":
                 try:
@@ -341,11 +344,6 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
     if missing_statuses:
         reasons.append("缺少状态名称映射：" + _display_ids(missing_statuses) +
                        "。核对状态名称，在“状态映射与‘已解决’标记”补齐并保存，再重新诊断。")
-    if unknown_actions:
-        for task_id, action in sorted(unknown_actions)[:12]:
-            reasons.append(f"任务 {task_id}：未识别动态类型 {action}；不要跳过该动态。先确认仓库规则与 API 事件字段，再更新受控程序。")
-        if len(unknown_actions) > 12:
-            reasons.append(f"另有 {len(unknown_actions) - 12} 个未识别动态类型。")
     if undated_tasks:
         reasons.append("以下任务的动态 createTime 缺失或不是带时区的 ISO 8601 时间：" +
                        _display_ids(undated_tasks) + "。核对 API 时间字段和原始动态；不要猜测其属于哪个日报窗口。")
@@ -392,13 +390,40 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
     for issue in issues:
         if issue not in _GLOBAL_SOURCE_ISSUES and not issue.startswith("任务 "):
             reasons.append("本机范围或来源校验未通过；重新验证 Project ID、更新时间窗口和归档选项。")
+    # Put other hard failures first so repeated unsupported events cannot hide them.
+    # Group only by the existing safe display value, never by raw action/content.
+    if unknown_actions:
+        affected_tasks = set().union(*unknown_actions.values())
+        reasons.append(f"共 {len(unknown_actions)} 类未识别动态类型/类别，影响 {len(affected_tasks)} 个任务；"
+                       f"每类最多显示 {MAX_DIAGNOSTIC_TASK_SAMPLES} 个任务 ID 样例。")
+        reasons.append("先复制以下类型行，或导出安全结构，再核对仓库规则与 API 事件字段；"
+                       "不要跳过动态或根据 content 形状猜测含义，这些动态仍会阻断发送。")
+        for action, task_ids in sorted(unknown_actions.items())[:MAX_UNKNOWN_ACTION_GROUPS]:
+            examples = ", ".join(sorted(task_ids)[:MAX_DIAGNOSTIC_TASK_SAMPLES])
+            reasons.append(f"未识别动态类型 {action}：影响 {len(task_ids)} 个任务；任务 ID 样例：{examples}。")
+        if len(unknown_actions) > MAX_UNKNOWN_ACTION_GROUPS:
+            remaining = len(unknown_actions) - MAX_UNKNOWN_ACTION_GROUPS
+            reasons.append(f"另有 {remaining} 类未识别动态类型/类别未显示"
+                           f"（本机最多显示 {MAX_UNKNOWN_ACTION_GROUPS} 类）；请导出安全结构核对全部类别。")
     if not reasons:
         reasons.append("存在未分类的硬性来源/事件证据问题；请在“运行记录”查看本机安全诊断并停止发送。")
     # De-duplicate without changing display order or including raw task/comment data.
     details = list(dict.fromkeys(reasons))
-    message = "自动校验未通过：未调用 OpenAI，未发送钉钉。\n" + "\n".join(details)
-    message += "\n处理后再次点“只读诊断当前数据”；诊断通过后再运行并自动发送。"
-    return message[:2400]
+    header = "自动校验未通过：未调用 OpenAI，未发送钉钉。\n"
+    footer = "\n处理后再次点“只读诊断当前数据”；诊断通过后再运行并自动发送。"
+    message = header + "\n".join(details) + footer
+    if len(message) <= MAX_DIAGNOSTIC_CHARS:
+        return message
+    notice = (f"\n诊断显示已截断，部分类型或原因行未显示（本机显示上限 {MAX_DIAGNOSTIC_CHARS} 字）；"
+              "请先复制已显示的类型行，并导出安全结构核对全部类型和硬性失败原因。")
+    remaining = MAX_DIAGNOSTIC_CHARS - len(header) - len(footer) - len(notice)
+    shown = []
+    for detail in details:
+        size = len(detail) + bool(shown)
+        if size <= remaining:
+            shown.append(detail)
+            remaining -= size
+    return header + "\n".join(shown) + notice + footer
 
 
 def _validated_source_report(collection: dict, config: dict, day, window=None) -> dict:

@@ -99,6 +99,7 @@ class WorkerService:
             "probe_project": self._probe_project,
             "diagnose": self._diagnose,
             "export_diagnostic": self._export_diagnostic,
+            "diagnostic_status": self._diagnostic_status,
             "export_diagnostic_to_file": self._export_diagnostic_to_file,
             "preview_sample": self._preview_sample,
             "test_teambition": self._test_teambition,
@@ -442,6 +443,9 @@ class WorkerService:
 
     def _export_diagnostic(self, payload: dict) -> dict:
         return {"shape": self._checked_diagnostic(payload)}
+
+    def _diagnostic_status(self, payload: dict) -> dict:
+        return {"diagnostic": self._checked_diagnostic(payload)["diagnostic"]}
 
     def _checked_diagnostic(self, payload: dict) -> dict:
         message = "诊断缺失，或设置、凭据、时间范围已改变；请重新运行只读诊断后导出。"
@@ -867,4 +871,7 @@ def _safe_error_message(exc: BaseException | None) -> str:
         "authorization", "bearer ", "access_token", "secret=", "api key",
     )):
         return "操作未完成；详细 API 响应和凭据没有写入日志。"
-    return message[:2400]
+    if len(message) > 2400:
+        notice = "\n错误说明已截断；请运行只读诊断并复制诊断文字，或导出安全结构查看完整问题。"
+        return message[:2400 - len(notice)] + notice
+    return message

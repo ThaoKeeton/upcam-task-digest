@@ -136,6 +136,14 @@ public sealed partial class MainWindow
             Invoke(Find<Button>("diagnose")!);
             await WaitForAsync(() => !_busy);
             Assert(_state.ExportAvailable && _state.Output.Contains("通过"), "Read-only diagnostic button and safe export availability");
+            var clipboardOptions = DiagnosticClipboardOptions();
+            Assert(!clipboardOptions.IsAllowedInHistory && !clipboardOptions.IsRoamable,
+                "Diagnostic clipboard options disable history and device roaming");
+            Invoke(Find<Button>("copy-diagnostic")!);
+            await WaitForAsync(() => !_busy);
+            string copiedDiagnostic = await Windows.ApplicationModel.DataTransfer.Clipboard.GetContent().GetTextAsync();
+            Assert(copiedDiagnostic == _state.DiagnosticText && copiedDiagnostic.Contains("只读校验通过"),
+                "Native copy button copies only the current local diagnostic");
             Assert(Title.Contains("v" + _state.ApplicationVersion) &&
                 _state.ApplicationVersion == typeof(MainWindow).Assembly.GetName().Version?.ToString(3),
                 "Visible native application and worker versions match");
@@ -147,12 +155,17 @@ public sealed partial class MainWindow
             Assert(exported["diagnostic"]?["application_version"]?.GetValue<string>() == _state.ApplicationVersion &&
                 exported["diagnostic"]?["report_window"]?["end_exclusive"] is not null,
                 "Native export writes actual version and explicit report window");
+            Assert(exported["format"]?.GetValue<string>() == "upcam-teambition-safe-shape-v5" &&
+                exported["tasks"]?[0]?["activities"]?[0]?["action_fingerprint"]?["sha256"] is not null,
+                "Native exported diagnostic contains protocol fingerprints");
             string previousStart = _state.ManualStart;
             _state.ManualStart = DateTime.ParseExact(previousStart, "yyyy-MM-dd HH:mm", null)
                 .AddMinutes(-1).ToString("yyyy-MM-dd HH:mm");
             Assert(!_state.ExportAvailable, "Changing report window invalidates cached export in native state");
             Navigate("run");
             Assert(!Find<Button>("export-diagnostic")!.IsEnabled, "Stale export button is disabled");
+            Assert(!Find<Button>("copy-diagnostic")!.IsEnabled && _state.DiagnosticText == "",
+                "Stale diagnostic copy is disabled after window changes");
             _state.ManualStart = previousStart;
             Invoke(Find<Button>("run-manual")!);
             await WaitForAsync(() => !_busy);
@@ -205,7 +218,7 @@ public sealed partial class MainWindow
                             "Diagnostic output preserves all source lines");
                         Assert(textbox.ActualHeight >= 60, $"Diagnostic result has usable space {size.Width}x{size.Height}");
                         AssertInside(textbox, "Diagnostic output");
-                        foreach (string id in new[] { "diagnose", "run-manual", "preview-sample", "export-diagnostic" })
+                        foreach (string id in new[] { "diagnose", "run-manual", "preview-sample", "export-diagnostic", "copy-diagnostic" })
                             AssertInside(Find<Button>(id)!, "Run toolbar " + id);
                     }
                 }

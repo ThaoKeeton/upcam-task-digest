@@ -33,6 +33,14 @@ class FakeCatalog:
 
 
 class WorkerApiTests(unittest.TestCase):
+    def test_long_safe_error_has_an_explicit_truncation_notice(self):
+        from upcam_app.worker_api import _safe_error_message
+        from upcam_app.config import SettingsError
+        message = _safe_error_message(SettingsError("Synthetic diagnostic line. " * 200))
+        self.assertLessEqual(len(message), 2400)
+        self.assertIn("截断", message)
+        self.assertIn("只读诊断", message)
+
     def make_service(self, directory, secret_values=None):
         root = Path(directory)
         settings = SettingsStore(root / "settings.json")
@@ -156,7 +164,7 @@ class WorkerApiTests(unittest.TestCase):
             service.dispatch({"op": "export_diagnostic_to_file", "payload": {**window, "path": str(export_path)}})
             exported = export_path.read_text(encoding="utf-8")
             parsed_export = json.loads(exported)
-            self.assertEqual(parsed_export["format"], "upcam-teambition-safe-shape-v4")
+            self.assertEqual(parsed_export["format"], "upcam-teambition-safe-shape-v5")
             self.assertTrue(parsed_export["tasks"][0]["activities"][0]["in_report_window"])
             self.assertIn("ci-synthetic-task", exported)
             for excluded in ("CI 虚构：验证原生界面布局", "synthetic-app-secret", "虚构成员甲"):

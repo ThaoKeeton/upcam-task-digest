@@ -67,7 +67,7 @@ class SafeStructureExportTests(unittest.TestCase):
         self.assertIsNone(events[2]["action_token"])
         self.assertIsNone(events[3]["action_token"])
         self.assertIsNone(events[4]["action_token"])
-        self.assertEqual(report["format"], "upcam-teambition-safe-shape-v4")
+        self.assertEqual(report["format"], "upcam-teambition-safe-shape-v5")
         self.assertNotIn("PRIVATE_ACTION_VALUE", json.dumps(report))
 
     def event(self, action, content, **extra):
@@ -149,7 +149,7 @@ class SafeStructureExportTests(unittest.TestCase):
     def test_comment_text_checks_distinguish_supported_breaks_markup_and_control_categories(self):
         collection = self.collection([
             self.event("comment", {"comment": "PRIVATE_BODY<br>still pending",
-                                   "quote": "PRIVATE_QUOTE<br>context", "renderMode": "markdown"}),
+                                   "quote": "PRIVATE_QUOTE<br>SYNTHETIC_PRIVATE_QUOTE_TAIL", "renderMode": "markdown"}),
             self.event("comment", {"comment": "PRIVATE_BODY<p>SYNTHETIC_PRIVATE_RICH_TEXT</p>\u202e",
                                    "quote": "PRIVATE_QUOTE\x00\u0085", "renderMode": "markdown"},
                        id="synthetic-rich-comment"),
@@ -165,7 +165,7 @@ class SafeStructureExportTests(unittest.TestCase):
         self.assertEqual(rich["quote_checks"]["content"]["control_categories"],
                          ["ascii_control", "unicode_control"])
         encoded = json.dumps(report)
-        for value in ("PRIVATE_BODY", "PRIVATE_QUOTE", "still pending", "context", "SYNTHETIC_PRIVATE_RICH_TEXT"):
+        for value in ("PRIVATE_BODY", "PRIVATE_QUOTE", "still pending", "SYNTHETIC_PRIVATE_QUOTE_TAIL", "SYNTHETIC_PRIVATE_RICH_TEXT"):
             self.assertNotIn(value, encoded)
 
     def test_standard_rejection_reasons_distinguish_structure_from_title_pattern(self):
