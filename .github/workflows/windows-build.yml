@@ -55,6 +55,8 @@ jobs:
     needs: tests
     runs-on: windows-latest
     timeout-minutes: 25
+    env:
+      PYTHONUTF8: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
