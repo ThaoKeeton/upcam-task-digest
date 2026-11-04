@@ -8,6 +8,59 @@ from upcam_app.diagnostic_export import safe_structure_export
 
 
 class SafeStructureExportTests(unittest.TestCase):
+    def test_quote_json_is_parsed_strictly_without_guessing_from_json_like_text(self):
+        values = [
+            '{"comment":"PRIVATE_QUOTED_BODY","author":{"name":"PRIVATE_QUOTED_NAME"}}',
+            'literal {"not valid JSON',
+            '{"comment":"one","comment":"two"}',
+            '{"comment":NaN}',
+            json.dumps('{"text":"PRIVATE_DOUBLE_ENCODED"}'),
+        ]
+        report = safe_structure_export(self.collection([
+            self.event("comment", {"comment": "PRIVATE_NEW_BODY", "quote": value}, id=f"quote-{i}")
+            for i, value in enumerate(values)
+        ]), {}, "2026-01-02")
+        checks = [e["comment_check"]["quote_checks"]["content"] for e in report["tasks"][0]["activities"]]
+        self.assertIn("json_shape", checks[0])
+        self.assertTrue(checks[0]["json_shape"]["json_valid"])
+        self.assertEqual(checks[0]["json_shape"]["fields"]["comment"]["type"], "string")
+        self.assertEqual(checks[0]["json_shape"]["fields"]["author"]["fields"]["name"]["type"], "string")
+        self.assertTrue(all(not checks[i]["json_shape"]["json_valid"] for i in (1, 2, 3)))
+        self.assertEqual(checks[4]["json_shape"]["json_scalar_type"], "string")
+        self.assertEqual(checks[4]["decoded_string_shape"]["fields"]["text"]["type"], "string")
+        self.assertTrue(all(e["comment_check"]["needs_review"] for e in report["tasks"][0]["activities"][:4]))
+        encoded = json.dumps(report)
+        for value in ("PRIVATE_QUOTED_BODY", "PRIVATE_QUOTED_NAME", "PRIVATE_DOUBLE_ENCODED", "PRIVATE_NEW_BODY"):
+            self.assertNotIn(value, encoded)
+
+    def test_quote_field_names_and_nested_text_checks_are_privacy_bounded(self):
+        quote = json.dumps({"comment": "PRIVATE_BODY<p>private</p>",
+                            "SYNTHETIC_PRIVATE_KEY": "PRIVATE_VALUE", "author": {"name": "PRIVATE_NAME"}})
+        report = safe_structure_export(self.collection([self.event("comment", {"comment": "new", "quote": quote})]), {})
+        check = report["tasks"][0]["activities"][0]["comment_check"]["quote_checks"]["content"]
+        self.assertIn("json_shape", check)
+        self.assertEqual(check["json_shape"]["other_field_count"], 1)
+        self.assertEqual(check["decoded_text_checks"]["comment"]["markup_categories"], ["other_tag_like"])
+        encoded = json.dumps(report)
+        for value in ("PRIVATE_BODY", "PRIVATE_VALUE", "PRIVATE_NAME", "SYNTHETIC_PRIVATE_KEY"):
+            self.assertNotIn(value, encoded)
+
+    def test_unknown_action_protocol_token_is_exported_without_business_text(self):
+        collection = self.collection([
+            self.event("update_tasklist", {"from": {}, "to": {}}),
+            self.event("PRIVATE_ACTION_VALUE", {}, id="private-action"),
+            self.event("not an api token", {}, id="invalid-action"),
+        ])
+        report = safe_structure_export(collection, {}, "2026-01-02")
+        events = report["tasks"][0]["activities"]
+        self.assertEqual(events[0]["action"], "unknown")
+        self.assertIn("action_token", events[0])
+        self.assertEqual(events[0]["action_token"], "update_tasklist")
+        self.assertIsNone(events[1]["action_token"])
+        self.assertIsNone(events[2]["action_token"])
+        self.assertEqual(report["format"], "upcam-teambition-safe-shape-v3")
+        self.assertNotIn("PRIVATE_ACTION_VALUE", json.dumps(report))
+
     def event(self, action, content, **extra):
         return {
             "id": "synthetic-event", "action": action,

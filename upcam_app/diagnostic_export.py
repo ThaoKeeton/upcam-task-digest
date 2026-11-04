@@ -22,6 +22,13 @@ _MAX_TASKS = 1000
 _MAX_ACTIVITIES_PER_TASK = 1000
 _SAFE_FIELD = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}\Z")
 _OBSERVED_UNDERSCORE_FIELDS = frozenset({"_executorId", "_oldExecutorId"})
+_ACTION_TOKEN = re.compile(r"[a-z][a-z0-9_.-]{0,47}\Z")
+_QUOTE_FIELDS = frozenset({
+    "id", "_id", "comment", "content", "text", "quote", "renderMode", "attachments",
+    "dingFiles", "files", "images", "mentions", "isOnlyNotifyMentions", "author", "creator",
+    "user", "name", "creatorId", "createTime", "data", "type", "children", "blocks",
+    "ops", "insert", "attributes", "bold", "italic", "link", "url", "title",
+})
 
 
 def _safe_field_name(value):
@@ -47,22 +54,22 @@ def _type_name(value) -> str:
     return "unsupported"
 
 
-def _field_shapes(value, depth: int):
+def _field_shapes(value, depth: int, allowed_fields=None):
     if depth >= _MAX_DEPTH:
         return {"type": _type_name(value), "depth_limited": True}
     if isinstance(value, dict):
         fields, hidden = {}, 0
         for key in sorted(value, key=lambda item: str(item))[:_MAX_FIELDS]:
-            if not _safe_field_name(key):
+            if (key not in allowed_fields if allowed_fields is not None else not _safe_field_name(key)):
                 hidden += 1
                 continue
-            fields[key] = _field_shapes(value[key], depth + 1)
+            fields[key] = _field_shapes(value[key], depth + 1, allowed_fields)
         hidden += max(0, len(value) - _MAX_FIELDS)
         return {"type": "object", "fields": fields, "other_field_count": hidden}
     if isinstance(value, list):
         shapes, seen = [], set()
         for item in value[:_MAX_ARRAY_SHAPES]:
-            shaped = _field_shapes(item, depth + 1)
+            shaped = _field_shapes(item, depth + 1, allowed_fields)
             encoded = json.dumps(shaped, sort_keys=True, ensure_ascii=True)
             if encoded not in seen:
                 seen.add(encoded)
@@ -73,7 +80,7 @@ def _field_shapes(value, depth: int):
     return {"type": _type_name(value)}
 
 
-def _parse_json_shape(value):
+def _parse_json_shape(value, allowed_fields=None):
     if not isinstance(value, str):
         return {"type": _type_name(value), "length": None, "json_valid": False,
                 "json_object": False, "fields": {}}
@@ -90,11 +97,11 @@ def _parse_json_shape(value):
     result["json_valid"] = True
     if isinstance(decoded, dict):
         result["json_object"] = True
-        shaped = _field_shapes(decoded, 0)
+        shaped = _field_shapes(decoded, 0, allowed_fields)
         result["fields"] = shaped.get("fields", {})
         result["other_field_count"] = shaped.get("other_field_count", 0)
     elif isinstance(decoded, list):
-        result["field_array"] = _field_shapes(decoded, 0)
+        result["field_array"] = _field_shapes(decoded, 0, allowed_fields)
     else:
         result["json_scalar_type"] = _type_name(decoded)
     return result
@@ -170,6 +177,26 @@ def _text_check(value):
                 controls.add("unicode_format")
     return {"type": _type_name(value), "markup_categories": markup,
             "control_categories": sorted(controls)}
+
+
+def _quote_check(value):
+    """Inspect quoted encoding without emitting text or approving extraction."""
+    result = _text_check(value)
+    shape = _parse_json_shape(value, _QUOTE_FIELDS)
+    result["json_shape"] = shape
+    if not shape["json_valid"]:
+        return result
+    # The first parse checked the byte budget, duplicate keys and constants.
+    decoded = json.loads(value)
+    if isinstance(decoded, str):
+        result["decoded_string_shape"] = _parse_json_shape(decoded, _QUOTE_FIELDS)
+        result["decoded_string_text_check"] = _text_check(decoded)
+    elif isinstance(decoded, dict):
+        result["decoded_text_checks"] = {
+            key: _text_check(decoded[key]) for key in ("comment", "content", "text", "quote")
+            if key in decoded
+        }
+    return result
 
 
 def _executor_shape_check(activity, owner_names):
@@ -278,6 +305,7 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
             shaped = {
                 "event_id": event_id,
                 "action": safe_action,
+                "action_token": action if isinstance(action, str) and _ACTION_TOKEN.fullmatch(action) else None,
                 "outer_field_names": sorted(key for key in activity if _safe_field_name(key))[:_MAX_FIELDS],
                 "create_time_type": _type_name(activity.get("createTime")),
                 "create_time_has_timezone": _aware_timestamp(activity.get("createTime")),
@@ -297,7 +325,7 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
                         "needs_review": comment["extraction_needs_review"],
                         "review_reasons": list(comment["review_reasons"]),
                         "body_check": _text_check(comment["body"]),
-                        "quote_checks": {source: _text_check(value) for source, value
+                        "quote_checks": {source: _quote_check(value) for source, value
                                          in comment["quote_evidence"].items()},
                     }
                 except (CollectionError, TypeError, ValueError):
@@ -320,8 +348,8 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
             "truncated_activity_count": truncated_activities,
         })
     return {
-        "format": "upcam-teambition-safe-shape-v2",
-        "privacy": "task/event IDs and field names are included; all names, titles, comments, credentials, and response values are omitted",
+        "format": "upcam-teambition-safe-shape-v3",
+        "privacy": "task/event IDs, bounded protocol action tokens and field names are included; names, titles, comments, credentials, and other response values are omitted",
         "pagination_complete": collection.get("pagination_complete") is True if isinstance(collection, dict) else False,
         "window_evaluation_available": bounds is not None,
         "selection_check": {

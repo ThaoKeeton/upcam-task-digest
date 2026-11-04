@@ -25,6 +25,8 @@ public sealed partial class MainWindow
         try
         {
             ShowMainWindow();
+            var titleBar = Find<TitleBar>("app-titlebar");
+            Assert(titleBar is not null && ExtendsContentIntoTitleBar, "Native custom TitleBar replaces colored system title bar");
             await VerifyUtf8PipeBoundariesAsync();
             _state.ManualStart = DateTime.Now.AddHours(-2).ToString("yyyy-MM-dd HH:mm");
             _state.ManualEnd = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
