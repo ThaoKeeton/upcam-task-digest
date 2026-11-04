@@ -46,7 +46,7 @@ jobs:
           if ($process.ExitCode -ne 0) { throw "Windowed desktop EXE smoke test failed with exit code $($process.ExitCode)" }
       - uses: actions/upload-artifact@v4
         with:
-          name: UPCAMTaskDigest-windows
+          name: UPCAMTaskDigest-legacy-Tk-windows
           path: |
             dist/UPCAMTaskDigest.exe
             dist/UPCAMTaskDigest-ui.png
@@ -106,19 +106,40 @@ jobs:
           $report = Get-Content dist/winui/smoke-output/report.json | ConvertFrom-Json
           if (-not $report.success -or $report.steps.Count -lt 30) { throw "WinUI smoke report incomplete" }
           Copy-Item dist/winui/smoke-output -Destination dist/ui-evidence -Recurse
-          $process = Start-Process -FilePath "$PWD/dist/winui/UPCAMTaskDigest.exe" -ArgumentList "--ui-smoke-test --background" -PassThru
-          if (-not $process.WaitForExit(120000)) {
-            Stop-Process -Id $process.Id -Force
-            throw "Background WinUI smoke timed out"
-          }
-          if (Test-Path dist/winui/smoke-output/result.txt) { Get-Content dist/winui/smoke-output/result.txt }
-          if ($process.ExitCode -ne 0) { throw "Background WinUI smoke failed" }
-          Copy-Item dist/winui/smoke-output/report.json dist/ui-evidence/background-report.json
       - name: Package portable application directory
         shell: pwsh
         run: |
           Remove-Item dist/winui/smoke-output -Recurse
           Compress-Archive -Path dist/winui/* -DestinationPath dist/UPCAMTaskDigest-WinUI3-win-x64.zip
+          $hash = (Get-FileHash dist/UPCAMTaskDigest-WinUI3-win-x64.zip -Algorithm SHA256).Hash
+          "$hash  UPCAMTaskDigest-WinUI3-win-x64.zip" | Set-Content dist/UPCAMTaskDigest-WinUI3-win-x64.zip.sha256
+      - name: Verify extracted ZIP and background startup
+        shell: pwsh
+        run: |
+          Expand-Archive dist/UPCAMTaskDigest-WinUI3-win-x64.zip -DestinationPath dist/install-check
+          foreach ($file in @('UPCAMTaskDigest.exe', 'UPCAMTaskDigest.dll', 'UPCAMTaskDigest.pri', 'coreclr.dll', 'hostfxr.dll',
+                               'worker/UPCAMWorker.exe', 'worker/_internal/templates/daily_digest.json', 'worker/_internal/examples/digest.json')) {
+            if (-not (Test-Path "dist/install-check/$file")) { throw "Package missing $file" }
+          }
+          $manifest = Get-Content dist/install-check/build-info.json | ConvertFrom-Json
+          if ((Get-FileHash dist/install-check/UPCAMTaskDigest.exe -Algorithm SHA256).Hash -ne $manifest.applicationSha256) {
+            throw "Packaged application hash mismatch"
+          }
+          if ((Get-FileHash dist/install-check/worker/UPCAMWorker.exe -Algorithm SHA256).Hash -ne $manifest.workerSha256) {
+            throw "Packaged worker hash mismatch"
+          }
+          $process = Start-Process -FilePath "$PWD/dist/install-check/UPCAMTaskDigest.exe" -ArgumentList "--ui-smoke-test --background" -PassThru
+          if (-not $process.WaitForExit(120000)) {
+            Stop-Process -Id $process.Id -Force
+            throw "Extracted background WinUI smoke timed out"
+          }
+          if (Test-Path dist/install-check/smoke-output/result.txt) { Get-Content dist/install-check/smoke-output/result.txt }
+          if ($process.ExitCode -ne 0) { throw "Extracted background WinUI smoke failed" }
+          $report = Get-Content dist/install-check/smoke-output/report.json | ConvertFrom-Json
+          if (-not $report.success) { throw "Extracted ZIP did not pass native UI validation" }
+          Copy-Item dist/install-check/smoke-output/report.json dist/ui-evidence/background-report.json
+          Get-Content dist/ui-evidence/report.json
+          Get-Content dist/ui-evidence/background-report.json
       - name: Publish synthetic UI snapshot for review
         if: always()
         shell: pwsh
@@ -131,11 +152,20 @@ jobs:
             Write-Output "::endgroup::"
           }
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: success()
         with:
           name: UPCAMTaskDigest-WinUI3-windows-x64
           path: |
             dist/UPCAMTaskDigest-WinUI3-win-x64.zip
+            dist/UPCAMTaskDigest-WinUI3-win-x64.zip.sha256
+            dist/ui-evidence/
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: UPCAMTaskDigest-WinUI3-failure-evidence
+          path: |
             dist/ui-evidence/
             dist/winui/smoke-output/
+            dist/install-check/smoke-output/
           retention-days: 14

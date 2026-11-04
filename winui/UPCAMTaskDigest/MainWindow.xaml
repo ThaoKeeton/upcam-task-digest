@@ -8,8 +8,8 @@
   <Grid x:Name="RootGrid" RequestedTheme="Dark">
     <NavigationView x:Name="Navigation" PaneDisplayMode="Auto"
         IsBackButtonVisible="Collapsed" IsSettingsVisible="False"
-        OpenPaneLength="224" CompactModeThresholdWidth="760"
-        ExpandedModeThresholdWidth="1120" PaneTitle="UPCAM"
+        OpenPaneLength="224" CompactModeThresholdWidth="640"
+        ExpandedModeThresholdWidth="880" PaneTitle="UPCAM"
         SelectionChanged="Navigation_SelectionChanged">
       <NavigationView.MenuItems>
         <NavigationViewItem Content="主页" Tag="home" Icon="Home" />

@@ -18,6 +18,7 @@ namespace Upcam.Desktop;
 public sealed partial class MainWindow
 {
     private readonly List<string> _smokeSteps = new();
+    private readonly List<object> _smokeLayouts = new();
 
     private async Task RunSmokeAsync()
     {
@@ -83,6 +84,14 @@ public sealed partial class MainWindow
             {
                 AppWindow.Resize(size);
                 await Task.Delay(150);
+                RootGrid.UpdateLayout();
+                _smokeLayouts.Add(new
+                {
+                    requestedWidthPixels = size.Width, requestedHeightPixels = size.Height,
+                    actualWidthPixels = AppWindow.Size.Width, actualHeightPixels = AppWindow.Size.Height,
+                    widthDip = RootGrid.ActualWidth, heightDip = RootGrid.ActualHeight,
+                    rasterizationScale = RootGrid.XamlRoot.RasterizationScale
+                });
                 foreach (string route in _routes.Keys)
                 {
                     Navigate(route);
@@ -126,7 +135,7 @@ public sealed partial class MainWindow
                 dpiAwareness = "PerMonitorV2", actualRasterizationScale = RootGrid.XamlRoot.RasterizationScale,
                 highDpiMonitorAvailable = RootGrid.XamlRoot.RasterizationScale > 1.0,
                 trayAvailable = _native?.TrayReady == true,
-                syntheticOnly = true, steps = _smokeSteps
+                syntheticOnly = true, viewportChecks = _smokeLayouts, steps = _smokeSteps
             }, new JsonSerializerOptions { WriteIndented = true }));
             FinishSmoke(true, "passed");
         }
@@ -232,7 +241,15 @@ public sealed partial class MainWindow
     private async Task CaptureAsync(string path)
     {
         var bitmap = new RenderTargetBitmap();
-        await bitmap.RenderAsync(RootGrid);
+        // System Mica is outside the XAML visual tree. Use a neutral dark base
+        // for the exported XAML snapshot so translucent brushes remain readable.
+        Brush? background = RootGrid.Background;
+        try
+        {
+            RootGrid.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 32, 32, 32));
+            await bitmap.RenderAsync(RootGrid);
+        }
+        finally { RootGrid.Background = background; }
         var pixels = await bitmap.GetPixelsAsync();
         using var reader = DataReader.FromBuffer(pixels);
         byte[] bytes = new byte[pixels.Length];
