@@ -28,7 +28,7 @@ public sealed partial class MainWindow
         return LocalScroll(Column(Card(hero), summary,
             Card(Column(Paragraph("本机数据", size: 18), Paragraph(_state.DataDirectory, true),
                 Paragraph("关闭窗口后留在系统托盘；从托盘菜单选择“退出应用”才会停止。电脑需保持开机、账户已登录、联网且未休眠。", true),
-                Paragraph("WinUI 3 · Windows App SDK · v0.3.0", true)))));
+                Paragraph($"WinUI 3 · v{_state.ApplicationVersion} · 规则 {_state.RulesetRevision}", true)))));
     }
 
     private FrameworkElement BuildAccounts()
@@ -246,7 +246,7 @@ public sealed partial class MainWindow
                     if (list.SelectedItem is ListViewItem selected && selected.Tag is string id)
                     { var map = (JsonObject)_state.Map("owner_names").DeepClone(); map.Remove(id); _state.Set("owner_names", map); Navigate("members"); }
                     return Task.CompletedTask;
-                })), Card(list));
+                }))), Card(list));
     }
 
     private async Task EditMemberAsync(string? id)
@@ -313,7 +313,7 @@ public sealed partial class MainWindow
                         Navigate("statuses");
                     }
                     return Task.CompletedTask;
-                })), Card(list));
+                }))), Card(list));
     }
 
     private async Task EditStatusAsync(string? id)

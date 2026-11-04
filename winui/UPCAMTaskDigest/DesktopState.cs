@@ -19,6 +19,8 @@ internal sealed class DesktopState
     public bool LedgerReady { get; set; }
     public string LedgerMessage { get; set; } = "";
     public string DataDirectory { get; set; } = "";
+    public string ApplicationVersion { get; set; } = "";
+    public string RulesetRevision { get; set; } = "";
     public string ModelCacheStatus { get; set; } = "尚未刷新当前 API Key 可用模型。";
     public string ManualStart { get; set; } = DateTime.Now.Date.ToString("yyyy-MM-dd HH:mm");
     public string ManualEnd { get; set; } = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
@@ -52,6 +54,8 @@ internal sealed class DesktopState
         LedgerReady = result["ledger_ready"]?.GetValue<bool>() ?? LedgerReady;
         LedgerMessage = result["ledger_message"]?.GetValue<string>() ?? LedgerMessage;
         DataDirectory = result["data_directory"]?.GetValue<string>() ?? DataDirectory;
+        ApplicationVersion = result["application_version"]?.GetValue<string>() ?? ApplicationVersion;
+        RulesetRevision = result["ruleset_revision"]?.GetValue<string>() ?? RulesetRevision;
         if (result["models"] is JsonArray) ApplyModels(result);
         if (result["history"] is JsonArray history) History = (JsonArray)history.DeepClone();
         SecretDrafts.Clear();

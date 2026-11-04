@@ -23,6 +23,7 @@ from .config import (
     scheduled_window, user_data_dir, validate_settings,
 )
 from .diagnostic_export import safe_structure_export
+from . import APP_VERSION, RULESET_REVISION
 from .history import HistoryError, HistoryStore
 from .openai_models import (
     ModelCatalogError, OpenAIModelCatalog, cache_matches_key, reasoning_efforts,
@@ -144,7 +145,8 @@ class WorkerService:
             "ledger_ready": ledger_ready,
             "ledger_message": ledger_message,
             "data_directory": str(self.data_dir),
-            "application_version": "0.3.0",
+            "application_version": APP_VERSION,
+            "ruleset_revision": RULESET_REVISION,
         }
 
     def _save(self, payload: dict) -> dict:
