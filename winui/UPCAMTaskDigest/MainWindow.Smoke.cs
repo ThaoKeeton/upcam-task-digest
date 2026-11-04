@@ -133,7 +133,14 @@ public sealed partial class MainWindow
         catch (Exception ex)
         {
             // This mode uses isolated synthetic fixtures only; no production values exist.
-            FinishSmoke(false, ex.GetType().Name + ": " + ex.Message);
+            try
+            {
+                string directory = Path.Combine(AppContext.BaseDirectory, "smoke-output");
+                Directory.CreateDirectory(directory);
+                await CaptureAsync(Path.Combine(directory, "failure.png"));
+            }
+            catch { }
+            FinishSmoke(false, ex.ToString());
         }
     }
 
@@ -176,6 +183,7 @@ public sealed partial class MainWindow
 
     private T? Find<T>(string id) where T : DependencyObject
     {
+        RootGrid.UpdateLayout();
         T? found = FindIn<T>(RootGrid, x => AutomationProperties.GetAutomationId(x) == id);
         if (found is not null) return found;
         foreach (var popup in VisualTreeHelper.GetOpenPopupsForXamlRoot(RootGrid.XamlRoot))
@@ -206,6 +214,7 @@ public sealed partial class MainWindow
 
     private static void Invoke(Button button)
     {
+        if (button is null) throw new InvalidOperationException("The required native button has not been realized.");
         var peer = new ButtonAutomationPeer(button);
         ((IInvokeProvider)peer.GetPattern(PatternInterface.Invoke)).Invoke();
     }
@@ -241,7 +250,8 @@ public sealed partial class MainWindow
     {
         string output = Path.Combine(AppContext.BaseDirectory, "smoke-output");
         Directory.CreateDirectory(output);
-        File.WriteAllText(Path.Combine(output, "result.txt"), message);
+        File.WriteAllText(Path.Combine(output, "result.txt"), message +
+            "\nCurrent page: " + _page + "\nCompleted steps:\n" + string.Join("\n", _smokeSteps));
         Environment.ExitCode = success ? 0 : 1;
         _exitRequested = true;
         Close();
