@@ -369,8 +369,9 @@ public sealed partial class MainWindow
     {
         var output = Identify(new TextBox
         {
-            Text = _state.Output, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
-            HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch
+            IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+            HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch,
+            Text = _state.Output
         }, "diagnostic-output");
         ScrollViewer.SetVerticalScrollBarVisibility(output, ScrollBarVisibility.Auto);
         var export = ActionButton("导出脱敏结构", "export-diagnostic", ExportDiagnosticAsync);
@@ -397,9 +398,20 @@ public sealed partial class MainWindow
                 var result = await Worker.SendAsync("preview_sample", _state.WindowPayload());
                 _state.Output = Value(result, "markdown"); Navigate("run"); SetStatus(Value(result, "status"));
             }), export);
-        var header = Column(Card(Column(Paragraph("采集时间范围", size: 16),
-            Pair(Paragraph($"{_state.ManualStart} → {_state.ManualEnd}\n本机时间，结束时间不包含", true),
-                ActionButton("修改时间范围", "edit-window", EditWindowAsync)))), toolbar);
+        var range = new Grid { ColumnSpacing = 12 };
+        range.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        range.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var details = Column(Paragraph("本机采集范围 · 结束不含", true, 12),
+            Paragraph($"开始  {_state.ManualStart}\n结束  {_state.ManualEnd}", true));
+        details.Spacing = 4;
+        range.Children.Add(details);
+        var editWindow = ActionButton("修改时间范围", "edit-window", EditWindowAsync);
+        editWindow.VerticalAlignment = VerticalAlignment.Center;
+        range.Children.Add(editWindow); Grid.SetColumn(editWindow, 1);
+        var rangeCard = (Border)Card(range);
+        rangeCard.Padding = new Thickness(12);
+        var header = Column(rangeCard, toolbar);
+        header.Spacing = 8;
         return FillLayout(header, output);
     }
 

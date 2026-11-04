@@ -37,6 +37,16 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
         _background = background;
         InitializeComponent();
         Title = "UPCAM 站会日报" + (smoke ? " · CI 虚构数据" : "");
+        AppTitleBar.Title = Title;
+        ExtendsContentIntoTitleBar = true;
+        SetTitleBar(AppTitleBar);
+        AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
+        AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
+        AppWindow.TitleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
+        AppWindow.TitleBar.ButtonForegroundColor = Microsoft.UI.Colors.White;
+        AppWindow.TitleBar.ButtonInactiveForegroundColor = Windows.UI.Color.FromArgb(255, 153, 153, 153);
+        AppWindow.TitleBar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(255, 58, 58, 58);
+        AppWindow.TitleBar.ButtonHoverForegroundColor = Microsoft.UI.Colors.White;
         AppWindow.Resize(new SizeInt32(1180, 800));
         AppWindow.Closing += Window_Closing;
         Closed += (_, _) =>
@@ -100,6 +110,9 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
     }
 
     private WorkerClient Worker => _worker ?? throw new InvalidOperationException("本机工作进程尚未就绪。");
+
+    private void TitleBar_PaneToggleRequested(TitleBar sender, object args) =>
+        Navigation.IsPaneOpen = !Navigation.IsPaneOpen;
 
     private void Navigation_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
@@ -211,6 +224,8 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
 
     private void ShowMainWindow()
     {
+        if (AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized } presenter)
+            presenter.Restore();
         AppWindow.Show();
         Activate();
     }

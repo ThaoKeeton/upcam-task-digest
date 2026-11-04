@@ -1,6 +1,8 @@
-# Windows 原生应用 v0.3
+# Windows 原生应用 v0.3.1
 
 新版采用 C#、XAML、WinUI 3 / Windows App SDK 和 WinUIEx，与 PowerToys 主设置窗口使用相同的技术体系。Mica 背景、Fluent 控件和侧边导航均为真实原生界面。成员与状态列表使用页面可用空间，编辑和批量导入使用原生对话框，诊断内容固定在运行页面内部。
+
+原生 TitleBar 将深色顶部、导航开关、应用图标和标题放在同一行，保留 Windows 系统窗口控制按钮与拖动区域。导航展开时为页面预留空间；左上角、EXE、任务栏和托盘使用同源 Teambition 图标，不添加无功能搜索框。
 
 技术来源：[PowerToys 项目文件](https://github.com/microsoft/PowerToys/blob/main/src/settings-ui/Settings.UI/PowerToys.Settings.csproj)、[PowerToys 主窗口](https://github.com/microsoft/PowerToys/blob/main/src/settings-ui/Settings.UI/SettingsXAML/MainWindow.xaml)、[WinUI 3](https://learn.microsoft.com/en-us/windows/apps/winui/winui3/)、[自包含部署](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/self-contained-deploy/deploy-self-contained-apps)。
 
@@ -74,11 +76,15 @@
 
 “只读诊断”只读取 Teambition 并本机校验，不需要 OpenAI 或钉钉凭据。未知评论/提交结构仍需用户的脱敏结构证据，新界面不会忽略这些错误。
 
-点“导出脱敏结构”选择 JSON 路径，v2 文件只保留任务/动态 ID、字段名、类型、长度、窗口归属和格式/控制字符类别及匹配布尔值，不包含标题、姓名、评论正文、凭据或完整响应值。分享前检查保留的 ID。
+点“导出脱敏结构”选择 JSON 路径，v3 文件只保留任务/动态 ID、固定白名单中的 API 动作标记、字段名、类型、长度、窗口归属和格式/控制字符类别及匹配布尔值，不包含标题、姓名、评论正文、凭据或完整响应值。引用字段另做严格 JSON 解析，标示是否有效、解码后的白名单字段类型和双重编码结构；“json_like”本身不表示有效 JSON，也不会触发清洗或放行。分享前检查保留的 ID。
+
+无来源证明的关联提交候选、无法解释的普通动态、未知动作与缺失状态映射仍会阻断。诊断导出只用于定位，不能替代真实状态名称或来源证明；先按同一失败时间段查看窗口内问题。
 
 Windows CI 构建实际 WinUI EXE 与 Python 工作进程，在隔离临时目录和内存虚构凭据下操作真实导入、状态编辑、项目验证、保存、预览、诊断与模拟运行控件，上传截图及 JSON 报告。截图来自真实 WinUI 控件树；系统 Mica 位于控件树之外，导出截图使用中性深色背景合成。测试不读取真实用户配置、不访问生产 API、不发送钉钉、不修改启动注册表。
 
 应用声明 PerMonitorV2 DPI 感知，采用设备独立布局。CI 检查 1180×800、900×700、760×620、640×540 窗口，报告实际窗口像素、布局 DIP、真实 `RasterizationScale` 与托盘可用性；运行器可能按屏幕工作区限制实际窗口大小。若运行器只有 100% 显示器，就没有完成 150% / 200% 真实显示器验收。目标电脑的多屏缩放、休眠恢复与干净系统依赖仍需实测。
+
+官方图标源为 128 px 透明 PNG；ICO 提供 16–128 px 的九个尺寸，不放大超过原图。CI 额外加载 96 / 144 / 192 DPI 的原生图标，检查实际窗口与托盘 HICON 的同尺寸像素一致，并导出真实窗口 `PrintWindow` 截图及图标截图。图标尺寸检查不等同于真实高 DPI 显示器验收。来源与文件哈希见 `winui/UPCAMTaskDigest/Assets/README.md`。
 
 ## 开发构建
 

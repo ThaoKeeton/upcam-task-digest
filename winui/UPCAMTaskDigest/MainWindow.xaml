@@ -6,10 +6,23 @@
     MinWidth="640" MinHeight="520">
   <Window.SystemBackdrop><MicaBackdrop /></Window.SystemBackdrop>
   <Grid x:Name="RootGrid" RequestedTheme="Dark">
-    <NavigationView x:Name="Navigation" PaneDisplayMode="Auto"
+    <Grid.RowDefinitions><RowDefinition Height="48" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+    <TitleBar x:Name="AppTitleBar" Title="UPCAM 站会日报"
+        AutomationProperties.AutomationId="app-titlebar"
+        Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
+        IsPaneToggleButtonVisible="True" PaneToggleRequested="TitleBar_PaneToggleRequested">
+      <TitleBar.Resources>
+        <x:Double x:Key="TitleBarCompactHeight">48</x:Double>
+        <x:Double x:Key="TitleBarExpandedHeight">48</x:Double>
+      </TitleBar.Resources>
+      <TitleBar.IconSource>
+        <BitmapIconSource UriSource="ms-appx:///Assets/Teambition.png" ShowAsMonochrome="False" />
+      </TitleBar.IconSource>
+    </TitleBar>
+    <NavigationView x:Name="Navigation" Grid.Row="1" PaneDisplayMode="Left" IsPaneOpen="True"
         IsBackButtonVisible="Collapsed" IsSettingsVisible="False"
-        OpenPaneLength="224" CompactModeThresholdWidth="640"
-        ExpandedModeThresholdWidth="880" PaneTitle="UPCAM"
+        IsPaneToggleButtonVisible="False" IsTitleBarAutoPaddingEnabled="False"
+        OpenPaneLength="224"
         SelectionChanged="Navigation_SelectionChanged">
       <NavigationView.MenuItems>
         <NavigationViewItem Content="主页" Tag="home" Icon="Home" />
