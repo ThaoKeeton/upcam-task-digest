@@ -176,6 +176,23 @@ class HistoryAndTransportTests(unittest.TestCase):
             self.history.start_delivery(sample)
         self.assertEqual(self.history.get(sample)["state"], "preview")
 
+    def test_blocked_preflight_is_saved_with_a_bounded_diagnostic_and_no_digest(self):
+        note = "自动校验未通过；缺少成员映射：demo-member。" + "原因" * 1200
+
+        run_id = self.history.create_blocked_attempt(
+            datetime(2026, 11, 3, 0, 0), datetime(2026, 11, 3, 8, 50), note,
+            schedule_key="2026-11-03:morning")
+        row = self.history.get(run_id)
+
+        self.assertEqual(row["state"], "blocked")
+        self.assertEqual(row["delivery_note"], note[:2000])
+        self.assertIn("demo-member", row["delivery_note"])
+        self.assertIn("未生成日报", row["digest_markdown"])
+        with self.assertRaises(HistoryError):
+            self.history.create_blocked_attempt(
+                datetime(2026, 11, 3, 0, 0), datetime(2026, 11, 3, 8, 50), note,
+                schedule_key="2026-11-03:morning")
+
     def test_validated_run_starts_sending_without_approval_state(self):
         run = self.history.start_delivery(self.run_id)
         self.assertEqual(run["state"], "sending")
