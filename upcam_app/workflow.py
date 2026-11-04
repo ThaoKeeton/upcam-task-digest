@@ -19,7 +19,7 @@ from .dingtalk import DingTalkSender
 from .history import HistoryError, HistoryStore
 from .openai_models import ModelCatalogError, OpenAIModelCatalog, cache_matches_key
 from .secrets import SECRET_FIELDS, INTERNAL_SECRET_FIELDS
-from .config import runtime_config, user_data_dir
+from .config import collection_client_limits, runtime_config, user_data_dir
 
 
 class WorkflowBlocked(RuntimeError):
@@ -74,10 +74,12 @@ class DigestWorkflow:
         if schedule_key and any(run.get("schedule_key") == schedule_key for run in self.history.list_runs(1000)):
             raise WorkflowBlocked("This scheduled run slot already has a local history record")
 
-        client = self.client_factory(
-            config["tenant_id"],
-            credentials=lambda: (self.secrets["teambition_app_id"], self.secrets["teambition_app_secret"]),
-        )
+        client_kwargs = {
+            "credentials": lambda: (self.secrets["teambition_app_id"], self.secrets["teambition_app_secret"]),
+        }
+        if self.client_factory is Client:
+            client_kwargs.update(collection_client_limits(self.settings))
+        client = self.client_factory(config["tenant_id"], **client_kwargs)
         try:
             collection = client.collect(
                 config["project_id"], include_archived=config["include_archived"],

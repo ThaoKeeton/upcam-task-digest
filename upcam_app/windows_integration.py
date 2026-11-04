@@ -24,16 +24,38 @@ class StartupIntegrationError(RuntimeError):
 class LaunchOptions:
     background: bool = False
     smoke_test: bool = False
+    capture_screenshot: str | None = None
 
 
 def parse_launch_options(argv) -> LaunchOptions:
     args = list(argv)
-    if len(args) != len(set(args)):
-        raise ValueError("Duplicate application argument")
-    if set(args) - {"--background", "--ui-smoke-test"}:
-        raise ValueError("Unsupported application argument")
-    return LaunchOptions(background="--background" in args,
-                         smoke_test="--ui-smoke-test" in args)
+    background = smoke_test = False
+    capture_screenshot = None
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--background":
+            if background:
+                raise ValueError("Duplicate application argument")
+            background = True
+        elif arg == "--ui-smoke-test":
+            if smoke_test:
+                raise ValueError("Duplicate application argument")
+            smoke_test = True
+        elif arg == "--capture-screenshot":
+            if capture_screenshot is not None or index + 1 >= len(args):
+                raise ValueError("Screenshot argument requires one path")
+            index += 1
+            capture_screenshot = args[index]
+            if not capture_screenshot or capture_screenshot.startswith("--"):
+                raise ValueError("Screenshot path is invalid")
+        else:
+            raise ValueError("Unsupported application argument")
+        index += 1
+    if capture_screenshot and not smoke_test:
+        raise ValueError("Screenshot capture is available only during a UI smoke test")
+    return LaunchOptions(background=background, smoke_test=smoke_test,
+                         capture_screenshot=capture_screenshot)
 
 
 def startup_command(*, executable=None, script=None, frozen=False) -> str:

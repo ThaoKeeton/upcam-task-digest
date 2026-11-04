@@ -95,6 +95,15 @@ class WindowsIntegrationTests(unittest.TestCase):
         self.assertEqual(parse_launch_options(["--ui-smoke-test"]), LaunchOptions(smoke_test=True))
         self.assertEqual(parse_launch_options(["--ui-smoke-test", "--background"]),
                          LaunchOptions(background=True, smoke_test=True))
+        self.assertEqual(
+            parse_launch_options(["--ui-smoke-test", "--capture-screenshot", "dist/ui.png"]),
+            LaunchOptions(smoke_test=True, capture_screenshot="dist/ui.png"))
+        with self.assertRaises(ValueError):
+            parse_launch_options(["--ui-smoke-test", "--capture-screenshot"])
+        with self.assertRaises(ValueError):
+            parse_launch_options(["--capture-screenshot", "dist/ui.png"])
+        with self.assertRaises(ValueError):
+            parse_launch_options(["--background", "--background"])
         with self.assertRaises(ValueError):
             parse_launch_options(["--unknown"])
 

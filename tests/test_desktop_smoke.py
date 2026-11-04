@@ -7,9 +7,12 @@ from desktop_app import DigestDesktopApp, verify_desktop_smoke
 
 
 _EXPECTED_TABS = (
-    "首次配置 / 自动运行",
-    "项目映射与范围",
-    "自选时间 / 运行",
+    "账户与模型",
+    "项目范围",
+    "成员映射",
+    "状态映射",
+    "自动运行",
+    "运行与诊断",
     "运行记录",
 )
 
@@ -34,7 +37,12 @@ class _FakeApp:
         self.owner_tree = object()
         self.status_tree = object()
         self.startup_check = object()
-        self.mapping_canvas = object()
+        self.diagnostic_export_button = object()
+        self.schedule_tab = object()
+        self.settings_tab = object()
+        self.owner_tab = object()
+        self.status_tab = object()
+        self.navigation = object()
         self.owner_bulk_text = object()
         self.owner_import_button = object()
         self.source_diagnostic_button = object()
@@ -96,6 +104,26 @@ class DesktopSmokeTests(unittest.TestCase):
             template.write_text("{}", encoding="utf-8")
             app = _FakeApp(_EXPECTED_TABS)
             del app.source_diagnostic_button
+
+            with self.assertRaises(RuntimeError):
+                verify_desktop_smoke(app, template)
+
+    def test_smoke_check_requires_safe_export_and_split_navigation_pages(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            template = Path(temporary) / "daily_digest.json"
+            template.write_text("{}", encoding="utf-8")
+            app = _FakeApp(_EXPECTED_TABS)
+            del app.diagnostic_export_button
+
+            with self.assertRaises(RuntimeError):
+                verify_desktop_smoke(app, template)
+
+    def test_full_page_scroll_canvas_is_not_part_of_the_new_layout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            template = Path(temporary) / "daily_digest.json"
+            template.write_text("{}", encoding="utf-8")
+            app = _FakeApp(_EXPECTED_TABS)
+            app.mapping_canvas = object()
 
             with self.assertRaises(RuntimeError):
                 verify_desktop_smoke(app, template)

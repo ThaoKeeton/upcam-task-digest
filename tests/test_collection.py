@@ -73,6 +73,31 @@ class ClientTests(unittest.TestCase):
         self.assertIn('pageToken=task-page-2', transport.requests[1].full_url)
         self.assertIn('pageToken=event-page-2', transport.requests[-1].full_url)
 
+    def test_default_collection_limit_accepts_more_than_the_previous_100_tasks(self):
+        base_task = json.loads((FIXTURES/'collection.json').read_text())['records'][0]['task']
+        tasks = [dict(base_task, id=f'demo-large-window-{index:03d}') for index in range(101)]
+        responses = [page(tasks[:100], 'next-task-page'), page(tasks[100:])]
+        for task in tasks:
+            responses.extend([{'code': 200, 'result': task}, page()])
+
+        transport = FakeTransport(*responses)
+        collector = client(transport)
+        result = collector.collect('demo-project', day='2026-01-02')
+
+        self.assertEqual(len(result['records']), 101)
+        self.assertEqual(collector.max_tasks, 300)
+        self.assertEqual(collector.request_count, 204)
+        self.assertTrue(result['pagination_complete'])
+
+    def test_total_response_byte_budget_stops_paginated_reads(self):
+        first = page([{'id': 'demo-event-1', 'padding': 'x' * 500}], 'next')
+        second = page([{'id': 'demo-event-2', 'padding': 'y' * 500}])
+        collector = client(FakeTransport(first, second), max_response_bytes=1024)
+
+        with self.assertRaisesRegex(CollectionError, 'response byte budget'):
+            list(collector.pages('/api/v3/task/demo-task/activity/list', {}))
+        self.assertEqual(collector.request_count, 2)
+
     def test_fake_transport_to_existing_renderer_end_to_end(self):
         from digest_pipeline import build_digest
         collection=json.loads((FIXTURES/'collection.json').read_text())

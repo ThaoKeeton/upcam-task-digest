@@ -11,15 +11,16 @@ import sqlite3
 import sys
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from automated_digest import collection_validation_message, diagnose_automatic_source
+from upcam_app.diagnostic_export import safe_structure_export
 from render_digest import render_digest
 from runtime_mappings import validate_mappings
 from teambition_readonly import Client, CollectionError
 from upcam_app import APP_NAME, APP_VERSION, OPENAI_MODEL, OPENAI_REASONING_EFFORT, RULESET_REVISION
 from upcam_app.config import (
-    DEFAULT_SETTINGS, SCHEDULE_RECOVERY_WINDOW, SettingsError, SettingsStore, parse_manual_window,
+    DEFAULT_SETTINGS, SCHEDULE_RECOVERY_WINDOW, SettingsError, SettingsStore, collection_client_limits, parse_manual_window,
     recoverable_schedule_occurrences, runtime_config, scheduled_window, user_data_dir, validate_settings,
 )
 from upcam_app.history import HistoryError, HistoryStore
@@ -52,16 +53,19 @@ VIEW_FILTERS = {
     "父任务 ID": "parentTaskId",
 }
 SMOKE_TEST_TABS = (
-    "首次配置 / 自动运行",
-    "项目映射与范围",
-    "自选时间 / 运行",
+    "账户与模型",
+    "项目范围",
+    "成员映射",
+    "状态映射",
+    "自动运行",
+    "运行与诊断",
     "运行记录",
 )
 
 
 def verify_desktop_smoke(app, sample_path=SAMPLE, *, assert_hidden=False,
-                         exercise_controls=False) -> bool:
-    """Check the packaged UI's core tabs and bundled report template without network calls."""
+                         exercise_controls=False, screenshot_path=None) -> bool:
+    """Check real app pages, controls, and the packaged report template offline."""
     try:
         labels = tuple(app.tabs.tab(index, "text") for index in range(app.tabs.index("end")))
     except (AttributeError, tk.TclError, TypeError) as exc:
@@ -69,10 +73,12 @@ def verify_desktop_smoke(app, sample_path=SAMPLE, *, assert_hidden=False,
     if labels != SMOKE_TEST_TABS:
         raise RuntimeError("The desktop window is missing a required application tab")
     if not all(hasattr(app, name) for name in (
-            "project_probe_button", "owner_tree", "status_tree", "startup_check",
-            "mapping_canvas", "owner_bulk_text", "owner_import_button",
-            "source_diagnostic_button")):
+            "navigation", "project_probe_button", "owner_tree", "status_tree", "startup_check",
+            "schedule_tab", "owner_tab", "status_tab", "owner_bulk_text", "owner_import_button",
+            "source_diagnostic_button", "diagnostic_export_button")):
         raise RuntimeError("The desktop window is missing project setup or Windows startup controls")
+    if hasattr(app, "mapping_canvas"):
+        raise RuntimeError("Full-page scrolling must not be part of the application navigation")
     if hasattr(app, "mapping_editor"):
         raise RuntimeError("The project setup UI must not require editing mapping JSON")
     if not Path(sample_path).is_file():
@@ -87,25 +93,56 @@ def verify_desktop_smoke(app, sample_path=SAMPLE, *, assert_hidden=False,
         raise RuntimeError("The application did not start hidden with a working tray icon")
     if exercise_controls:
         _exercise_mapping_controls(app, assert_hidden=assert_hidden)
+    if screenshot_path:
+        app.tabs.select(app.settings_tab)
+        app.root.deiconify()
+        app.root.lift()
+        app.root.update_idletasks()
+        app.root.update()
+        try:
+            from PIL import ImageGrab
+            x, y = app.root.winfo_rootx(), app.root.winfo_rooty()
+            width, height = app.root.winfo_width(), app.root.winfo_height()
+            if width < 850 or height < 580:
+                raise RuntimeError("The desktop window is smaller than the UI screenshot acceptance size")
+            capture_path = Path(screenshot_path)
+            capture_path.parent.mkdir(parents=True, exist_ok=True)
+            ImageGrab.grab(bbox=(x, y, x + width, y + height)).save(capture_path)
+        except Exception as exc:
+            raise RuntimeError("The Windows UI screenshot could not be captured") from exc
     return True
+
+
+def _new_teambition_client(settings, secrets):
+    return Client(settings["tenant_id"],
+                  credentials=lambda: (secrets["teambition_app_id"], secrets["teambition_app_secret"]),
+                  **collection_client_limits(settings))
 
 
 def _exercise_mapping_controls(app, *, assert_hidden=False):
     """Exercise the real Windows mapping widgets using synthetic values only."""
-    root, canvas, button = app.root, app.mapping_canvas, app.owner_import_button
+    root, button = app.root, app.owner_import_button
+
+    def inside_window(widget):
+        root.update_idletasks()
+        left, top = root.winfo_rootx(), root.winfo_rooty()
+        right, bottom = left + root.winfo_width(), top + root.winfo_height()
+        x, y = widget.winfo_rootx(), widget.winfo_rooty()
+        return (widget.winfo_ismapped() and x >= left and y >= top
+                and x + widget.winfo_width() <= right and y + widget.winfo_height() <= bottom)
+
     original_owner_map = dict(app.owner_map)
     original_candidates = set(app.owner_candidate_ids)
     original_filters = dict(app.view_filters)
     try:
-        app.tabs.select(app.mapping_tab)
+        app.tabs.select(app.owner_tab)
         root.deiconify()
         root.update_idletasks()
-        canvas.yview_moveto(1.0)
-        root.update_idletasks()
-        top, bottom = canvas.winfo_rooty(), canvas.winfo_rooty() + canvas.winfo_height()
-        button_top, button_bottom = button.winfo_rooty(), button.winfo_rooty() + button.winfo_height()
-        if (not button.winfo_ismapped() or button_top < top or button_bottom > bottom):
-            raise RuntimeError("The member import button cannot be reached by scrolling the project tab")
+        for label, nav_button in zip(SMOKE_TEST_TABS, app.navigation.buttons):
+            if not inside_window(nav_button):
+                raise RuntimeError(f"The {label} navigation button is outside the visible window")
+        if not inside_window(button):
+            raise RuntimeError("The member import button is not visible on its dedicated page")
 
         synthetic = '{"smoke-member-01":"虚构成员甲","smoke-member-02":"虚构成员乙"}'
         app.owner_bulk_text.delete("1.0", "end")
@@ -128,9 +165,20 @@ def _exercise_mapping_controls(app, *, assert_hidden=False):
         if app.view_filters.get("executorId") != "smoke-executor-01":
             raise RuntimeError("Adding an optional project filter did not update the project scope")
 
+        app.tabs.select(app.mapping_tab)
+        root.update_idletasks()
+        if not inside_window(app.project_probe_button):
+            raise RuntimeError("The project verification button is not visible on the project page")
+
+        app.tabs.select(app.schedule_tab)
+        root.update_idletasks()
+        if not inside_window(app.startup_check):
+            raise RuntimeError("The Windows startup control is not visible on the schedule page")
+
         app.tabs.select(app.preview_tab)
         root.update_idletasks()
-        if not app.source_diagnostic_button.winfo_ismapped():
+        if (not inside_window(app.source_diagnostic_button)
+                or not inside_window(app.diagnostic_export_button)):
             raise RuntimeError("The read-only diagnostic button is not visible on the run tab")
         app.tabs.select(app.history_tab)
         root.update_idletasks()
@@ -144,6 +192,71 @@ def _exercise_mapping_controls(app, *, assert_hidden=False):
         if assert_hidden:
             root.withdraw()
             root.update_idletasks()
+
+
+class SideNavigation:
+    """Compact sidebar navigation made from the app's real Tk/ttk controls."""
+
+    def __init__(self, parent):
+        self.frame = ttk.Frame(parent)
+        self.frame.pack(fill="both", expand=True)
+        self.sidebar = tk.Frame(self.frame, width=218, bg="#15324b", highlightthickness=0)
+        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack_propagate(False)
+        self.content = ttk.Frame(self.frame, padding=(22, 18, 22, 18))
+        self.content.pack(side="left", fill="both", expand=True)
+        tk.Label(self.sidebar, text="UPCAM", bg="#15324b", fg="#ffffff",
+                 font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w", padx=20, pady=(24, 0))
+        tk.Label(self.sidebar, text="站会日报", bg="#15324b", fg="#b8c8d8",
+                 font=("Microsoft YaHei UI", 10)).pack(anchor="w", padx=21, pady=(0, 18))
+        self.nav_items = tk.Frame(self.sidebar, bg="#15324b")
+        self.nav_items.pack(fill="x", padx=10)
+        tk.Label(self.sidebar, text=APP_VERSION, bg="#15324b", fg="#91a6ba",
+                 font=("Microsoft YaHei UI", 8)).pack(side="bottom", anchor="w", padx=20, pady=16)
+        self.pages = []
+        self.labels = []
+        self.buttons = []
+        self.current = None
+
+    def add(self, label):
+        page = ttk.Frame(self.content)
+        self.labels.append(label)
+        self.pages.append(page)
+        button = tk.Button(
+            self.nav_items, text=label, anchor="w", relief="flat", borderwidth=0,
+            padx=12, pady=9, cursor="hand2", font=("Microsoft YaHei UI", 10),
+            command=lambda selected=page: self.select(selected))
+        button.pack(fill="x", pady=2)
+        self.buttons.append(button)
+        if self.current is None:
+            self.select(page)
+        return page
+
+    def index(self, _index):
+        return len(self.pages)
+
+    def tab(self, index, option):
+        if option != "text":
+            raise ValueError("Only the page label is available")
+        return self.labels[index]
+
+    def select(self, page_or_index):
+        if isinstance(page_or_index, int):
+            page = self.pages[page_or_index]
+        else:
+            page = page_or_index
+        if page not in self.pages:
+            return
+        if self.current is not None:
+            self.current.pack_forget()
+        page.pack(fill="both", expand=True)
+        self.current = page
+        for button, candidate in zip(self.buttons, self.pages):
+            selected = candidate is page
+            button.configure(
+                bg="#285273" if selected else "#15324b",
+                fg="#ffffff" if selected else "#d7e2ec",
+                activebackground="#32678e", activeforeground="#ffffff")
 
 
 class DigestDesktopApp:
@@ -165,6 +278,7 @@ class DigestDesktopApp:
         self.secret_store = DpapiSecretStore(self.data_dir / "credentials.dpapi")
         self.model_catalog = OpenAIModelCatalog(self.data_dir / "openai_models.json")
         self.history = HistoryStore(self.data_dir / "history.sqlite3")
+        self.last_diagnostic_shape = None
         self.history.recover_interrupted_sends()
         self.settings = self.settings_store.load()
         configured_now = datetime.now().replace(microsecond=0)
@@ -298,49 +412,48 @@ class DigestDesktopApp:
         style = ttk.Style(self.root)
         if "vista" in style.theme_names():
             style.theme_use("vista")
-        top = ttk.Frame(self.root, padding=(20, 16, 20, 12))
-        top.pack(fill="x")
-        ttk.Label(top, text="UPCAM 站会日报", font=("Microsoft YaHei UI", 20, "bold")).pack(anchor="w")
-        ttk.Label(top, text="本机采集与规则校验 · 自动摘要 · 自动发送 · 无逐日报人工审核",
-                  foreground="#536174").pack(anchor="w", pady=(4, 0))
-
+        style.configure("TFrame", background="#f2f5f8")
+        style.configure("TLabel", background="#f2f5f8", foreground="#203448")
+        style.configure("TSeparator", background="#d5dee7")
+        self.root.configure(background="#f2f5f8")
+        screen_width = max(900, self.root.winfo_screenwidth())
+        screen_height = max(680, self.root.winfo_screenheight())
+        width, height = min(1240, screen_width - 60), min(880, screen_height - 90)
+        minimum_width, minimum_height = min(900, width), min(620, height)
+        self.root.geometry(f"{width}x{height}")
+        self.root.minsize(minimum_width, minimum_height)
+        self.wraplength = min(900, max(480, width - 300))
+        self.root.rowconfigure(0, weight=1)
+        self.root.columnconfigure(0, weight=1)
+        workspace = ttk.Frame(self.root)
+        workspace.grid(row=0, column=0, sticky="nsew")
+        self.navigation = SideNavigation(workspace)
+        self.tabs = self.navigation
+        self.settings_tab = self.tabs.add("账户与模型")
+        self.mapping_tab = self.tabs.add("项目范围")
+        self.owner_tab = self.tabs.add("成员映射")
+        self.status_tab = self.tabs.add("状态映射")
+        self.schedule_tab = self.tabs.add("自动运行")
+        self.preview_tab = self.tabs.add("运行与诊断")
+        self.history_tab = self.tabs.add("运行记录")
         self.status_var = tk.StringVar(value="正在读取本机配置…")
-        ttk.Label(self.root, textvariable=self.status_var, padding=(20, 8),
-                  background="#fff4d6", foreground="#694d00", wraplength=1000).pack(
-                      fill="x", padx=20, pady=(0, 10))
-
-        self.tabs = ttk.Notebook(self.root)
-        self.tabs.pack(fill="both", expand=True, padx=20, pady=(0, 16))
-        self.settings_tab = ttk.Frame(self.tabs, padding=12)
-        self.mapping_tab = ttk.Frame(self.tabs, padding=18)
-        self.preview_tab = ttk.Frame(self.tabs, padding=18)
-        self.history_tab = ttk.Frame(self.tabs, padding=18)
-        self.tabs.add(self.settings_tab, text="首次配置 / 自动运行")
-        self.tabs.add(self.mapping_tab, text="项目映射与范围")
-        self.tabs.add(self.preview_tab, text="自选时间 / 运行")
-        self.tabs.add(self.history_tab, text="运行记录")
+        status = tk.Frame(self.root, bg="#e8eef4", padx=14, pady=8)
+        status.grid(row=1, column=0, sticky="ew")
+        tk.Label(status, text="状态", bg="#e8eef4", fg="#4b6278",
+                 font=("Microsoft YaHei UI", 9, "bold")).pack(side="left", padx=(0, 10))
+        tk.Label(status, textvariable=self.status_var, bg="#e8eef4", fg="#324b62",
+                 anchor="w", justify="left", wraplength=self.wraplength,
+                 font=("Microsoft YaHei UI", 9)).pack(side="left", fill="x", expand=True)
         self._build_settings()
         self._build_mapping()
+        self._build_owner_mapping()
+        self._build_status_mapping()
+        self._build_schedule()
         self._build_preview()
         self._build_history()
 
-    def _scrollable_frame(self, parent):
-        container = ttk.Frame(parent)
-        container.pack(fill="both", expand=True)
-        canvas = tk.Canvas(container, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
-        frame = ttk.Frame(canvas, padding=8)
-        frame.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        if parent is getattr(self, "mapping_tab", None):
-            self.mapping_canvas = canvas
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        return frame
-
     def _build_settings(self):
-        form = self._scrollable_frame(self.settings_tab)
+        form = self.settings_tab
         form.columnconfigure(1, weight=1)
         form.columnconfigure(3, weight=1)
         ttk.Label(form, text="项目与应用凭据", font=("Microsoft YaHei UI", 12, "bold")).grid(
@@ -376,11 +489,11 @@ class DigestDesktopApp:
         row += 1
         ttk.Button(form, text="刷新当前 API Key 可用模型", command=self._refresh_models).grid(
             row=row, column=0, columnspan=2, sticky="w", pady=(2, 0))
-        ttk.Label(form, textvariable=self.model_status_var, foreground="#536174", wraplength=700).grid(
+        ttk.Label(form, textvariable=self.model_status_var, foreground="#536174", wraplength=self.wraplength).grid(
             row=row, column=2, columnspan=2, sticky="w", pady=(2, 0))
         row += 1
         ttk.Label(form, text="模型列表只返回基础元数据；reasoning 档位来自本程序核验的模型文档。模型在列表中不代表 Responses 端点权限已验证。",
-                  foreground="#8a4b00", wraplength=900).grid(row=row, column=0, columnspan=4, sticky="w", pady=(4, 2))
+                  foreground="#8a4b00", wraplength=self.wraplength).grid(row=row, column=0, columnspan=4, sticky="w", pady=(4, 2))
         row += 1
         ttk.Label(form, text="API 服务等级").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         self.values["openai_service_tier"] = tk.StringVar(value="default")
@@ -393,15 +506,27 @@ class DigestDesktopApp:
                                                               sticky="w", pady=4)
         row += 1
         ttk.Label(form, text="Fast 由 Responses API 的 service_tier=fast 请求；速度提升不保证，账户/地区/项目权限可能拒绝。默认不启用。",
-                  foreground="#8a4b00", wraplength=900).grid(row=row, column=0, columnspan=4, sticky="w", pady=(2, 4))
+                  foreground="#8a4b00", wraplength=self.wraplength).grid(row=row, column=0, columnspan=4, sticky="w", pady=(2, 4))
         row += 1
+        ttk.Label(form, text="仓库规则版本：upcam-task-digest @ " + RULESET_REVISION[:12] +
+                  "；日报模板随本程序版本发布并自动读取。",
+                  foreground="#536174", wraplength=self.wraplength).grid(row=row, column=0, columnspan=4,
+                                                               sticky="w", pady=(8, 0))
+        row += 1
+        actions = ttk.Frame(form)
+        actions.grid(row=row, column=0, columnspan=4, sticky="w", pady=(14, 4))
+        ttk.Button(actions, text="保存本机配置", command=self._save).pack(side="left")
+        ttk.Button(actions, text="只读测试 Teambition 连接", command=self._test_teambition).pack(side="left", padx=8)
+        ttk.Button(actions, text="清除已保存服务密钥…", command=self._clear_secrets).pack(side="left")
 
-        ttk.Separator(form).grid(row=row, column=0, columnspan=4, sticky="ew", pady=10)
-        row += 1
+    def _build_schedule(self):
+        form = self.schedule_tab
+        form.columnconfigure(1, weight=1)
+        form.columnconfigure(3, weight=1)
         ttk.Label(form, text="自动运行时间与采集窗口（电脑本机时间）",
                   font=("Microsoft YaHei UI", 12, "bold")).grid(
-                      row=row, column=0, columnspan=4, sticky="w", pady=(0, 6))
-        row += 1
+                      row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        row = 1
         self._text_field(form, row, 0, "上午运行时间", "morning_run_at", width=12)
         self._text_field(form, row, 2, "上午窗口起点（前一日）", "morning_start_at", width=12)
         row += 1
@@ -413,6 +538,12 @@ class DigestDesktopApp:
         row += 1
         ttk.Label(form, text="默认上午：前一日 16:50 到当日 08:50；默认下午：当日 00:00 到 16:50。",
                   foreground="#536174").grid(row=row, column=0, columnspan=4, sticky="w", pady=(5, 0))
+        row += 1
+        self._text_field(form, row, 0, "单次采集任务上限（1–700）", "max_tasks_per_run", width=9)
+        ttk.Label(form,
+                  text="默认 300。每个任务会读取详情和动态；分页请求、总记录 50,000 条、响应 128 MiB、最多 600 秒仍是硬限制。",
+                  foreground="#536174", wraplength=550).grid(row=row, column=2, columnspan=2,
+                                                              sticky="w", pady=4)
         row += 1
         self.values["auto_send_enabled"] = tk.BooleanVar(value=False)
         ttk.Checkbutton(form, text="应用运行期间按以上时间自动采集、校验、摘要并发送到钉钉",
@@ -428,31 +559,23 @@ class DigestDesktopApp:
             self.startup_check.configure(state="disabled")
         row += 1
         ttk.Label(form, text="自动补跑仅限应用重新打开后 24 小时内、且自动执行已启用期间错过的时段。开机启动需要 Windows 已开机并且该用户登录；关机、休眠或未联网时不会执行。已有记录（含结果不明）不会重发。",
-                  foreground="#8a4b00", wraplength=900).grid(
+                  foreground="#8a4b00", wraplength=self.wraplength).grid(
                       row=row, column=0, columnspan=4, sticky="w", pady=(0, 4))
         row += 1
-        ttk.Separator(form).grid(row=row, column=0, columnspan=4, sticky="ew", pady=10)
-        row += 1
-        ttk.Label(form, text="仓库规则版本：upcam-task-digest @ " + RULESET_REVISION[:12] +
-                  "；日报模板随本程序版本发布并自动读取。",
-                  foreground="#536174", wraplength=900).grid(row=row, column=0, columnspan=4, sticky="w")
-        row += 1
         actions = ttk.Frame(form)
-        actions.grid(row=row, column=0, columnspan=4, sticky="w", pady=(12, 4))
+        actions.grid(row=row, column=0, columnspan=4, sticky="w", pady=(18, 4))
         ttk.Button(actions, text="保存本机配置", command=self._save).pack(side="left")
-        ttk.Button(actions, text="只读测试 Teambition 连接", command=self._test_teambition).pack(side="left", padx=8)
-        ttk.Button(actions, text="清除已保存服务密钥…", command=self._clear_secrets).pack(side="left")
 
     def _build_mapping(self):
-        form = self._scrollable_frame(self.mapping_tab)
+        form = self.mapping_tab
         form.columnconfigure(0, weight=1)
         form.columnconfigure(1, weight=1)
-        ttk.Label(form, text="Teambition 项目初始化与映射",
+        ttk.Label(form, text="项目范围与只读验证",
                   font=("Microsoft YaHei UI", 12, "bold")).grid(
                       row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(form,
                   text="不需要编写 JSON。应用只使用仓库已批准的只读接口：从你选择的时间窗读取任务与动态样本，发现实际出现的 ID；不会调用 OpenAI 或发送钉钉。",
-                  foreground="#536174", wraplength=900).grid(
+                  foreground="#536174", wraplength=self.wraplength).grid(
                       row=1, column=0, columnspan=2, sticky="w", pady=(5, 8))
 
         self.values["include_archived"] = tk.BooleanVar(value=False)
@@ -466,10 +589,10 @@ class DigestDesktopApp:
         self.project_probe_button.pack(side="left")
         self.project_probe_status = tk.StringVar(value="尚未完成只读项目验证。")
         ttk.Label(probe_row, textvariable=self.project_probe_status, foreground="#536174",
-                  wraplength=700).pack(side="left", padx=(10, 0))
+                  wraplength=max(430, self.wraplength - 80)).pack(side="left", padx=(10, 0))
         ttk.Label(form,
-                  text="验证使用“自选时间 / 运行”页当前的开始和结束时间。为核对动态字段，请选择至少包含一条任务动态的区间。查询完整但无样本时不会解除门禁。",
-                  foreground="#8a4b00", wraplength=900).grid(
+                  text="验证使用“运行与诊断”页的开始和结束时间。为核对动态字段，请选择至少包含一条任务动态的区间。查询完整但无样本时不会解除门禁。",
+                  foreground="#8a4b00", wraplength=self.wraplength).grid(
                       row=4, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         ttk.Separator(form).grid(row=5, column=0, columnspan=2, sticky="ew", pady=6)
@@ -478,7 +601,7 @@ class DigestDesktopApp:
                       row=6, column=0, columnspan=2, sticky="w", pady=(2, 3))
         ttk.Label(form,
                   text="默认范围是此 Project ID 下、日报时间窗内所有符合仓库规则的任务。需要缩小范围时，可添加稳定字段等值条件。当前 API 不会替你判断网页里的自定义视图是否等价。",
-                  foreground="#536174", wraplength=900).grid(
+                  foreground="#536174", wraplength=self.wraplength).grid(
                       row=7, column=0, columnspan=2, sticky="w", pady=(0, 5))
         filter_controls = ttk.Frame(form)
         filter_controls.grid(row=8, column=0, columnspan=2, sticky="ew")
@@ -488,29 +611,35 @@ class DigestDesktopApp:
         self.view_filter_value = tk.StringVar()
         ttk.Label(filter_controls, text="字段值 / ID").pack(side="left", padx=(10, 4))
         ttk.Entry(filter_controls, textvariable=self.view_filter_value, width=32).pack(side="left")
-        ttk.Button(filter_controls, text="添加 / 更新条件", command=self._add_view_filter).pack(side="left", padx=7)
-        ttk.Button(filter_controls, text="删除选中条件", command=self._remove_view_filter).pack(side="left")
+        filter_actions = ttk.Frame(form)
+        filter_actions.grid(row=9, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        ttk.Button(filter_actions, text="添加 / 更新条件", command=self._add_view_filter).pack(side="left", padx=(0, 7))
+        ttk.Button(filter_actions, text="删除选中条件", command=self._remove_view_filter).pack(side="left")
         self.view_filter_tree = ttk.Treeview(form, columns=("field", "value"), show="headings", height=3)
         self.view_filter_tree.heading("field", text="项目内筛选字段")
         self.view_filter_tree.heading("value", text="字段值")
-        self.view_filter_tree.column("field", width=230, anchor="w")
-        self.view_filter_tree.column("value", width=380, anchor="w")
-        self.view_filter_tree.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(4, 2))
+        scope_table_width = max(470, self.wraplength - 25)
+        self.view_filter_tree.column("field", width=int(scope_table_width * 0.38), anchor="w")
+        self.view_filter_tree.column("value", width=int(scope_table_width * 0.62), anchor="w")
+        self.view_filter_tree.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(6, 2))
         self.scope_confirm_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(form,
                         text="我已确认：以上项目、归档选项和筛选条件就是日报应覆盖的范围。",
                         variable=self.scope_confirm_var).grid(
-                            row=10, column=0, columnspan=2, sticky="w", pady=(3, 4))
+                            row=11, column=0, columnspan=2, sticky="w", pady=(6, 4))
 
-        ttk.Separator(form).grid(row=11, column=0, columnspan=2, sticky="ew", pady=8)
+    def _build_owner_mapping(self):
+        form = self.owner_tab
+        form.columnconfigure(0, weight=1)
         ttk.Label(form, text="成员映射",
-                  font=("Microsoft YaHei UI", 10, "bold")).grid(
-                      row=12, column=0, sticky="w", pady=(2, 3))
-        ttk.Label(form, text="应用可发现采集样本里出现的成员 ID；已批准接口不会返回完整成员名册，姓名需从项目成员页核对。",
-                  foreground="#536174", wraplength=440).grid(
-                      row=13, column=0, sticky="w", pady=(0, 5))
+                  font=("Microsoft YaHei UI", 12, "bold")).grid(
+                      row=0, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(form,
+                  text="应用可发现采集样本里出现的成员 ID；已批准接口不会返回完整成员名册，姓名需从项目成员页核对。",
+                  foreground="#536174", wraplength=self.wraplength).grid(
+                      row=1, column=0, sticky="w", pady=(0, 8))
         owner_table = ttk.Frame(form)
-        owner_table.grid(row=14, column=0, sticky="nsew", padx=(0, 8))
+        owner_table.grid(row=2, column=0, sticky="ew", pady=(0, 6))
         owner_table.columnconfigure(0, weight=1)
         self.owner_tree = ttk.Treeview(owner_table, columns=("id", "name", "source"), show="headings", height=5)
         for column, title, width in (("id", "成员 ID", 190), ("name", "姓名", 130), ("source", "来源", 140)):
@@ -522,7 +651,8 @@ class DigestDesktopApp:
         self.owner_tree.configure(yscrollcommand=owner_scroll.set)
         self.owner_tree.bind("<<TreeviewSelect>>", self._select_owner_mapping)
         owner_controls = ttk.Frame(form)
-        owner_controls.grid(row=15, column=0, sticky="ew", padx=(0, 8), pady=(4, 2))
+        owner_controls.grid(row=3, column=0, sticky="ew", pady=(4, 2))
+        owner_controls.columnconfigure(1, weight=1)
         self.owner_id_input = tk.StringVar()
         self.owner_name_input = tk.StringVar()
         ttk.Label(owner_controls, text="成员 ID").grid(row=0, column=0, sticky="w")
@@ -537,17 +667,24 @@ class DigestDesktopApp:
         self.owner_bulk_text.grid(row=4, column=0, columnspan=2, sticky="ew")
         self.owner_import_button = ttk.Button(
             owner_controls, text="导入成员映射", command=self._import_owner_mappings)
-        self.owner_import_button.grid(row=5, column=0, sticky="w", pady=3)
+        self.owner_import_button.grid(row=5, column=0, sticky="w", pady=5)
 
+        ttk.Label(form,
+                  text="导入支持 JSON 对象，或每行一个“成员 ID<TAB>姓名”。错误时整批拒绝。完成后到“账户与模型”或“自动运行”页面保存本机配置。",
+                  foreground="#536174", wraplength=self.wraplength).grid(row=4, column=0, sticky="w", pady=(8, 0))
+
+    def _build_status_mapping(self):
+        form = self.status_tab
+        form.columnconfigure(0, weight=1)
         ttk.Label(form, text="状态映射与“已解决”标记",
                   font=("Microsoft YaHei UI", 10, "bold")).grid(
-                      row=12, column=1, sticky="w", pady=(2, 3))
+                      row=0, column=0, sticky="w", pady=(0, 4))
         ttk.Label(form,
                   text="样本动态返回的名称仅作建议；选中状态后可填入建议，核对名称并明确勾选哪些状态代表已解决，再保存。",
-                  foreground="#536174", wraplength=440).grid(
-                      row=13, column=1, sticky="w", pady=(0, 5))
+                  foreground="#536174", wraplength=self.wraplength).grid(
+                      row=1, column=0, sticky="w", pady=(0, 8))
         status_table = ttk.Frame(form)
-        status_table.grid(row=14, column=1, sticky="nsew", padx=(8, 0))
+        status_table.grid(row=2, column=0, sticky="ew", pady=(0, 6))
         status_table.columnconfigure(0, weight=1)
         self.status_tree = ttk.Treeview(status_table, columns=("id", "name", "suggestion", "resolved"), show="headings", height=5)
         for column, title, width in (("id", "状态 ID", 150), ("name", "已保存名称", 105),
@@ -560,7 +697,8 @@ class DigestDesktopApp:
         self.status_tree.configure(yscrollcommand=status_scroll.set)
         self.status_tree.bind("<<TreeviewSelect>>", self._select_status_mapping)
         status_controls = ttk.Frame(form)
-        status_controls.grid(row=15, column=1, sticky="ew", padx=(8, 0), pady=(4, 2))
+        status_controls.grid(row=3, column=0, sticky="ew", pady=(4, 2))
+        status_controls.columnconfigure(1, weight=1)
         self.status_id_input = tk.StringVar()
         self.status_name_input = tk.StringVar()
         self.status_resolved_var = tk.BooleanVar(value=False)
@@ -577,11 +715,10 @@ class DigestDesktopApp:
         ttk.Button(status_controls, text="删除选中映射", command=self._delete_status_mapping).grid(
             row=4, column=1, sticky="w", pady=2)
 
-        ttk.Separator(form).grid(row=16, column=0, columnspan=2, sticky="ew", pady=8)
         ttk.Label(form,
                   text="保存后，系统仍会对每日报表中的未知成员、未知状态、未完整翻页和不匹配项目范围实行阻断。当前只读接口不提供完整成员/状态列表；无法从样本可靠确认的内容必须在表格中补齐。",
-                  foreground="#8a4b00", wraplength=900).grid(
-                      row=17, column=0, columnspan=2, sticky="w", pady=(0, 4))
+                  foreground="#8a4b00", wraplength=self.wraplength).grid(
+                      row=4, column=0, sticky="w", pady=(10, 4))
         self.owner_map = {}
         self.status_map = {}
         self.resolved_status_ids = set()
@@ -733,6 +870,11 @@ class DigestDesktopApp:
         settings["tenant_id"] = self.values["tenant_id"].get().strip()
         settings["project_id"] = self.values["project_id"].get().strip()
         settings["include_archived"] = bool(self.values["include_archived"].get())
+        try:
+            settings["max_tasks_per_run"] = int(self.values["max_tasks_per_run"].get())
+        except (ValueError, TypeError):
+            messagebox.showerror("任务上限无效", "请输入 1 到 700 之间的整数。", parent=self.root)
+            return
         secrets = dict(self.saved_secrets)
         secrets.update({key: self.values[key].get() for key in
                         ("teambition_app_id", "teambition_app_secret") if self.values[key].get()})
@@ -758,8 +900,7 @@ class DigestDesktopApp:
 
         def worker():
             try:
-                client = Client(settings["tenant_id"], credentials=lambda: (
-                    secrets["teambition_app_id"], secrets["teambition_app_secret"]))
+                client = _new_teambition_client(settings, secrets)
                 collection = client.collect(settings["project_id"], day=report_day,
                                             window=(start, end),
                                             include_archived=settings["include_archived"])
@@ -819,7 +960,7 @@ class DigestDesktopApp:
         ttk.Label(tab, text="自选采集起止时间", font=("Microsoft YaHei UI", 12, "bold")).grid(
             row=0, column=0, sticky="w")
         ttk.Label(tab, text="使用本机时间 YYYY-MM-DD HH:MM。自动日报按仓库模板生成；发送前由程序校验来源、窗口、映射、未知事件和模型输出。",
-                  foreground="#536174", wraplength=920).grid(row=1, column=0, sticky="w", pady=(4, 10))
+                  foreground="#536174", wraplength=self.wraplength).grid(row=1, column=0, sticky="w", pady=(4, 10))
         controls = ttk.Frame(tab)
         controls.grid(row=2, column=0, sticky="ew")
         now = datetime.now().replace(second=0, microsecond=0)
@@ -837,10 +978,14 @@ class DigestDesktopApp:
             diagnostic_controls, text="只读诊断当前数据（不调用模型 / 不发送）",
             command=self._diagnose_manual)
         self.source_diagnostic_button.pack(side="left")
+        self.diagnostic_export_button = ttk.Button(
+            diagnostic_controls, text="导出上次诊断的脱敏结构…", state="disabled",
+            command=self._export_safe_diagnostic)
+        self.diagnostic_export_button.pack(side="left", padx=(8, 0))
         ttk.Label(diagnostic_controls, text="使用已保存的项目和映射配置。",
                   foreground="#536174").pack(side="left", padx=(10, 0))
         ttk.Label(tab, text="立即运行同样无需人工审核；如果自动校验失败、AI 拒绝或发送结果不明，程序会停止且不会自动重试。",
-                  foreground="#8a4b00", wraplength=920).grid(row=4, column=0, sticky="w", pady=(8, 10))
+                  foreground="#8a4b00", wraplength=self.wraplength).grid(row=4, column=0, sticky="w", pady=(8, 10))
         frame = ttk.Frame(tab)
         frame.grid(row=5, column=0, sticky="nsew")
         frame.rowconfigure(0, weight=1)
@@ -870,8 +1015,11 @@ class DigestDesktopApp:
         scrollbar = ttk.Scrollbar(tab, orient="vertical", command=self.history_view.yview)
         scrollbar.grid(row=1, column=1, sticky="ns")
         self.history_view.configure(yscrollcommand=scrollbar.set)
+        horizontal = ttk.Scrollbar(tab, orient="horizontal", command=self.history_view.xview)
+        horizontal.grid(row=2, column=0, sticky="ew")
+        self.history_view.configure(xscrollcommand=horizontal.set)
         ttk.Label(tab, text="发送结果不明或机器人拒绝时，该运行点会锁定，不自动重发；先处理账本状态再恢复。",
-                  foreground="#536174", wraplength=900).grid(row=2, column=0, sticky="w", pady=(8, 0))
+                  foreground="#536174", wraplength=self.wraplength).grid(row=3, column=0, sticky="w", pady=(8, 0))
 
     def _show_history_detail(self, _event=None):
         selection = self.history_view.selection()
@@ -961,7 +1109,13 @@ class DigestDesktopApp:
         previous_auto_send = bool(self.settings.get("auto_send_enabled"))
         for key in DEFAULT_SETTINGS:
             if key in self.values:
-                proposed[key] = self.values[key].get()
+                value = self.values[key].get()
+                if key == "max_tasks_per_run":
+                    try:
+                        value = int(value)
+                    except (TypeError, ValueError):
+                        raise SettingsError("单次采集任务上限请输入 1 到 700 之间的整数") from None
+                proposed[key] = value
         try:
             if bool(proposed["auto_send_enabled"]) != previous_auto_send:
                 proposed["auto_send_enabled_since_local"] = (
@@ -1165,8 +1319,7 @@ class DigestDesktopApp:
             try:
                 now = datetime.now().astimezone(SHANGHAI)
                 start, end = now - timedelta(minutes=5), now
-                client = Client(settings["tenant_id"], credentials=lambda: (
-                    secrets["teambition_app_id"], secrets["teambition_app_secret"]))
+                client = _new_teambition_client(settings, secrets)
                 collection = client.collect(settings["project_id"], day=end.date().isoformat(),
                                             window=(start, end), include_archived=settings["include_archived"])
                 result, error = f"Teambition 只读查询成功；收到 {len(collection['records'])} 条任务记录。", None
@@ -1209,24 +1362,33 @@ class DigestDesktopApp:
             self._job_lock.release()
             messagebox.showinfo(
                 "需要已保存的 Teambition 配置",
-                "请先在“首次配置 / 自动运行”填写并保存 Tenant ID、Project ID、Teambition App ID 和 App Secret。此项诊断不需要 OpenAI 或钉钉密钥。",
+                "请先在“账户与模型”填写并保存 Tenant ID、Project ID、Teambition App ID 和 App Secret。此项诊断不需要 OpenAI 或钉钉密钥。",
                 parent=self.root)
             return
         settings, secrets = dict(self.settings), dict(self.saved_secrets)
         self.source_diagnostic_button.configure(state="disabled")
+        self.diagnostic_export_button.configure(state="disabled")
+        self.last_diagnostic_shape = None
         self._set_status("正在只读读取 Teambition 并本地核验；不会调用 OpenAI 或发送钉钉……")
 
         def worker():
+            collection = None
+            safe_shape = None
             try:
                 start, end = start_local.astimezone(SHANGHAI), end_local.astimezone(SHANGHAI)
                 day = end.date().isoformat()
                 config = runtime_config(settings)
-                client = Client(settings["tenant_id"], credentials=lambda: (
-                    secrets["teambition_app_id"], secrets["teambition_app_secret"]))
+                client = _new_teambition_client(settings, secrets)
                 collection = client.collect(
                     settings["project_id"], day=day, window=(start, end),
                     include_archived=settings["include_archived"])
                 diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
+                try:
+                    safe_shape = safe_structure_export(collection, config)
+                except Exception:
+                    diagnostic["message"] += (
+                        "\n当前诊断可查看，但安全结构文件生成失败；不会导出原始响应。"
+                    )
             except (CollectionError, OSError) as exc:
                 diagnostic = {"ok": False, "message": collection_validation_message(exc), "task_count": None}
             except SettingsError as exc:
@@ -1239,6 +1401,7 @@ class DigestDesktopApp:
                               "task_count": None}
             finally:
                 self._job_lock.release()
+            diagnostic["safe_shape"] = safe_shape
             try:
                 self.root.after(0, lambda: self._diagnostic_finished(diagnostic))
             except tk.TclError:
@@ -1248,6 +1411,9 @@ class DigestDesktopApp:
 
     def _diagnostic_finished(self, diagnostic):
         self.source_diagnostic_button.configure(state="normal")
+        self.last_diagnostic_shape = diagnostic.get("safe_shape")
+        self.diagnostic_export_button.configure(
+            state="normal" if self.last_diagnostic_shape else "disabled")
         message = diagnostic["message"]
         self._show_preview(message)
         self._set_status(message.splitlines()[0])
@@ -1256,6 +1422,29 @@ class DigestDesktopApp:
         else:
             messagebox.showwarning("只读诊断发现问题", message, parent=self.root)
         self._refresh_history()
+
+    def _export_safe_diagnostic(self):
+        if not isinstance(self.last_diagnostic_shape, dict):
+            messagebox.showinfo("没有可导出的诊断", "请先完成一次“只读诊断当前数据”。", parent=self.root)
+            return
+        target = filedialog.asksaveasfilename(
+            parent=self.root, title="保存脱敏动态结构诊断",
+            initialfile="teambition-safe-structure.json",
+            defaultextension=".json", filetypes=(("JSON 文件", "*.json"),))
+        if not target:
+            return
+        try:
+            Path(target).write_text(
+                json.dumps(self.last_diagnostic_shape, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8")
+        except OSError:
+            messagebox.showerror("导出失败", "无法写入所选文件；请检查目标文件夹的权限和可用空间。", parent=self.root)
+            return
+        messagebox.showinfo(
+            "脱敏结构已导出",
+            "文件只包含任务/动态 ID、API 字段名、值类型和字符串长度，并用真假值表示映射是否匹配；"
+            "不包含任务标题、姓名、评论正文、凭据或 API 响应的字段值。分享前请先自行检查文件。",
+            parent=self.root)
 
     def _launch_run(self, start, end, *, schedule_key, scheduled):
         if not self.ledger_ready:
@@ -1395,6 +1584,7 @@ def main():
         options = parse_launch_options(sys.argv[1:])
     except ValueError:
         return 2
+    _enable_windows_dpi_awareness()
     current = {"app": None, "pending_show": False}
 
     def request_show():
@@ -1422,8 +1612,10 @@ def main():
                 try:
                     root.update_idletasks()
                     verify_desktop_smoke(app, assert_hidden=options.background,
-                                         exercise_controls=True)
-                except Exception:
+                                         exercise_controls=True,
+                                         screenshot_path=options.capture_screenshot)
+                except Exception as exc:
+                    print(f"UI smoke test failed: {exc}", file=sys.stderr)
                     smoke_exit_code["value"] = 4
                 finally:
                     app._quit_application()
@@ -1435,6 +1627,32 @@ def main():
         return 3
     finally:
         instance.close()
+
+
+def _enable_windows_dpi_awareness():
+    """Request per-monitor DPI scaling for this process without changing system settings."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        try:
+            set_context = user32.SetProcessDpiAwarenessContext
+            set_context.argtypes = (ctypes.c_void_p,)
+            set_context.restype = ctypes.c_bool
+            if set_context(ctypes.c_void_p(-4)):
+                return True
+        except (AttributeError, OSError, ctypes.ArgumentError):
+            pass
+        try:
+            set_awareness = ctypes.windll.shcore.SetProcessDpiAwareness
+            set_awareness.argtypes = (ctypes.c_int,)
+            set_awareness.restype = ctypes.c_long
+            return set_awareness(2) == 0
+        except (AttributeError, OSError, ctypes.ArgumentError):
+            return False
+    except (AttributeError, OSError, OverflowError):
+        return False
 
 
 if __name__ == "__main__":

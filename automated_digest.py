@@ -104,9 +104,10 @@ _COLLECTION_ERROR_MESSAGES = {
     "Conflicting duplicate; collection is not a snapshot": "同一任务在分页期间返回了冲突版本，无法确认一致范围；重新执行只读查询。",
     "Detail identity or project mismatch": "任务详情 ID 或 Project ID 与查询结果不一致；停止发送并核对项目权限和接口响应。",
     "Invalid page size": "本机分页参数无效；恢复仓库默认设置后重新只读诊断。",
-    "Collection record budget exhausted": "Teambition 查询超过本机记录上限；缩小更新时间窗口后重新验证。",
-    "Task selection exceeds bounded collection budget": "符合条件的任务数量超过本机安全采集上限；缩小项目筛选范围后重新验证。",
-    "Collection request budget exhausted": "Teambition 查询达到本机请求上限；缩小时间窗口后重新只读诊断。",
+    "Collection record budget exhausted": "Teambition 返回的任务与动态总记录超过 50,000 条的硬上限；为保护本机资源，结果未完成，不能发送。",
+    "Task selection exceeds bounded collection budget": "符合条件的任务数超过“单次采集任务上限”。可在“自动运行计划”提高此值（最多 700），保存后重新只读诊断；任务详情/动态请求、总记录数、响应体大小和运行时长仍有硬上限，触及时会继续阻断。",
+    "Collection request budget exhausted": "Teambition 分页和详情请求达到本机请求预算，结果不完整，不能发送。检查活动量；仍超限时需降低时间范围或项目范围。",
+    "Collection response byte budget exhausted": "本次 Teambition 响应数据总量超过 128 MiB 的硬上限；结果不完整，不能发送。",
     "Unexpected HTTP status": "Teambition API 返回了未预期的 HTTP 状态；检查凭据、读取权限或稍后重试。",
     "Missing or conflicting record identity": "任务或动态缺少唯一 ID 或同一对象的 ID 字段互相冲突；核对 API 字段后再运行。",
     "Expected object record": "Teambition 返回了非对象任务/动态记录；接口字段结构不受当前规则支持。",
@@ -165,8 +166,11 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
 
     missing_owners, missing_statuses = set(), set()
     unknown_actions, undated_tasks = set(), set()
-    malformed_comments, bad_status_events, bad_executor_events, bad_commit_events = set(), set(), set(), set()
-    status_conflicts, executor_conflicts, no_window_events = set(), set(), set()
+    malformed_comments, status_schema_errors = {}, {}
+    status_name_mismatches = set()
+    bad_executor_events, bad_commit_events = set(), set()
+    status_conflicts, status_conflict_details = set(), {}
+    executor_conflicts, no_window_events = set(), set()
     generic_tasks = set()
     owner_names = config.get("owner_names", {})
     status_names = config.get("status_names", {})
@@ -205,18 +209,28 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
             no_window_events.add(task_id)
         if audit.get("status_noop"):
             status_conflicts.add(task_id)
-            reasons.append(f"任务 {task_id} 的状态 ID 未变化，不能确认状态变更。")
+            status_conflict_details.setdefault(task_id, set()).add("事件中的旧状态 ID 与目标状态 ID 相同")
         if audit.get("executor_conflict"):
             executor_conflicts.add(task_id)
 
         transitions = audit.get("status_transitions", [])
         if transitions:
-            chain_bad = any(previous.get("target_id") != current.get("previous_id")
-                            for previous, current in zip(transitions, transitions[1:]))
+            chain_bad = False
+            if any(previous.get("target_id") != current.get("previous_id")
+                   for previous, current in zip(transitions, transitions[1:])):
+                chain_bad = True
+                status_conflict_details.setdefault(task_id, set()).add("相邻状态事件的旧状态与前一目标状态未衔接")
             last = transitions[-1]
-            chain_bad = chain_bad or last.get("target_id") != task.get("tfsId")
-            chain_bad = chain_bad or type(task.get("isDone")) is not bool
-            chain_bad = chain_bad or task.get("isDone") != last.get("resolved")
+            if last.get("target_id") != task.get("tfsId"):
+                chain_bad = True
+                status_conflict_details.setdefault(task_id, set()).add("最后一条状态事件目标 ID 与当前任务状态 ID 不一致")
+            if type(task.get("isDone")) is not bool:
+                chain_bad = True
+                status_conflict_details.setdefault(task_id, set()).add("当前任务 isDone 缺失或不是布尔值")
+            elif task.get("isDone") != last.get("resolved"):
+                chain_bad = True
+                status_conflict_details.setdefault(task_id, set()).add(
+                    "当前任务完成标记与已配置的“已解决”状态映射不一致")
             event_times = {}
             for activity in evidence:
                 try:
@@ -225,7 +239,9 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
                     continue
             observed_times = [event_times.get(item.get("event_id")) for item in transitions]
             observed_times = [value for value in observed_times if value is not None]
-            chain_bad = chain_bad or len(observed_times) != len(set(observed_times))
+            if len(observed_times) != len(set(observed_times)):
+                chain_bad = True
+                status_conflict_details.setdefault(task_id, set()).add("多条状态事件具有相同时间戳")
             if chain_bad:
                 status_conflicts.add(task_id)
 
@@ -242,24 +258,39 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
                     comment_id = record_id(activity, task_fallback=False)
                     parsed_comment = comment_input(activity, comment_id, None)
                 except (CollectionError, TypeError, ValueError):
-                    malformed_comments.add(task_id)
+                    malformed_comments.setdefault(task_id, set()).add("评论对象超过本机安全解析上限或无法读取")
                 else:
                     if parsed_comment.get("extraction_needs_review"):
-                        malformed_comments.add(task_id)
+                        malformed_comments.setdefault(task_id, set()).update(
+                            parsed_comment.get("review_reasons", []))
             elif action == "update.taskflowstatus":
                 payload = bounded_object(activity.get("content"))
                 if payload is None:
-                    bad_status_events.add(task_id)
+                    status_schema_errors.setdefault(task_id, set()).add(
+                        "content 不是有界、无重复键的 JSON 对象")
                     continue
-                ids = set()
-                for key in ("oldTfsId", "tfsId"):
+                parsed_ids = {}
+                for key, name_key in (("oldTfsId", "oldTaskflowstatus"), ("tfsId", "taskflowstatus")):
                     try:
-                        ids.add(identifier(payload.get(key)))
+                        status_id = identifier(payload.get(key))
                     except CollectionError:
-                        bad_status_events.add(task_id)
-                missing_statuses.update(item for item in ids if item not in status_names)
-                if ids and not status_transition(activity.get("content"), config):
-                    bad_status_events.add(task_id)
+                        status_schema_errors.setdefault(task_id, set()).add(f"{key} 缺失或格式无效")
+                        continue
+                    parsed_ids[key] = status_id
+                    if status_id not in status_names:
+                        missing_statuses.add(status_id)
+                    name = payload.get(name_key)
+                    if not isinstance(name, str) or not name or name != name.strip():
+                        status_schema_errors.setdefault(task_id, set()).add(f"{name_key} 缺失或不是有效字符串")
+                    elif status_id in status_names and status_names[status_id] != name:
+                        status_name_mismatches.add(task_id)
+                if type(payload.get("isDone")) is not bool:
+                    status_schema_errors.setdefault(task_id, set()).add("事件 isDone 缺失或不是布尔值")
+                if (not status_schema_errors.get(task_id) and not status_name_mismatches.intersection({task_id})
+                        and all(item in status_names for item in parsed_ids.values())
+                        and not status_transition(activity.get("content"), config)):
+                    status_schema_errors.setdefault(task_id, set()).add(
+                        "状态字段组合不符合当前已验证的事件契约")
             elif action == "update_executor":
                 payload = bounded_object(activity.get("content"))
                 if payload is None:
@@ -310,11 +341,20 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
         reasons.append("以下任务当前 updated 时间在筛选窗口内，但窗口内没有可验证动态：" +
                        _display_ids(no_window_events) + "。核对本机起止时间、任务 updated 和动态 createTime；若接口证据不一致请停止发送。")
     if malformed_comments:
-        reasons.append("评论动态结构未通过本地校验：" + _display_ids(malformed_comments) +
-                       "。原始评论内容不会写入诊断；请核对附件、提及、富文本等字段并由仓库规则支持后再运行。")
-    if bad_status_events:
-        reasons.append("状态/关联提交动态字段、名称或完成标记无法核实：" + _display_ids(bad_status_events) +
-                       "。核对事件内容与状态映射，必要时更新仓库事件适配规则。")
+        for task_id in sorted(malformed_comments)[:12]:
+            detail = "；".join(sorted(malformed_comments[task_id]))
+            reasons.append(f"评论动态结构未通过本地校验：任务 {task_id}：{detail}。评论正文不会写入诊断。")
+        if len(malformed_comments) > 12:
+            reasons.append(f"另有 {len(malformed_comments) - 12} 个任务含评论结构问题。")
+    if status_schema_errors:
+        for task_id in sorted(status_schema_errors)[:12]:
+            detail = "；".join(sorted(status_schema_errors[task_id]))
+            reasons.append(f"状态动态字段结构未通过校验：任务 {task_id}：{detail}。请核对动态字段形状；不要手动跳过校验。")
+        if len(status_schema_errors) > 12:
+            reasons.append(f"另有 {len(status_schema_errors) - 12} 个任务含状态字段结构问题。")
+    if status_name_mismatches:
+        reasons.append("状态事件中的名称与已保存映射不一致：" + _display_ids(status_name_mismatches) +
+                       "。请在“成员与状态映射”页核对动态返回的旧/新状态名称与对应 ID；诊断不会输出状态名称值。")
     if bad_commit_events:
         reasons.append("关联提交动态仅有标题模式，无法证明提交来源：" + _display_ids(bad_commit_events) +
                        "。在仓库规则补充可验证的提交证据前，该动态会继续阻断发送。")
@@ -322,8 +362,11 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
         reasons.append("执行人变更动态结构或来源标记无法核实：" + _display_ids(bad_executor_events) +
                        "。核对动态字段及成员映射后重新只读诊断。")
     if status_conflicts:
-        reasons.append("状态事件序列与任务当前状态不一致或存在同刻冲突：" + _display_ids(status_conflicts) +
-                       "。核对状态历史、当前状态和“已解决”映射；不要手动跳过校验。")
+        for task_id in sorted(status_conflicts)[:12]:
+            details = "；".join(sorted(status_conflict_details.get(task_id, {"状态事件序列存在冲突"})))
+            reasons.append(f"状态事件序列与任务当前状态不一致：任务 {task_id}：{details}。核对状态历史和“已解决”映射；不要手动跳过校验。")
+        if len(status_conflicts) > 12:
+            reasons.append(f"另有 {len(status_conflicts) - 12} 个任务存在状态事件序列冲突。")
     if executor_conflicts:
         reasons.append("执行人事件序列与任务当前执行人不一致或存在同刻冲突：" +
                        _display_ids(executor_conflicts) + "。核对执行人历史及 ID→姓名映射后重新诊断。")

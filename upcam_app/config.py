@@ -21,6 +21,7 @@ DEFAULT_SETTINGS = {
     "tenant_id": "",
     "project_id": "",
     "include_archived": False,
+    "max_tasks_per_run": 300,
     "api_contract_verified": False,
     "view": {"verified": False, "evidence": "", "task_equals": {}},
     "owner_names": {},
@@ -61,6 +62,9 @@ def validate_settings(settings: dict) -> dict:
         raise SettingsError("Teambition tenant and project IDs must be text")
     if type(merged.get("include_archived")) is not bool or type(merged.get("api_contract_verified")) is not bool:
         raise SettingsError("Teambition scope verification flags must be true or false")
+    max_tasks = merged.get("max_tasks_per_run")
+    if type(max_tasks) is not int or not 1 <= max_tasks <= 700:
+        raise SettingsError("Single-run task limit must be an integer from 1 to 700")
     if not isinstance(merged.get("auto_send_enabled"), bool):
         raise SettingsError("Automatic run and send setting must be true or false")
     if not isinstance(merged.get("start_with_windows"), bool):
@@ -98,6 +102,21 @@ def validate_settings(settings: dict) -> dict:
     if afternoon_end <= afternoon_start:
         raise SettingsError("Afternoon collection end must be later than its start")
     return merged
+
+
+def collection_client_limits(settings: dict) -> dict:
+    """Derive bounded, fail-closed request budgets from the user's task ceiling."""
+    maximum = validate_settings(settings)["max_tasks_per_run"]
+    max_requests = min(1800, max(1000, maximum * 2 + 400))
+    max_seconds = min(600, max(300, (max_requests + 3) // 4 + 60))
+    return {
+        "max_tasks": maximum,
+        "max_requests": max_requests,
+        "max_pages": 50,
+        "max_records": 50000,
+        "max_seconds": max_seconds,
+        "max_response_bytes": 128 * 1024 * 1024,
+    }
 
 
 def runtime_config(settings: dict) -> dict:

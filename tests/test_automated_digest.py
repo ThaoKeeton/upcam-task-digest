@@ -144,6 +144,7 @@ class AutomatedDigestTests(unittest.TestCase):
                                    "gpt-6-luna", "max", client=client)
 
         self.assertIn("评论动态结构未通过本地校验", str(raised.exception))
+        self.assertIn("尚未识别的评论字段", str(raised.exception))
         self.assertNotIn("synthetic-private-body", str(raised.exception))
         self.assertEqual(client.calls, [])
 
@@ -166,6 +167,28 @@ class AutomatedDigestTests(unittest.TestCase):
         self.assertIn("缺少状态名称映射", diagnostic["message"])
         self.assertIn("demo-open", diagnostic["message"])
         self.assertIn("未发送钉钉", diagnostic["message"])
+        self.assertNotIn("状态动态字段或关联提交", diagnostic["message"])
+
+    def test_status_name_mismatch_is_distinguished_from_missing_mapping(self):
+        collection = json.loads(json.dumps(self.collection))
+        status_event = {
+            "id": "demo-status-event", "action": "update.taskflowstatus",
+            "boundToObjectId": "demo-old-task", "boundToObjectType": "task",
+            "createTime": "2026-01-02T11:00:00Z",
+            "content": json.dumps({
+                "tfsId": "demo-open", "oldTfsId": "demo-open",
+                "taskflowstatus": "synthetic-wrong-name", "oldTaskflowstatus": "待处理",
+                "isDone": False,
+            }, ensure_ascii=False),
+        }
+        collection["records"][0]["activities"] = [status_event]
+
+        diagnostic = diagnose_automatic_source(collection, self.config, "2026-01-02")
+
+        self.assertFalse(diagnostic["ok"])
+        self.assertIn("状态事件中的名称与已保存映射不一致", diagnostic["message"])
+        self.assertNotIn("synthetic-wrong-name", diagnostic["message"])
+        self.assertNotIn("synthetic status marker", diagnostic["message"])
 
     def test_verified_empty_window_renders_no_activity_without_openai_request(self):
         self.collection["records"] = []

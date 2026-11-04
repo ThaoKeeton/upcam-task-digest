@@ -66,8 +66,9 @@ class Client:
     PATH = re.compile(r"/api/v3/(?:project/[A-Za-z0-9_-]+/task/query|task/query|task/[A-Za-z0-9_-]+/activity/list)")
 
     def __init__(self, tenant_id, *, transport=None, sleep=time.sleep, clock=time.monotonic,
-                 credentials=None, interval=0.25, attempts=3, max_pages=20,
-                 max_requests=300, max_tasks=100, max_records=10000, max_seconds=120):
+                 credentials=None, interval=0.25, attempts=3, max_pages=50,
+                 max_requests=1000, max_tasks=300, max_records=50000, max_seconds=310,
+                 max_response_bytes=128 * 1024 * 1024):
         self.tenant_id = identifier(tenant_id)
         self.injected_transport = transport is not None
         self.transport = transport or build_opener(NoRedirect()).open
@@ -76,14 +77,16 @@ class Client:
                                                    os.environ.get("TEAMBITION_APP_SECRET")))
         if interval < 0.25 or not 1 <= attempts <= 5 or not 1 <= max_pages <= 100:
             raise CollectionError("Invalid request limits")
-        if (type(max_requests) is not int or not 1 <= max_requests <= 1000
-                or type(max_tasks) is not int or not 1 <= max_tasks <= 500
-                or type(max_records) is not int or not 1 <= max_records <= 20000
-                or not 1 <= max_seconds <= 600):
+        if (type(max_requests) is not int or not 1 <= max_requests <= 2000
+                or type(max_tasks) is not int or not 1 <= max_tasks <= 700
+                or type(max_records) is not int or not 1 <= max_records <= 50000
+                or type(max_seconds) is not int or not 1 <= max_seconds <= 600
+                or type(max_response_bytes) is not int or not 1024 <= max_response_bytes <= 512 * 1024 * 1024):
             raise CollectionError("Invalid collection budgets")
         self.interval, self.attempts, self.max_pages = interval, attempts, max_pages
         self.max_requests, self.max_tasks = max_requests, max_tasks
         self.max_records, self.max_seconds = max_records, max_seconds
+        self.max_response_bytes, self.response_bytes = max_response_bytes, 0
         self.request_count, self.record_count = 0, 0
         self.started = None
         self.last_request = None
@@ -126,6 +129,9 @@ class Client:
                 self._remaining()
                 if len(body) > 8 * 1024 * 1024:
                     raise CollectionError("Response size limit exceeded")
+                if self.response_bytes + len(body) > self.max_response_bytes:
+                    raise CollectionError("Collection response byte budget exhausted")
+                self.response_bytes += len(body)
                 data = json.loads(body)
                 if not isinstance(data, dict) or type(data.get("code")) is not int or data["code"] != 200:
                     raise CollectionError("API rejected request or malformed envelope")
