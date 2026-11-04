@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from upcam_app.config import (
-    DEFAULT_SETTINGS, SettingsError, SettingsStore, parse_manual_window,
+    DEFAULT_SETTINGS, SettingsError, SettingsStore, collection_client_limits, parse_manual_window,
     recoverable_schedule_occurrences, scheduled_occurrences, scheduled_window, validate_settings,
 )
 from upcam_app.dingtalk import DingTalkConfigError, DingTalkSender, signed_webhook
@@ -15,6 +15,18 @@ from upcam_app.openai_models import ModelCatalogError, OpenAIModelCatalog, cache
 
 
 class ConfigTests(unittest.TestCase):
+    def test_large_window_task_ceiling_is_configurable_and_bounded(self):
+        self.assertEqual(DEFAULT_SETTINGS["max_tasks_per_run"], 300)
+        self.assertEqual(collection_client_limits(DEFAULT_SETTINGS)["max_tasks"], 300)
+        large = validate_settings(dict(DEFAULT_SETTINGS, max_tasks_per_run=700))
+        limits = collection_client_limits(large)
+        self.assertEqual(limits["max_tasks"], 700)
+        self.assertEqual(limits["max_requests"], 1800)
+        self.assertEqual(limits["max_seconds"], 510)
+        for value in (0, 701, True, "500"):
+            with self.subTest(value=value), self.assertRaises(SettingsError):
+                validate_settings(dict(DEFAULT_SETTINGS, max_tasks_per_run=value))
+
     def test_default_windows_preserve_the_documented_morning_and_afternoon_periods(self):
         morning = scheduled_window(DEFAULT_SETTINGS, "morning", date(2026, 11, 3))
         afternoon = scheduled_window(DEFAULT_SETTINGS, "afternoon", date(2026, 11, 3))

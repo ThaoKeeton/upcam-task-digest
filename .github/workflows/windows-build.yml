@@ -34,7 +34,7 @@ jobs:
       - name: Diagnose packaged application and tabs
         shell: pwsh
         run: |
-          & .\dist\UPCAMTaskDigestSmoke.exe --ui-smoke-test --background
+          & .\dist\UPCAMTaskDigestSmoke.exe --ui-smoke-test --capture-screenshot .\dist\UPCAMTaskDigest-ui.png
           if ($LASTEXITCODE -ne 0) { throw "Console desktop EXE smoke test failed with exit code $LASTEXITCODE" }
       - run: pyinstaller --noconfirm --onefile --windowed --name UPCAMTaskDigest --collect-all tzdata --collect-all pystray --collect-all PIL --add-data "templates;templates" --add-data "examples;examples" desktop_app.py
       - name: Smoke test final windowed EXE
@@ -45,5 +45,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: UPCAMTaskDigest-windows
-          path: dist/UPCAMTaskDigest.exe
+          path: |
+            dist/UPCAMTaskDigest.exe
+            dist/UPCAMTaskDigest-ui.png
           retention-days: 14
