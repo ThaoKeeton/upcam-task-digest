@@ -16,6 +16,8 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
     private NativeDesktop? _native;
     private DispatcherQueueTimer? _scheduler;
     private bool _initialized, _busy, _exitRequested, _savedAuto, _navigating;
+    private bool _exitInProgress;
+    private readonly SemaphoreSlim _dialogGate = new(1, 1);
     private string _page = "home";
     private readonly Dictionary<string, (string Title, string Description)> _routes = new()
     {
@@ -193,7 +195,18 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
             DefaultButton = primary is null ? ContentDialogButton.Close : ContentDialogButton.Primary,
             Content = new ScrollViewer { MaxHeight = 360, Content = Paragraph(text) }
         };
-        return await dialog.ShowAsync();
+        return await ShowDialogAsync(dialog);
+    }
+
+    private async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
+    {
+        await _dialogGate.WaitAsync();
+        try
+        {
+            if (_exitRequested) return ContentDialogResult.None;
+            return await dialog.ShowAsync();
+        }
+        finally { _dialogGate.Release(); }
     }
 
     private void ShowMainWindow()
@@ -219,15 +232,21 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
 
     private async Task RequestExitAsync()
     {
-        ShowMainWindow();
-        if (_busy || _state.Dirty)
+        if (_exitRequested || _exitInProgress) return;
+        _exitInProgress = true;
+        try
         {
-            string note = _busy
-                ? "当前操作仍在运行。退出会停止工作进程；若正在发送，结果将保留为不明并阻止自动重发。"
-                : "有尚未保存的设置。退出后这些编辑不会保留。";
-            if (await ShowMessageAsync("退出应用", note, "退出") != ContentDialogResult.Primary) return;
+            ShowMainWindow();
+            if (_busy || _state.Dirty || _state.SecretDrafts.Any(x => !string.IsNullOrEmpty(x.Value)))
+            {
+                string note = _busy
+                    ? "当前操作仍在运行。退出会停止工作进程；若正在发送，结果将保留为不明并阻止自动重发。"
+                    : "有尚未保存的设置或凭据。退出后这些编辑不会保留。";
+                if (await ShowMessageAsync("退出应用", note, "退出") != ContentDialogResult.Primary) return;
+            }
+            _exitRequested = true;
+            Close();
         }
-        _exitRequested = true;
-        Close();
+        finally { _exitInProgress = false; }
     }
 }

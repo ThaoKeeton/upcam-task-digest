@@ -24,6 +24,7 @@ public sealed partial class MainWindow
         try
         {
             ShowMainWindow();
+            await VerifyUtf8PipeBoundariesAsync();
             _state.ManualStart = DateTime.Now.AddHours(-2).ToString("yyyy-MM-dd HH:mm");
             _state.ManualEnd = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
             var models = await Worker.SendAsync("refresh_models");
@@ -56,6 +57,15 @@ public sealed partial class MainWindow
             await WaitForAsync(() => !_busy);
             Assert(_state.ScopeConfirmed, "Save recomputed scope proof and legacy settings format");
 
+            Task<ContentDialogResult> firstDialog = ShowMessageAsync("CI 对话框一", "虚构并发提示", "继续");
+            Button firstPrimary = await WaitForPrimaryAsync();
+            Task<ContentDialogResult> queuedDialog = ShowMessageAsync("CI 对话框二", "虚构排队提示", "继续");
+            Invoke(firstPrimary);
+            await firstDialog;
+            Invoke(await WaitForPrimaryAsync());
+            await queuedDialog;
+            Assert(true, "Native dialog serialization prevents reentrant failures");
+
             Navigate("run");
             Invoke(Find<Button>("preview-sample")!);
             await WaitForAsync(() => !_busy);
@@ -83,12 +93,16 @@ public sealed partial class MainWindow
                     {
                         var list = Find<ListView>("status-list")!;
                         Assert(list.ActualHeight > PageHost.ActualHeight * 0.40, $"Status list fills content {size.Width}x{size.Height}");
+                        foreach (string id in new[] { "status-add", "status-edit", "status-delete" })
+                            AssertInside(Find<Button>(id)!, "Status toolbar " + id);
                     }
                     if (route == "run")
                     {
                         var textbox = Find<TextBox>("diagnostic-output")!;
                         Assert(textbox.ActualHeight >= 60, $"Diagnostic result has usable space {size.Width}x{size.Height}");
                         AssertInside(textbox, "Diagnostic output");
+                        foreach (string id in new[] { "diagnose", "run-manual", "preview-sample", "export-diagnostic" })
+                            AssertInside(Find<Button>(id)!, "Run toolbar " + id);
                     }
                 }
             }
@@ -127,6 +141,30 @@ public sealed partial class MainWindow
     {
         if (!condition) throw new InvalidOperationException(description);
         _smokeSteps.Add(description);
+    }
+
+    private async Task VerifyUtf8PipeBoundariesAsync()
+    {
+        foreach (int length in new[] { 4096, 8192 })
+        {
+            string pipeName = "upcam-ci-" + Guid.NewGuid().ToString("N");
+            await using var server = new System.IO.Pipes.NamedPipeServerStream(pipeName,
+                System.IO.Pipes.PipeDirection.Out, 1, System.IO.Pipes.PipeTransmissionMode.Byte,
+                System.IO.Pipes.PipeOptions.Asynchronous | System.IO.Pipes.PipeOptions.CurrentUserOnly);
+            await using var client = new System.IO.Pipes.NamedPipeClientStream(".", pipeName,
+                System.IO.Pipes.PipeDirection.In, System.IO.Pipes.PipeOptions.Asynchronous);
+            await Task.WhenAll(server.WaitForConnectionAsync(), client.ConnectAsync());
+            const string prefix = "{\"id\":\"ci\",\"ok\":true,\"result\":{\"value\":\"中";
+            const string suffix = "\"}}\n";
+            int padding = length - System.Text.Encoding.UTF8.GetByteCount(prefix + suffix);
+            byte[] bytes = System.Text.Encoding.UTF8.GetBytes(prefix + new string('x', padding) + suffix);
+            Task<string?> read = WorkerClient.ReadBoundedLineAsync(client);
+            await server.WriteAsync(bytes);
+            await server.FlushAsync();
+            string? line = await read.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert(line is not null && JsonNode.Parse(line)?["result"]?["value"]?.GetValue<string>().StartsWith("中") == true,
+                $"UTF-8 named pipe line {length} bytes completes before writer closes");
+        }
     }
 
     private void AssertInside(FrameworkElement control, string description)

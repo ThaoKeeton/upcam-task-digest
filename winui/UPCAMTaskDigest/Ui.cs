@@ -90,13 +90,11 @@ public sealed partial class MainWindow
         return grid;
     }
 
-    private static VariableSizedWrapGrid Toolbar(params UIElement[] controls)
+    private static AdaptiveWrapPanel Toolbar(params UIElement[] controls)
     {
-        // Native wrapping prevents horizontal clipping at compact window sizes.
-        var panel = new VariableSizedWrapGrid { Orientation = Orientation.Horizontal, MaximumRowsOrColumns = 4 };
+        var panel = new AdaptiveWrapPanel();
         foreach (UIElement control in controls)
         {
-            if (control is FrameworkElement element) element.Margin = new Thickness(0, 0, 8, 8);
             panel.Children.Add(control);
         }
         return panel;

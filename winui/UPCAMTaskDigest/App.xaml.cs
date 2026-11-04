@@ -14,7 +14,15 @@ public partial class App : Application
         {
             if (IsSyntheticRun) RecordSyntheticFailure(args.Exception);
         };
-        try { InitializeComponent(); }
+        try
+        {
+            InitializeComponent();
+            if (IsSyntheticRun)
+            {
+                DebugSettings.XamlResourceReferenceFailed += (_, args) => SyntheticTrace(args.Message);
+                SyntheticTrace("Application XAML initialized.");
+            }
+        }
         catch (Exception ex)
         {
             if (IsSyntheticRun) RecordSyntheticFailure(ex);
@@ -41,7 +49,9 @@ public partial class App : Application
         }
         try
         {
+            if (smoke) SyntheticTrace("Creating main window.");
             _window = new MainWindow(smoke, arguments.Contains("--background"));
+            if (smoke) SyntheticTrace("Main window constructed.");
             _window.Closed += (_, _) => _instance.Dispose();
             _window.Activate();
         }
@@ -59,7 +69,18 @@ public partial class App : Application
         // This flag starts an isolated worker with fixtures only, never a user profile.
         string directory = Path.Combine(AppContext.BaseDirectory, "smoke-output");
         Directory.CreateDirectory(directory);
-        File.WriteAllText(Path.Combine(directory, "result.txt"), exception.ToString());
+        var details = new System.Text.StringBuilder(exception.ToString());
+        details.AppendLine($"\nHRESULT: 0x{exception.HResult:X8}");
+        foreach (System.Collections.DictionaryEntry entry in exception.Data)
+            if (entry.Value is string value) details.AppendLine($"{entry.Key}: {value}");
+        File.WriteAllText(Path.Combine(directory, "result.txt"), details.ToString());
         Environment.Exit(1);
+    }
+
+    private static void SyntheticTrace(string message)
+    {
+        string directory = Path.Combine(AppContext.BaseDirectory, "smoke-output");
+        Directory.CreateDirectory(directory);
+        File.AppendAllText(Path.Combine(directory, "xaml-trace.txt"), message + Environment.NewLine);
     }
 }

@@ -48,7 +48,7 @@ internal sealed class WorkerClient : IDisposable
             var request = new JsonObject { ["id"] = id, ["op"] = operation, ["payload"] = payload ?? new JsonObject() };
             await _process.StandardInput.WriteLineAsync(request.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
             await _process.StandardInput.FlushAsync();
-            string? line = await ReadBoundedLineAsync(_process.StandardOutput);
+            string? line = await ReadBoundedLineAsync(_process.StandardOutput.BaseStream);
             if (line is null) throw new InvalidOperationException("工作进程连接已关闭；本次结果需查看运行记录。");
             JsonObject response;
             try { response = JsonNode.Parse(line)?.AsObject() ?? throw new JsonException(); }
@@ -62,24 +62,31 @@ internal sealed class WorkerClient : IDisposable
         finally { _requestGate.Release(); }
     }
 
-    private static async Task<string?> ReadBoundedLineAsync(StreamReader reader)
+    internal static async Task<string?> ReadBoundedLineAsync(Stream stream)
     {
-        var result = new StringBuilder();
-        char[] buffer = new char[4096];
-        // One response per serialized request; the worker emits no unsolicited output.
+        using var result = new MemoryStream();
+        byte[] buffer = new byte[8192];
+        // Read bytes: a UTF-8 line can fill a pipe byte buffer without filling a
+        // StreamReader character buffer. Detect LF before attempting another read.
         while (true)
         {
-            int count = await reader.ReadAsync(buffer.AsMemory());
-            if (count == 0) return result.Length == 0 ? null : result.ToString();
-            int newline = Array.IndexOf(buffer, '\n', 0, count);
-            result.Append(buffer, 0, newline >= 0 ? newline : count);
+            int count = await stream.ReadAsync(buffer.AsMemory());
+            if (count == 0)
+            {
+                if (result.Length == 0) return null;
+                throw new InvalidOperationException("工作进程响应中断；未自动重试，请查看本机记录。");
+            }
+            int newline = Array.IndexOf(buffer, (byte)0x0A, 0, count);
+            result.Write(buffer, 0, newline >= 0 ? newline : count);
             if (result.Length > MaxResponseChars)
                 throw new InvalidOperationException("本机响应超过显示上限；未自动重试。请使用更小的诊断范围。");
             if (newline >= 0)
             {
                 if (newline != count - 1)
                     throw new InvalidOperationException("工作进程返回了多余数据；未自动重试。");
-                return result.ToString().TrimEnd('\r');
+                try { return new UTF8Encoding(false, true).GetString(result.ToArray()).TrimEnd('\r'); }
+                catch (DecoderFallbackException)
+                { throw new InvalidOperationException("工作进程响应编码无效；未自动重试。"); }
             }
         }
     }

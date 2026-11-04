@@ -254,7 +254,7 @@ public sealed partial class MainWindow
         var inputId = new TextBox { Header = "API 成员 ID", Text = id ?? "", IsReadOnly = id is not null };
         var name = new TextBox { Header = "姓名", Text = id is null ? "" : _state.Map("owner_names")[id]?.GetValue<string>() ?? "" };
         var dialog = EditorDialog("成员映射", Column(inputId, name));
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary) return;
         var mapping = (JsonObject)_state.Map("owner_names").DeepClone();
         mapping[inputId.Text.Trim()] = name.Text;
         var result = await Worker.SendAsync("update_owner_mapping", new JsonObject { ["mappings"] = mapping });
@@ -272,7 +272,7 @@ public sealed partial class MainWindow
         ScrollViewer.SetVerticalScrollBarVisibility(input, ScrollBarVisibility.Auto);
         var dialog = EditorDialog("批量导入成员映射", Column(
             Paragraph("粘贴 JSON 对象或 ID 与姓名之间有一个制表符的多行文本。冲突和格式错误会整批拒绝。", true), input), "导入");
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary) return;
         var result = await Worker.SendAsync("import_owner_mappings", new JsonObject
         { ["source"] = input.Text, ["existing"] = _state.Map("owner_names").DeepClone() });
         _state.Set("owner_names", result["mappings"]!.DeepClone());
@@ -324,7 +324,7 @@ public sealed partial class MainWindow
         var done = new CheckBox { Content = "此状态代表已解决", IsChecked = id is not null && resolved.Contains(id) };
         string suggestion = id is null ? "" : _state.StatusSuggestions.GetValueOrDefault(id, "");
         var dialog = EditorDialog("状态映射", Column(inputId, name, Paragraph("样本名称建议：" + (suggestion.Length == 0 ? "无" : suggestion), true), done));
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary) return;
         string key = inputId.Text.Trim();
         var mapping = (JsonObject)_state.Map("status_names").DeepClone(); mapping[key] = name.Text;
         if (done.IsChecked == true) resolved.Add(key); else resolved.Remove(key);
@@ -375,7 +375,7 @@ public sealed partial class MainWindow
         ScrollViewer.SetVerticalScrollBarVisibility(output, ScrollBarVisibility.Auto);
         var export = ActionButton("导出脱敏结构", "export-diagnostic", ExportDiagnosticAsync);
         export.IsEnabled = _state.ExportAvailable;
-        var header = Card(Column(TimeInputs(), Toolbar(
+        var toolbar = Toolbar(
             ActionButton("只读诊断", "diagnose", async () =>
             {
                 await EnsureSavedAsync();
@@ -396,11 +396,28 @@ public sealed partial class MainWindow
             {
                 var result = await Worker.SendAsync("preview_sample", _state.WindowPayload());
                 _state.Output = Value(result, "markdown"); Navigate("run"); SetStatus(Value(result, "status"));
-            }), export),
-            Paragraph("诊断仅查询 Teambition 并本机校验。确认完整采集且无动态时，正式运行直接按仓库模板发送无动态说明，跳过 OpenAI。", true)));
-        var settingsRegion = LocalScroll(header);
-        settingsRegion.MaxHeight = Math.Max(160, Math.Min(260, PageHost.ActualHeight * 0.55));
-        return FillLayout(settingsRegion, output);
+            }), export);
+        var header = Column(Card(Column(Paragraph("采集时间范围", size: 16),
+            Pair(Paragraph($"{_state.ManualStart} → {_state.ManualEnd}\n本机时间，结束时间不包含", true),
+                ActionButton("修改时间范围", "edit-window", EditWindowAsync)))), toolbar);
+        return FillLayout(header, output);
+    }
+
+    private async Task EditWindowAsync()
+    {
+        var start = Identify(new TextBox { Header = "开始（本机时间）", Text = _state.ManualStart }, "edit-window-start");
+        var end = Identify(new TextBox { Header = "结束（不含，本机时间）", Text = _state.ManualEnd }, "edit-window-end");
+        var dialog = EditorDialog("修改采集时间", Column(start, end,
+            Paragraph("格式为 YYYY-MM-DD HH:MM。只读诊断不会调用模型或发送；正式运行会按该区间自动发送。", true)), "应用");
+        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary) return;
+        if (!DateTime.TryParseExact(start.Text.Trim(), "yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var first) ||
+            !DateTime.TryParseExact(end.Text.Trim(), "yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var last) || last <= first)
+            throw new InvalidOperationException("时间范围无效，请使用 YYYY-MM-DD HH:MM，且结束晚于开始。");
+        _state.ManualStart = start.Text.Trim();
+        _state.ManualEnd = end.Text.Trim();
+        Navigate("run");
     }
 
     private async Task ExportDiagnosticAsync()

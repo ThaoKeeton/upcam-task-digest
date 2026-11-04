@@ -93,6 +93,7 @@ jobs:
             throw "WinUI interaction smoke timed out"
           }
           if (Test-Path dist/winui/smoke-output/result.txt) { Get-Content dist/winui/smoke-output/result.txt }
+          if (Test-Path dist/winui/smoke-output/xaml-trace.txt) { Get-Content dist/winui/smoke-output/xaml-trace.txt }
           if ($process.ExitCode -ne 0) {
             Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-4)} -ErrorAction SilentlyContinue |
               Where-Object { $_.ProviderName -in @('.NET Runtime', 'Application Error') } |
