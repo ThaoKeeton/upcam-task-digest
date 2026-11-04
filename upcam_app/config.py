@@ -34,6 +34,7 @@ DEFAULT_SETTINGS = {
     "afternoon_end_at": "16:50",
     "auto_send_enabled": False,
     "auto_send_enabled_since_local": "",
+    "start_with_windows": False,
     "openai_model": "gpt-6-luna",
     "openai_reasoning_effort": "max",
     "openai_service_tier": "default",
@@ -62,6 +63,8 @@ def validate_settings(settings: dict) -> dict:
         raise SettingsError("Teambition scope verification flags must be true or false")
     if not isinstance(merged.get("auto_send_enabled"), bool):
         raise SettingsError("Automatic run and send setting must be true or false")
+    if not isinstance(merged.get("start_with_windows"), bool):
+        raise SettingsError("Windows sign-in startup setting must be true or false")
     enabled_since = merged.get("auto_send_enabled_since_local")
     if not isinstance(enabled_since, str):
         raise SettingsError("Automatic run enable time must be text")

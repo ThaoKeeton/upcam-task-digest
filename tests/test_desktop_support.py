@@ -41,6 +41,12 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(SettingsError):
             validate_settings(dict(DEFAULT_SETTINGS, openai_service_tier="ultrafast"))
 
+    def test_windows_startup_is_explicit_and_defaults_off(self):
+        self.assertFalse(DEFAULT_SETTINGS["start_with_windows"])
+        self.assertTrue(validate_settings(dict(DEFAULT_SETTINGS, start_with_windows=True))["start_with_windows"])
+        with self.assertRaises(SettingsError):
+            validate_settings(dict(DEFAULT_SETTINGS, start_with_windows="yes"))
+
     def test_scheduled_slots_are_ordered_and_use_unique_keys(self):
         slots = scheduled_occurrences(DEFAULT_SETTINGS, datetime(2026, 11, 3, 8, 49),
                                       datetime(2026, 11, 4, 8, 51))
