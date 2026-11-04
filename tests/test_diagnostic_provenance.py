@@ -25,7 +25,7 @@ class DiagnosticProvenanceTests(unittest.TestCase):
         other = safe_structure_export(collection, {}, "2026-01-02", (start, end))
         self.assertIn("diagnostic", report)
         meta = report["diagnostic"]
-        self.assertEqual(report["format"], "upcam-teambition-safe-shape-v4")
+        self.assertEqual(report["format"], "upcam-teambition-safe-shape-v5")
         self.assertEqual(meta["application_version"], APP_VERSION)
         self.assertEqual(meta["ruleset_revision"], RULESET_REVISION)
         self.assertRegex(meta["id"], r"^[0-9a-f]{32}$")
@@ -82,6 +82,8 @@ class DiagnosticExportContextTests(unittest.TestCase):
             stem = diagnostic["diagnostic_file_stem"]
             self.assertRegex(stem, r"^teambition-diagnostic-v[0-9.]+-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$")
             shape = service.dispatch({"op": "export_diagnostic", "payload": window})["shape"]
+            self.assertEqual(service.dispatch({"op": "diagnostic_status", "payload": window}),
+                             {"diagnostic": shape["diagnostic"]})
             target = Path(directory) / (stem + ".json")
             service.dispatch({"op": "export_diagnostic_to_file", "payload": {**window, "path": str(target)}})
             self.assertEqual(json.loads(target.read_text(encoding="utf-8")), shape)
@@ -94,6 +96,7 @@ class DiagnosticExportContextTests(unittest.TestCase):
                         - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")}
             target = Path(directory) / "stale.json"
             for operation, payload in (("export_diagnostic", changed),
+                                       ("diagnostic_status", changed),
                                        ("export_diagnostic_to_file", {**changed, "path": str(target)})):
                 with self.assertRaisesRegex(ValueError, "重新运行只读诊断"):
                     service.dispatch({"op": operation, "payload": payload})

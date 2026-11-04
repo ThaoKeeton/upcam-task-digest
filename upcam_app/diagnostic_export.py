@@ -16,6 +16,8 @@ from activity_adapter import (
 from report_contract import report_window, updated_selection
 from teambition_readonly import CollectionError, identifier, validate_binding
 from . import APP_VERSION, RULESET_REVISION
+from .diagnostic_protocol import action_fingerprint
+from .diagnostic_markup import markup_shape
 
 
 _MAX_DEPTH = 5
@@ -23,9 +25,21 @@ _MAX_FIELDS = 48
 _MAX_ARRAY_SHAPES = 3
 _MAX_TASKS = 1000
 _MAX_ACTIVITIES_PER_TASK = 1000
+_MAX_EXPORT_BYTES = 16 * 1024 * 1024
+_MAX_TASK_METADATA_BYTES = 2 * 1024 * 1024
+_MAX_EVENT_DETAIL_BYTES = 8 * 1024 * 1024
+_MAX_CATALOG_TASKS = 1000
+_MAX_CATALOG_EVENTS = 50000
+_MAX_CATALOG_GROUPS = 1024
 _SAFE_FIELD = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}\Z")
 _OBSERVED_UNDERSCORE_FIELDS = frozenset({"_executorId", "_oldExecutorId"})
 _EXPORT_ACTION_TOKENS = OBSERVED_ACTIONS | frozenset({"update_tasklist"})
+_SOURCE_FIELDS = frozenset({
+    "provider", "source", "sourceId", "appId", "integration", "integrationId",
+    "repository", "repositoryId", "repositoryUrl", "repo", "repoId", "repoUrl",
+    "commit", "commitId", "commitHash", "sha", "hash", "url", "objectLink", "objectLinkId",
+})
+_SOURCE_NESTED_FIELDS = _SOURCE_FIELDS | frozenset({"id", "_id", "type", "name", "owner", "fullName"})
 _QUOTE_FIELDS = frozenset({
     "id", "_id", "comment", "content", "text", "quote", "renderMode", "attachments",
     "dingFiles", "files", "images", "mentions", "isOnlyNotifyMentions", "author", "creator",
@@ -236,9 +250,9 @@ def _executor_shape_check(activity, owner_names):
 
 def _commit_shape_check(activity):
     candidate = standard_commit_candidate(activity)
+    data = bounded_object(activity.get("content"))
     reasons = ["title_pattern_does_not_prove_source"] if candidate is not None else []
     if candidate is None:
-        data = bounded_object(activity.get("content"))
         if data is None:
             reasons.append("content_object_unavailable")
         else:
@@ -252,8 +266,143 @@ def _commit_shape_check(activity):
                 reasons.append("creator_name_unavailable")
             if not reasons:
                 reasons.append("unrecognized_title_pattern")
+    source_shapes = {
+        source_name: {key: _field_shapes(source[key], 0, _SOURCE_NESTED_FIELDS)
+                      for key in sorted(_SOURCE_FIELDS) if key in source}
+        for source_name, source in (("content", data or {}), ("event", activity))
+    }
     return {"candidate_recognized": candidate is not None,
-            "automatic_review_required": True, "rejection_reasons": reasons}
+            "automatic_review_required": True, "rejection_reasons": reasons,
+            "source_field_shapes": source_shapes, "source_verified": False,
+            "field_presence_is_proof": False}
+
+
+def _activities(record):
+    value = record.get("activities", []) if isinstance(record, dict) else []
+    return value if isinstance(value, list) else []
+
+
+def _protocol_catalog(records, bounds, total_events):
+    """Scan bounded source identities independently of expensive detail shapes."""
+    groups = {}
+    considered = unidentified = omitted = unknown_window = scanned = 0
+    complete = bounds is not None and len(records) <= _MAX_CATALOG_TASKS
+    for task_index, record in enumerate(records[:_MAX_CATALOG_TASKS]):
+        if not isinstance(record, dict) or not isinstance(record.get("activities", []), list):
+            complete = False
+            continue
+        for activity in _activities(record):
+            if scanned >= _MAX_CATALOG_EVENTS:
+                break
+            scanned += 1
+            if not isinstance(activity, dict):
+                complete = False
+                continue
+            action = activity.get("action")
+            if isinstance(action, str) and action in OBSERVED_ACTIONS:
+                continue
+            membership = _in_report_window(activity.get("createTime"), bounds)
+            if membership is None:
+                unknown_window += 1
+                complete = False
+                continue
+            if not membership:
+                continue
+            considered += 1
+            fingerprint = action_fingerprint(action)
+            digest = fingerprint["sha256"]
+            if digest is None:
+                unidentified += 1
+            elif digest in groups:
+                groups[digest]["event_count"] += 1
+                groups[digest]["tasks"].add(task_index)
+            elif len(groups) >= _MAX_CATALOG_GROUPS:
+                omitted += 1
+                complete = False
+            else:
+                groups[digest] = {"action_fingerprint": fingerprint, "event_count": 1,
+                                  "tasks": {task_index}}
+        if scanned >= _MAX_CATALOG_EVENTS:
+            break
+    unscanned = total_events - scanned
+    return {
+        "format": "upcam-action-catalog-v1",
+        "complete": complete and unscanned == 0,
+        "unknown_events_considered": considered,
+        "unidentified_events": unidentified,
+        "omitted_events": omitted,
+        "unscanned_events": unscanned,
+        "unknown_window_events": unknown_window,
+        "groups": [{"action_fingerprint": group["action_fingerprint"],
+                    "event_count": group["event_count"], "task_count": len(group["tasks"])}
+                   for _digest, group in sorted(groups.items())],
+        "limits": {"tasks": _MAX_CATALOG_TASKS, "events": _MAX_CATALOG_EVENTS,
+                   "groups": _MAX_CATALOG_GROUPS},
+    }
+
+
+def _embedded_json_cost(value, depth):
+    """Charge pretty UTF-8 bytes, including every embedded line's indentation."""
+    encoded = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)
+    return len(encoded.encode("utf-8")) + (encoded.count("\n") + 1) * depth * 2 + 2
+
+
+def _serialized_size(value, stop_after):
+    size = 0
+    for part in json.JSONEncoder(ensure_ascii=False, indent=2, allow_nan=False).iterencode(value):
+        size += len(part.encode("utf-8"))
+        if size > stop_after:
+            break
+    return size
+
+
+def _activity_shape(activity, task_id, owner_names, status_names, bounds):
+    action = activity.get("action")
+    safe_action = action if isinstance(action, str) and action in OBSERVED_ACTIONS else "unknown"
+    raw_content = activity.get("content")
+    try:
+        event_id = identifier(activity.get("id"))
+    except CollectionError:
+        event_id = None
+    shaped = {
+        "event_id": event_id,
+        "action": safe_action,
+        "action_token": action if isinstance(action, str) and action in _EXPORT_ACTION_TOKENS else None,
+        "action_fingerprint": action_fingerprint(action),
+        "outer_field_names": sorted(key for key in activity if _safe_field_name(key))[:_MAX_FIELDS],
+        "create_time_type": _type_name(activity.get("createTime")),
+        "create_time_has_timezone": _aware_timestamp(activity.get("createTime")),
+        "in_report_window": _in_report_window(activity.get("createTime"), bounds),
+        "content_shape": _parse_json_shape(raw_content),
+    }
+    try:
+        validate_binding(activity, task_id)
+    except CollectionError:
+        shaped["task_binding_valid"] = False
+    else:
+        shaped["task_binding_valid"] = True
+    if safe_action == "comment":
+        try:
+            comment = comment_input(activity, "event", None)
+            shaped["comment_check"] = {
+                "needs_review": comment["extraction_needs_review"],
+                "review_reasons": list(comment["review_reasons"]),
+                "body_check": _text_check(comment["body"]),
+                "markup_shape": markup_shape(comment["body"], comment["render_mode"]),
+                "quote_checks": {source: dict(_quote_check(value),
+                                              adapter_supported=source in comment["quote_contexts"])
+                                 for source, value in comment["quote_evidence"].items()},
+            }
+        except (CollectionError, TypeError, ValueError):
+            shaped["comment_check"] = {
+                "needs_review": True, "review_reasons": ["评论结构超过安全解析范围"]}
+    elif safe_action == "update.taskflowstatus":
+        shaped["status_check"] = _status_shape_check(raw_content, status_names)
+    elif safe_action == "standard":
+        shaped["commit_check"] = _commit_shape_check(activity)
+    elif safe_action == "update_executor":
+        shaped["executor_check"] = _executor_shape_check(activity, owner_names)
+    return shaped
 
 
 def safe_structure_export(collection: dict, config: dict, day=None, window=None) -> dict:
@@ -278,17 +427,24 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
     if not isinstance(status_names, dict):
         status_names = {}
 
-    tasks = []
-    truncated_tasks = max(0, len(records) - _MAX_TASKS)
+    # Reading list lengths counts omissions without scanning omitted event values.
+    total_events = sum(len(_activities(record)) for record in records)
+    catalog = _protocol_catalog(records, bounds, total_events)
+    tasks, reasons = [], set()
+    metadata_bytes = detail_bytes = included_events = 0
+    detail_budget_exhausted = False
+    if len(records) > _MAX_TASKS:
+        reasons.add("task_count_limit")
     for record in records[:_MAX_TASKS]:
         if not isinstance(record, dict):
+            reasons.add("invalid_task_record")
             continue
         task = record.get("task")
         if not isinstance(task, dict):
             task = {}
-        activities = record.get("activities", [])
-        if not isinstance(activities, list):
-            activities = []
+        activities = _activities(record)
+        if not isinstance(record.get("activities", []), list):
+            reasons.add("invalid_activity_list")
         try:
             task_id = identifier(task.get("id", task.get("_id", task.get("taskId"))))
         except CollectionError:
@@ -301,57 +457,7 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
             current_status_id = identifier(task.get("tfsId"))
         except CollectionError:
             current_status_id = None
-        event_shapes = []
-        truncated_activities = max(0, len(activities) - _MAX_ACTIVITIES_PER_TASK)
-        for activity in activities[:_MAX_ACTIVITIES_PER_TASK]:
-            if not isinstance(activity, dict):
-                continue
-            action = activity.get("action")
-            safe_action = action if isinstance(action, str) and action in OBSERVED_ACTIONS else "unknown"
-            raw_content = activity.get("content")
-            try:
-                event_id = identifier(activity.get("id"))
-            except CollectionError:
-                event_id = None
-            shaped = {
-                "event_id": event_id,
-                "action": safe_action,
-                "action_token": action if isinstance(action, str) and action in _EXPORT_ACTION_TOKENS else None,
-                "outer_field_names": sorted(key for key in activity if _safe_field_name(key))[:_MAX_FIELDS],
-                "create_time_type": _type_name(activity.get("createTime")),
-                "create_time_has_timezone": _aware_timestamp(activity.get("createTime")),
-                "in_report_window": _in_report_window(activity.get("createTime"), bounds),
-                "content_shape": _parse_json_shape(raw_content),
-            }
-            try:
-                validate_binding(activity, task_id)
-            except CollectionError:
-                shaped["task_binding_valid"] = False
-            else:
-                shaped["task_binding_valid"] = True
-            if safe_action == "comment":
-                try:
-                    comment = comment_input(activity, "event", None)
-                    shaped["comment_check"] = {
-                        "needs_review": comment["extraction_needs_review"],
-                        "review_reasons": list(comment["review_reasons"]),
-                        "body_check": _text_check(comment["body"]),
-                        "quote_checks": {source: dict(_quote_check(value),
-                                                      adapter_supported=source in comment["quote_contexts"])
-                                         for source, value
-                                         in comment["quote_evidence"].items()},
-                    }
-                except (CollectionError, TypeError, ValueError):
-                    shaped["comment_check"] = {
-                        "needs_review": True, "review_reasons": ["评论结构超过安全解析范围"]}
-            elif safe_action == "update.taskflowstatus":
-                shaped["status_check"] = _status_shape_check(raw_content, status_names)
-            elif safe_action == "standard":
-                shaped["commit_check"] = _commit_shape_check(activity)
-            elif safe_action == "update_executor":
-                shaped["executor_check"] = _executor_shape_check(activity, owner_names)
-            event_shapes.append(shaped)
-        tasks.append({
+        shaped_task = {
             "task_id": task_id,
             "task_field_shapes": _field_shapes(task, 0).get("fields", {}),
             "current_owner_mapping_present": current_owner_id in owner_names if current_owner_id else False,
@@ -359,20 +465,53 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
                                           if current_owner_id not in owner_names else None),
             "current_status_mapping_present": current_status_id in status_names if current_status_id else False,
             "current_done_type": _type_name(task.get("isDone")),
-            "activities": event_shapes,
-            "truncated_activity_count": truncated_activities,
-        })
-    return {
-        "format": "upcam-teambition-safe-shape-v4",
+            "activities": [],
+            "truncated_activity_count": len(activities),
+            "detail_truncated": bool(activities),
+        }
+        # Reserve array expansion, commas, and the final boolean/count changes.
+        metadata_cost = _embedded_json_cost(shaped_task, 2) + 32
+        if metadata_bytes + metadata_cost > _MAX_TASK_METADATA_BYTES:
+            reasons.add("task_metadata_byte_budget")
+            break
+        metadata_bytes += metadata_cost
+        if len(activities) > _MAX_ACTIVITIES_PER_TASK:
+            reasons.add("activity_count_limit")
+        for activity in activities[:_MAX_ACTIVITIES_PER_TASK]:
+            if detail_budget_exhausted:
+                break
+            if not isinstance(activity, dict):
+                reasons.add("invalid_activity_record")
+                continue
+            if detail_bytes >= _MAX_EVENT_DETAIL_BYTES:
+                detail_budget_exhausted = True
+                reasons.add("event_detail_byte_budget")
+                break
+            shaped = _activity_shape(activity, task_id, owner_names, status_names, bounds)
+            detail_cost = _embedded_json_cost(shaped, 4)
+            if detail_bytes + detail_cost > _MAX_EVENT_DETAIL_BYTES:
+                detail_budget_exhausted = True
+                reasons.add("event_detail_byte_budget")
+                break
+            detail_bytes += detail_cost
+            shaped_task["activities"].append(shaped)
+            included_events += 1
+        shaped_task["truncated_activity_count"] = len(activities) - len(shaped_task["activities"])
+        shaped_task["detail_truncated"] = shaped_task["truncated_activity_count"] > 0
+        tasks.append(shaped_task)
+    result = {
+        "format": "upcam-teambition-safe-shape-v5",
         "diagnostic": {
             "id": uuid.uuid4().hex,
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
             "application_version": APP_VERSION,
             "ruleset_revision": RULESET_REVISION,
+            "capabilities": ["action-fingerprint/v1", "comment-markup-shape/v1",
+                             "commit-source-field-shapes/v1", "protocol-catalog/v1"],
             "report_window": ({"start": bounds[0].isoformat(), "end_exclusive": bounds[1].isoformat(),
                                "timezone": "Asia/Shanghai"} if bounds else None),
         },
-        "privacy": "diagnostic version/time/window, task/event and unmapped current-owner IDs, bounded protocol action tokens and field names are included; names, titles, comments, credentials, and other response values are omitted",
+        "privacy": "diagnostic version/time/window, task/event and unmapped current-owner IDs, bounded action fingerprints, allowlisted protocol tokens, field and markup shapes are included; names, titles, comments, credentials, arbitrary markup names/attributes and other response values are omitted",
         "pagination_complete": collection.get("pagination_complete") is True if isinstance(collection, dict) else False,
         "window_evaluation_available": bounds is not None,
         "selection_check": {
@@ -380,6 +519,34 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
                                        if bounds is not None and isinstance(collection, dict) else None),
         },
         "task_count": len(records),
+        "activity_count": total_events,
         "tasks": tasks,
-        "truncated_task_count": truncated_tasks,
+        "truncated_task_count": len(records) - len(tasks),
+        "truncated_activity_count": total_events - included_events,
+        "detail_truncated": bool(reasons),
+        "detail_truncation_reasons": sorted(reasons),
+        "protocol_catalog": catalog,
+        "export_limits": {
+            "max_json_bytes": _MAX_EXPORT_BYTES,
+            "max_task_metadata_bytes": _MAX_TASK_METADATA_BYTES,
+            "max_event_detail_bytes": _MAX_EVENT_DETAIL_BYTES,
+            "max_tasks": _MAX_TASKS,
+            "max_activities_per_task": _MAX_ACTIVITIES_PER_TASK,
+            "charged_task_metadata_bytes": metadata_bytes,
+            "charged_event_detail_bytes": detail_bytes,
+            "serialization": {"encoding": "utf-8", "ensure_ascii": False, "indent": 2},
+        },
     }
+    # A final streaming check also covers envelope/catalog overhead and a file newline.
+    # Default detail budgets leave ample space; this guard also supports smaller budgets.
+    if _serialized_size(result, _MAX_EXPORT_BYTES - 1) + 1 > _MAX_EXPORT_BYTES:
+        result["tasks"] = []
+        result["truncated_task_count"] = len(records)
+        result["truncated_activity_count"] = total_events
+        result["detail_truncated"] = True
+        result["detail_truncation_reasons"] = sorted(reasons | {"json_byte_budget"})
+        result["export_limits"]["charged_task_metadata_bytes"] = 0
+        result["export_limits"]["charged_event_detail_bytes"] = 0
+        if _serialized_size(result, _MAX_EXPORT_BYTES - 1) + 1 > _MAX_EXPORT_BYTES:
+            raise ValueError("Diagnostic byte budget cannot contain its bounded protocol catalog")
+    return result

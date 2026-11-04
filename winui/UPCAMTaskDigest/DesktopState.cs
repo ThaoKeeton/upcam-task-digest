@@ -39,11 +39,13 @@ internal sealed class DesktopState
     public string Output { get; set; } = "选择时间范围后，先运行只读诊断。";
     public bool ExportAvailable { get; set; }
     public string DiagnosticFileStem { get; set; } = "";
+    public string DiagnosticText { get; set; } = "";
 
     private void InvalidateDiagnostic()
     {
         ExportAvailable = false;
         DiagnosticFileStem = "";
+        DiagnosticText = "";
     }
 
     public string Text(string key, string fallback = "") => Settings[key]?.GetValue<string>() ?? fallback;

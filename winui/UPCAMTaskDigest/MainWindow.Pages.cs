@@ -367,12 +367,15 @@ public sealed partial class MainWindow
         ScrollViewer.SetVerticalScrollBarVisibility(output, ScrollBarVisibility.Auto);
         var export = ActionButton("导出脱敏结构", "export-diagnostic", ExportDiagnosticAsync);
         export.IsEnabled = _state.ExportAvailable;
+        var copy = ActionButton("复制诊断文字", "copy-diagnostic", CopyDiagnosticAsync);
+        copy.IsEnabled = _state.ExportAvailable && !string.IsNullOrEmpty(_state.DiagnosticText);
         var toolbar = Toolbar(
             ActionButton("只读诊断", "diagnose", async () =>
             {
                 await EnsureSavedAsync();
                 _state.ExportAvailable = false;
                 _state.DiagnosticFileStem = "";
+                _state.DiagnosticText = "";
                 Navigate("run");
                 var result = await Worker.SendAsync("diagnose", _state.WindowPayload());
                 _state.Output = Value(result, "message");
@@ -380,6 +383,7 @@ public sealed partial class MainWindow
                 _state.DiagnosticFileStem = Value(result, "diagnostic_file_stem");
                 if (result["diagnostic"] is JsonObject metadata)
                     _state.Output += $"\n\n诊断 v{Value(metadata, "application_version")} · UTC {Value(metadata, "created_at_utc")}";
+                _state.DiagnosticText = _state.Output;
                 Navigate("run"); SetStatus(Value(result, "safety", "未调用 OpenAI；未发送钉钉。"));
             }, accent: true),
             ActionButton("生成并自动发送", "run-manual", async () =>
@@ -394,7 +398,7 @@ public sealed partial class MainWindow
             {
                 var result = await Worker.SendAsync("preview_sample", _state.WindowPayload());
                 _state.Output = Value(result, "markdown"); Navigate("run"); SetStatus(Value(result, "status"));
-            }), export);
+            }), export, copy);
         var range = new Grid { ColumnSpacing = 12 };
         range.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         range.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -441,6 +445,21 @@ public sealed partial class MainWindow
         await Worker.SendAsync("export_diagnostic_to_file", _state.DiagnosticExportPayload(file.Path));
         SetStatus("已导出版本、时间窗、字段结构及任务/动态/缺失成员 ID；不含标题、姓名、评论正文或凭据。分享前请检查 ID。");
     }
+
+    private async Task CopyDiagnosticAsync()
+    {
+        if (!_state.ExportAvailable || string.IsNullOrEmpty(_state.DiagnosticText))
+            throw new InvalidOperationException("请针对当前设置和时间范围重新运行只读诊断。");
+        await Worker.SendAsync("diagnostic_status", _state.WindowPayload());
+        var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+        package.SetText(_state.DiagnosticText);
+        if (!Windows.ApplicationModel.DataTransfer.Clipboard.SetContentWithOptions(package, DiagnosticClipboardOptions()))
+            throw new InvalidOperationException("剪贴板暂时不可用，请重试复制或导出脱敏结构。");
+        SetStatus("已复制本机诊断文字，含动作类型与任务/成员 ID，不含评论正文或凭据。分享前请检查内容。");
+    }
+
+    private static Windows.ApplicationModel.DataTransfer.ClipboardContentOptions DiagnosticClipboardOptions() =>
+        new() { IsAllowedInHistory = false, IsRoamable = false };
 
     private FrameworkElement BuildHistory()
     {
