@@ -2,7 +2,10 @@ import json
 from pathlib import Path
 import unittest
 
-from automated_digest import AutomatedDigestBlocked, build_automated_digest, validate_automated_report
+from automated_digest import (
+    AutomatedDigestBlocked, build_automated_digest, diagnose_automatic_source,
+    validate_automated_report,
+)
 from report_contract import updated_selection
 from teambition_readonly import CollectionError
 
@@ -72,9 +75,97 @@ class AutomatedDigestTests(unittest.TestCase):
             "content": "fictional unknown event",
         })
         client = RecordingSummarizer()
-        with self.assertRaises(AutomatedDigestBlocked):
+        with self.assertRaises(AutomatedDigestBlocked) as raised:
             self.build(client)
         self.assertEqual(client.calls, [])
+        message = str(raised.exception)
+        self.assertIn("未识别动态类型", message)
+        self.assertIn("future.unknown.action", message)
+        self.assertIn("demo-old-task", message)
+        self.assertNotIn("fictional unknown event", message)
+        self.assertIn("未调用 OpenAI", message)
+
+    def test_malformed_unhashable_action_is_reported_without_echoing_payload(self):
+        collection = json.loads(json.dumps(self.collection))
+        collection["records"][0]["activities"].append({
+            "id": "demo-malformed-event",
+            "action": ["synthetic-sensitive-action"],
+            "boundToObjectId": "demo-old-task",
+            "boundToObjectType": "task",
+            "createTime": "2026-01-02T04:00:00Z",
+            "content": "synthetic-private-payload",
+        })
+
+        with self.assertRaises(AutomatedDigestBlocked) as raised:
+            build_automated_digest(collection, self.config, "2026-01-02", "synthetic-key",
+                                   "gpt-6-luna", "max", client=RecordingSummarizer())
+
+        self.assertIn("未识别动态类型", str(raised.exception))
+        self.assertIn("原值已隐藏", str(raised.exception))
+        self.assertNotIn("synthetic-sensitive-action", str(raised.exception))
+        self.assertNotIn("synthetic-private-payload", str(raised.exception))
+
+    def test_missing_member_mapping_identifies_id_without_exposing_comment_text(self):
+        config = json.loads(json.dumps(self.config))
+        config["owner_names"].pop("demo-person")
+        client = RecordingSummarizer()
+
+        with self.assertRaises(AutomatedDigestBlocked) as raised:
+            build_automated_digest(self.collection, config, "2026-01-02", "synthetic-key",
+                                   "gpt-6-luna", "max", client=client)
+
+        message = str(raised.exception)
+        self.assertIn("缺少成员姓名映射", message)
+        self.assertIn("demo-person", message)
+        self.assertNotIn("已定位导出异常", message)
+        self.assertEqual(client.calls, [])
+
+    def test_status_chain_conflict_explains_local_reason_before_openai(self):
+        collection = json.loads(json.dumps(self.collection))
+        event = collection["records"][0]["activities"][-1]
+        event["createTime"] = "2026-01-02T11:00:00Z"
+        client = RecordingSummarizer()
+
+        with self.assertRaises(AutomatedDigestBlocked) as raised:
+            build_automated_digest(collection, self.config, "2026-01-02", "synthetic-key",
+                                   "gpt-6-luna", "max", client=client)
+
+        self.assertIn("状态事件序列与任务当前状态不一致", str(raised.exception))
+        self.assertEqual(client.calls, [])
+
+    def test_malformed_comment_structure_is_described_without_logging_body(self):
+        collection = json.loads(json.dumps(self.collection))
+        collection["records"][0]["activities"][0]["content"] = (
+            '{"comment":"synthetic-private-body","unrecognized":"field"}')
+        client = RecordingSummarizer()
+
+        with self.assertRaises(AutomatedDigestBlocked) as raised:
+            build_automated_digest(collection, self.config, "2026-01-02", "synthetic-key",
+                                   "gpt-6-luna", "max", client=client)
+
+        self.assertIn("评论动态结构未通过本地校验", str(raised.exception))
+        self.assertNotIn("synthetic-private-body", str(raised.exception))
+        self.assertEqual(client.calls, [])
+
+    def test_read_only_diagnostic_pass_does_not_call_summary_client(self):
+        diagnostic = diagnose_automatic_source(
+            self.collection, self.config, "2026-01-02")
+
+        self.assertTrue(diagnostic["ok"])
+        self.assertIn("只读校验通过", diagnostic["message"])
+        self.assertIn("未调用 OpenAI", diagnostic["message"])
+
+    def test_read_only_diagnostic_reports_missing_state_mappings(self):
+        config = json.loads(json.dumps(self.config))
+        del config["status_names"]["demo-open"]
+
+        diagnostic = diagnose_automatic_source(
+            self.collection, config, "2026-01-02")
+
+        self.assertFalse(diagnostic["ok"])
+        self.assertIn("缺少状态名称映射", diagnostic["message"])
+        self.assertIn("demo-open", diagnostic["message"])
+        self.assertIn("未发送钉钉", diagnostic["message"])
 
     def test_verified_empty_window_renders_no_activity_without_openai_request(self):
         self.collection["records"] = []
