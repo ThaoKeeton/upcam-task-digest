@@ -6,6 +6,7 @@
     <RootNamespace>Upcam.Desktop</RootNamespace>
     <AssemblyName>UPCAMTaskDigest</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Teambition.ico</ApplicationIcon>
     <UseWinUI>true</UseWinUI>
     <EnableMsixTooling>true</EnableMsixTooling>
     <ProjectPriFileName>UPCAMTaskDigest.pri</ProjectPriFileName>
@@ -24,5 +25,9 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.6.5" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.9169" />
     <PackageReference Include="WinUIEx" Version="2.8.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\Teambition.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Assets\Teambition.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

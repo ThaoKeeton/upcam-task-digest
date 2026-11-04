@@ -19,6 +19,7 @@ public sealed partial class MainWindow
 {
     private readonly List<string> _smokeSteps = new();
     private readonly List<object> _smokeLayouts = new();
+    private readonly List<object> _smokeIcons = new();
 
     private async Task RunSmokeAsync()
     {
@@ -27,6 +28,20 @@ public sealed partial class MainWindow
             ShowMainWindow();
             var titleBar = Find<TitleBar>("app-titlebar");
             Assert(titleBar is not null && ExtendsContentIntoTitleBar, "Native custom TitleBar replaces colored system title bar");
+            Assert(titleBar!.IconSource is BitmapIconSource { ShowAsMonochrome: false }, "TitleBar keeps original icon colors");
+            Assert(AppWindow.TitleBar.ButtonBackgroundColor == Microsoft.UI.Colors.Transparent,
+                "Native caption button background blends with dark title bar");
+            foreach (uint dpi in new uint[] { 96, 144, 192 })
+            {
+                var dimensions = _native!.IconSizeForDpi(dpi);
+                Assert(dimensions.Width == 16 * dpi / 96 && dimensions.Height == dimensions.Width,
+                    $"Native tray icon selects exact {dpi} DPI dimensions");
+                _smokeIcons.Add(new { dpi, width = dimensions.Width, height = dimensions.Height });
+            }
+            Assert(_native!.WindowIconHandle != IntPtr.Zero && _native.TrayIconHandle != IntPtr.Zero,
+                "Window and tray both contain actual native icon handles");
+            Assert(NativeUiEvidence.IconPixels(_native.WindowIconHandle, 16).SequenceEqual(
+                NativeUiEvidence.IconPixels(_native.TrayIconHandle, 16)), "Actual window and tray icon pixels match");
             await VerifyUtf8PipeBoundariesAsync();
             _state.ManualStart = DateTime.Now.AddHours(-2).ToString("yyyy-MM-dd HH:mm");
             _state.ManualEnd = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
@@ -87,6 +102,20 @@ public sealed partial class MainWindow
                 AppWindow.Resize(size);
                 await Task.Delay(150);
                 RootGrid.UpdateLayout();
+                Navigation.IsPaneOpen = true;
+                RootGrid.UpdateLayout();
+                Assert(Navigation.PaneDisplayMode == NavigationViewPaneDisplayMode.Left &&
+                    Navigation.DisplayMode == NavigationViewDisplayMode.Expanded, "Navigation uses inline pane at " + size.Width);
+                Rect pageBounds = PageHost.TransformToVisual(RootGrid).TransformBounds(new Rect(0, 0, PageHost.ActualWidth, PageHost.ActualHeight));
+                Assert(pageBounds.Left >= Navigation.OpenPaneLength, "Expanded navigation reserves content space at " + size.Width);
+                Button? toggle = FindIn<Button>(AppTitleBar, x => x is FrameworkElement fe && fe.Name == "PaneToggleButton");
+                Assert(toggle is not null, "Native title bar pane button exists");
+                Invoke(toggle!);
+                await Task.Delay(100);
+                Assert(!Navigation.IsPaneOpen, "Native title bar pane button collapses navigation");
+                Invoke(toggle!);
+                await Task.Delay(100);
+                Assert(Navigation.IsPaneOpen, "Native title bar pane button expands inline navigation");
                 _smokeLayouts.Add(new
                 {
                     requestedWidthPixels = size.Width, requestedHeightPixels = size.Height,
@@ -123,6 +152,9 @@ public sealed partial class MainWindow
                 Navigate(route); await Task.Delay(200);
                 await CaptureAsync(Path.Combine(output, route + ".png"));
             }
+            await NativeUiEvidence.CaptureWindowAsync(WinRT.Interop.WindowNative.GetWindowHandle(this), Path.Combine(output, "native-window.png"));
+            await NativeUiEvidence.CaptureIconAsync(_native!.WindowIconHandle, 32, Path.Combine(output, "window-icon.png"));
+            await NativeUiEvidence.CaptureIconAsync(_native.TrayIconHandle, 32, Path.Combine(output, "tray-icon.png"));
             if (_native?.TrayReady == true)
             {
                 _native.RequestCaptionClose();
@@ -137,7 +169,8 @@ public sealed partial class MainWindow
                 dpiAwareness = "PerMonitorV2", actualRasterizationScale = RootGrid.XamlRoot.RasterizationScale,
                 highDpiMonitorAvailable = RootGrid.XamlRoot.RasterizationScale > 1.0,
                 trayAvailable = _native?.TrayReady == true,
-                syntheticOnly = true, viewportChecks = _smokeLayouts, steps = _smokeSteps
+                syntheticOnly = true, viewportChecks = _smokeLayouts, iconDpiChecks = _smokeIcons,
+                nativeWindowCapture = "PrintWindow", matchingNativeIconPixels = true, steps = _smokeSteps
             }, new JsonSerializerOptions { WriteIndented = true }));
             FinishSmoke(true, "passed");
         }
