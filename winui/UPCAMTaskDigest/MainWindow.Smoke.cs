@@ -153,6 +153,9 @@ public sealed partial class MainWindow
                     if (route == "run")
                     {
                         var textbox = Find<TextBox>("diagnostic-output")!;
+                        string NormalizeLines(string value) => value.Replace("\r\n", "\n").Replace("\r", "\n");
+                        Assert(NormalizeLines(textbox.Text) == NormalizeLines(_state.Output),
+                            "Diagnostic output preserves all source lines");
                         Assert(textbox.ActualHeight >= 60, $"Diagnostic result has usable space {size.Width}x{size.Height}");
                         AssertInside(textbox, "Diagnostic output");
                         foreach (string id in new[] { "diagnose", "run-manual", "preview-sample", "export-diagnostic" })
