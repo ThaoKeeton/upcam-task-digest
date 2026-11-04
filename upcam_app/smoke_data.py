@@ -42,6 +42,14 @@ class SyntheticClient:
                     "id": "ci-synthetic-event", "action": "create",
                     "boundToObjectId": "ci-synthetic-task", "boundToObjectType": "task",
                     "createTime": timestamp, "content": "",
+                }, {
+                    "id": "ci-synthetic-comment", "action": "comment",
+                    "boundToObjectId": "ci-synthetic-task", "boundToObjectType": "task",
+                    "createTime": timestamp,
+                    "content": json.dumps({
+                        "comment": "CI 虚构回复：验证仍未结束。",
+                        "quote": json.dumps({"_id": "a" * 24, "content": "CI 虚构历史引用：初稿已准备。"}, ensure_ascii=False),
+                    }, ensure_ascii=False),
                 }],
             }],
         }

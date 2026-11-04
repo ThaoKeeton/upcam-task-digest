@@ -14,7 +14,9 @@ internal sealed class DesktopState
     public HashSet<string> CandidateOwners { get; } = new();
     public HashSet<string> CandidateStatuses { get; } = new();
     public Dictionary<string, string> StatusSuggestions { get; } = new();
-    public bool ScopeConfirmed { get; set; }
+    public bool ScopeVerified => Flag("api_contract_verified") &&
+        (Settings["view"] as JsonObject)?["verified"]?.GetValue<bool>() == true &&
+        !string.IsNullOrEmpty((Settings["view"] as JsonObject)?["evidence"]?.GetValue<string>());
     public bool Dirty { get; set; }
     public bool LedgerReady { get; set; }
     public string LedgerMessage { get; set; } = "";
@@ -34,7 +36,7 @@ internal sealed class DesktopState
     {
         Settings[key] = value;
         Dirty = true;
-        if (key is "tenant_id" or "project_id" or "include_archived") ScopeConfirmed = false;
+        if (key is "tenant_id" or "project_id" or "include_archived") InvalidateScope();
     }
     public JsonObject Map(string key) => Settings[key] as JsonObject ?? new JsonObject();
     public JsonObject Filters => (Settings["view"] as JsonObject)?["task_equals"] as JsonObject ?? new JsonObject();
@@ -42,15 +44,42 @@ internal sealed class DesktopState
     {
         if (Settings["view"] is not JsonObject) Settings["view"] = new JsonObject();
         Settings["view"]!["task_equals"] = filters.DeepClone();
-        ScopeConfirmed = false;
+        InvalidateScope();
         Dirty = true;
+    }
+
+    public void SetSecretDraft(string key, string value)
+    {
+        SecretDrafts[key] = value;
+        if (!string.IsNullOrEmpty(value) && (key is "teambition_app_id" or "teambition_app_secret")) InvalidateScope();
+    }
+
+    private void InvalidateScope()
+    {
+        Settings["api_contract_verified"] = false;
+        if (Settings["view"] is JsonObject view)
+        {
+            view["verified"] = false;
+            view["evidence"] = "";
+        }
+        CandidateOwners.Clear();
+        CandidateStatuses.Clear();
+        StatusSuggestions.Clear();
+    }
+
+    public void ApplyProbe(JsonObject probe)
+    {
+        foreach (JsonNode? id in probe["owner_ids"]!.AsArray()) CandidateOwners.Add(id!.GetValue<string>());
+        foreach (JsonNode? id in probe["status_ids"]!.AsArray()) CandidateStatuses.Add(id!.GetValue<string>());
+        foreach (var item in probe["status_name_suggestions"]!.AsObject())
+            StatusSuggestions[item.Key] = item.Value!.GetValue<string>();
     }
 
     public void Apply(JsonObject result)
     {
         if (result["settings"] is JsonObject settings) Settings = (JsonObject)settings.DeepClone();
         if (result["secret_presence"] is JsonObject presence) SecretPresence = (JsonObject)presence.DeepClone();
-        ScopeConfirmed = (Settings["view"] as JsonObject)?["verified"]?.GetValue<bool>() == true;
+        if (result["scope_probe"] is JsonObject probe) ApplyProbe(probe);
         LedgerReady = result["ledger_ready"]?.GetValue<bool>() ?? LedgerReady;
         LedgerMessage = result["ledger_message"]?.GetValue<string>() ?? LedgerMessage;
         DataDirectory = result["data_directory"]?.GetValue<string>() ?? DataDirectory;
@@ -79,7 +108,7 @@ internal sealed class DesktopState
         ["settings"] = Settings.DeepClone(),
         ["secret_values"] = new JsonObject(SecretDrafts.Select(p => KeyValuePair.Create<string, JsonNode?>(p.Key, JsonValue.Create(p.Value)))),
         ["clear_secrets"] = new JsonArray(),
-        ["scope_confirmed"] = ScopeConfirmed
+        ["verification_window"] = WindowPayload()
     };
     public JsonObject WindowPayload(bool scope = false)
     {

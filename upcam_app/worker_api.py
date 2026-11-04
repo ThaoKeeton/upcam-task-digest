@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -153,10 +154,9 @@ class WorkerService:
         settings_input = payload.get("settings")
         secret_values = payload.get("secret_values", {})
         clear_secrets = payload.get("clear_secrets", [])
-        scope_confirmed = payload.get("scope_confirmed", False)
         if not isinstance(settings_input, dict) or not isinstance(secret_values, dict):
             raise WorkerApiError("设置内容无效；未保存任何更改。")
-        if type(scope_confirmed) is not bool or not isinstance(clear_secrets, list):
+        if not isinstance(clear_secrets, list) or any(not isinstance(key, str) for key in clear_secrets):
             raise WorkerApiError("保存选项无效；未保存任何更改。")
         if (set(secret_values) - set(SECRET_FIELDS)
                 or any(not isinstance(value, str) for value in secret_values.values())
@@ -170,17 +170,49 @@ class WorkerService:
         for key in clear_secrets:
             proposed_secrets.pop(key, None)
         proposed_secrets.update(entered)
-        if _auto_enabled_changed(previous_settings, settings_input):
-            settings_input = dict(settings_input)
-            settings_input["auto_send_enabled_since_local"] = (
-                datetime.now().replace(microsecond=0).isoformat(timespec="seconds")
-                if settings_input.get("auto_send_enabled") is True else "")
-
+        credential_identity = _teambition_identity(proposed_secrets)
+        previous_identity = _teambition_identity(previous_secrets)
         proposed = _verified_settings_for_save(
             settings_input, previous_settings, self._setup_probe,
-            scope_confirmed=scope_confirmed,
+            credential_identity=credential_identity, previous_credential_identity=previous_identity,
         )
         clean = validate_settings(proposed)
+        scope_probe = (self._setup_probe.get("discovery") if _probe_matches(
+            self._setup_probe, _scope_signature(clean), credential_identity) else None)
+        scope_status = "项目范围只读核验有效。"
+        if not clean["view"]["verified"]:
+            # Saving the chosen scope requests verification; no client flag or
+            # checkbox can establish a successful server-side read-only proof.
+            scope_status = "请填写项目和 Teambition 凭据后保存，以完成只读核验。"
+            if clean["tenant_id"] and clean["project_id"] and credential_identity:
+                window = payload.get("verification_window")
+                if not isinstance(window, dict):
+                    scope_status = "缺少核验时间范围；请选择含任务动态的区间后重新保存。"
+                else:
+                    try:
+                        proof = self._collect_scope_probe(clean, proposed_secrets, window)
+                        clean = validate_settings(_verified_settings_for_save(
+                            clean, previous_settings, proof,
+                            credential_identity=credential_identity,
+                            previous_credential_identity=previous_identity,
+                        ))
+                        scope_probe = proof["discovery"]
+                        scope_status = "项目范围已自动完成只读核验。"
+                    except ProjectSetupError as exc:
+                        scope_status = str(exc)
+                    except (SettingsError, ValueError, TypeError):
+                        scope_status = "核验时间范围无效；请选择含任务动态的有效区间后重新保存。"
+                    except Exception:
+                        scope_status = "Teambition 只读核验未完成；请检查网络、凭据、项目读取权限和完整翻页后重新保存。"
+            if not clean["view"]["verified"]:
+                clean["auto_send_enabled"] = False
+                clean["auto_send_enabled_since_local"] = ""
+                scope_status += " 自动运行已关闭；未调用 OpenAI，未发送钉钉。"
+
+        if _auto_enabled_changed(previous_settings, clean):
+            clean["auto_send_enabled_since_local"] = (
+                datetime.now().replace(microsecond=0).isoformat(timespec="seconds")
+                if clean["auto_send_enabled"] else "")
         if clean["auto_send_enabled"]:
             self._validate_auto_ready(clean, proposed_secrets)
 
@@ -218,7 +250,8 @@ class WorkerService:
             "secret_presence": _secret_presence(self.secret_store.load()),
             "ledger_ready": ready,
             "ledger_message": message,
-            "status": "本机设置已保存；服务密钥由 Windows 当前用户 DPAPI 加密。",
+            "scope_probe": scope_probe,
+            "status": "本机设置已保存；服务密钥由 Windows 当前用户 DPAPI 加密。 " + scope_status,
         }
 
     def _clear_credentials(self, payload: dict) -> dict:
@@ -226,11 +259,14 @@ class WorkerService:
         settings = self.settings_store.load()
         settings["auto_send_enabled"] = False
         settings["auto_send_enabled_since_local"] = ""
+        settings["api_contract_verified"] = False
+        settings["view"] = dict(settings["view"], verified=False, evidence="")
         self.settings_store.save(settings)
         current = self.secret_store.load()
         retained = {key: value for key, value in current.items()
                     if key in INTERNAL_SECRET_FIELDS}
         self.secret_store.save(retained)
+        self._setup_probe = None
         return {"settings": settings, "secret_presence": _secret_presence(retained),
                 "status": "已清除服务密钥并关闭自动运行；本机防重复身份已保留。"}
 
@@ -302,9 +338,10 @@ class WorkerService:
         view = dict(settings.get("view", {}), task_equals=updated)
         from digest_pipeline import validate_view
         validate_view({"view": view})
-        return {"filters": updated, "scope_confirmed": False}
+        return {"filters": updated}
 
     def _probe_project(self, payload: dict) -> dict:
+        self._setup_probe = None
         settings = self.settings_store.load()
         secrets = self.secret_store.load()
         settings = _merge_probe_inputs(settings, payload)
@@ -313,18 +350,7 @@ class WorkerService:
         if not secrets.get("teambition_app_id") or not secrets.get("teambition_app_secret"):
             raise WorkerApiError("请先保存 Teambition App ID 和 App Secret。")
         try:
-            start_local, end_local = parse_manual_window(payload.get("start", ""), payload.get("end", ""))
-            start, end = start_local.astimezone(SHANGHAI), end_local.astimezone(SHANGHAI)
-            report_day = end.date().isoformat()
-            selection = updated_selection(report_day, start, end)
-            validate_settings(settings)
-            client = self._client(settings, secrets)
-            collection = client.collect(settings["project_id"], day=report_day,
-                                        window=(start, end),
-                                        include_archived=settings["include_archived"])
-            probe = analyze_project_probe(
-                collection, tenant_id=settings["tenant_id"], project_id=settings["project_id"],
-                expected_selection=selection, include_archived=settings["include_archived"])
+            proof = self._collect_scope_probe(settings, secrets, payload)
         except ProjectSetupError as exc:
             self._setup_probe = None
             raise WorkerApiError(str(exc)) from None
@@ -334,23 +360,39 @@ class WorkerService:
         except (SettingsError, ValueError, TypeError):
             self._setup_probe = None
             raise WorkerApiError("项目设置或时间范围无效；没有更改核验状态。") from None
-        scope = _scope_signature(settings)
-        self._setup_probe = {"scope": scope, "selection": selection,
-                             "task_count": probe.task_count,
-                             "activity_count": probe.activity_count,
-                             "tenant_id": probe.tenant_id,
-                             "project_id": probe.project_id}
+        self._setup_probe = proof
         return {
-            "task_count": probe.task_count,
-            "activity_count": probe.activity_count,
-            "owner_ids": list(probe.owner_ids),
-            "status_ids": list(probe.status_ids),
-            "status_name_suggestions": probe.status_name_suggestions,
-            "conflicting_status_ids": list(probe.conflicting_status_ids),
-            "observed_actions": list(probe.observed_actions),
-            "selection": selection,
+            **proof["discovery"],
             "status": "只读样本通过。成员姓名仍需根据项目成员页核对；状态名称建议也需核对。",
         }
+
+    def _collect_scope_probe(self, settings: dict, credentials: dict, window: dict):
+        """Build proof only from a complete response for this scope and identity."""
+        start_local, end_local = parse_manual_window(window.get("start", ""), window.get("end", ""))
+        start, end = start_local.astimezone(SHANGHAI), end_local.astimezone(SHANGHAI)
+        report_day = end.date().isoformat()
+        selection = updated_selection(report_day, start, end)
+        validate_settings(settings)
+        collection = self._client(settings, credentials).collect(
+            settings["project_id"], day=report_day, window=(start, end),
+            include_archived=settings["include_archived"])
+        probe = analyze_project_probe(
+            collection, tenant_id=settings["tenant_id"], project_id=settings["project_id"],
+            expected_selection=selection, include_archived=settings["include_archived"])
+        filters = settings.get("view", {}).get("task_equals", {})
+        if any(record["task"].get(field) is None for record in collection["records"] for field in filters):
+            raise ProjectSetupError("只读样本缺少已配置的筛选字段，无法核验当前项目范围。请核对筛选条件后重新保存。")
+        discovery = {
+            "task_count": probe.task_count, "activity_count": probe.activity_count,
+            "owner_ids": list(probe.owner_ids), "status_ids": list(probe.status_ids),
+            "status_name_suggestions": probe.status_name_suggestions,
+            "conflicting_status_ids": list(probe.conflicting_status_ids),
+            "observed_actions": list(probe.observed_actions), "selection": selection,
+        }
+        return {"scope": _scope_signature(settings), "selection": selection,
+                "credential_identity": _teambition_identity(credentials),
+                "task_count": probe.task_count, "activity_count": probe.activity_count,
+                "discovery": discovery}
 
     def _diagnose(self, payload: dict) -> dict:
         settings = self.settings_store.load()
@@ -542,7 +584,7 @@ class WorkerService:
         if (settings.get("api_contract_verified") is not True
                 or settings.get("view", {}).get("verified") is not True
                 or not settings.get("view", {}).get("evidence")):
-            raise WorkerApiError("启用自动运行前，请完成项目范围只读验证并确认范围。")
+            raise WorkerApiError("启用自动运行前，请保存项目配置并通过自动只读核验。")
         required = (*SECRET_FIELDS, *INTERNAL_SECRET_FIELDS)
         if any(not credentials.get(key) for key in required):
             raise WorkerApiError("启用自动运行前，请保存 Teambition、钉钉、OpenAI 凭据和防重复身份。")
@@ -719,7 +761,8 @@ def _scope_signature(settings: dict) -> dict:
 
 
 def _verified_settings_for_save(settings_input: dict, old: dict, probe: dict | None,
-                                *, scope_confirmed: bool) -> dict:
+                                *, credential_identity: str | None,
+                                previous_credential_identity: str | None) -> dict:
     proposed = dict(settings_input)
     new_view = proposed.get("view", {})
     if not isinstance(new_view, dict):
@@ -729,30 +772,41 @@ def _verified_settings_for_save(settings_input: dict, old: dict, probe: dict | N
         raise WorkerApiError("项目筛选条件无效；未保存任何更改。")
     scope = _scope_signature(proposed)
     old_scope = _scope_signature(old)
-    identity_unchanged = (scope["tenant_id"] == old_scope["tenant_id"]
-                          and scope["project_id"] == old_scope["project_id"])
     scope_unchanged = scope == old_scope
-    probe_matches = bool(probe and probe.get("scope") == scope)
+    credentials_unchanged = bool(credential_identity and credential_identity == previous_credential_identity)
+    probe_matches = _probe_matches(probe, scope, credential_identity)
     old_view = old.get("view", {})
     old_view_verified = (isinstance(old_view, dict) and old_view.get("verified") is True
                          and bool(old_view.get("evidence")))
-    prior_api_verified = old.get("api_contract_verified") is True and identity_unchanged
-    prior_view_verified = old_view_verified and scope_unchanged
-    view_verified = bool(scope_confirmed and (probe_matches or prior_view_verified))
+    prior_view_verified = (old.get("api_contract_verified") is True and old_view_verified
+                           and scope_unchanged and credentials_unchanged)
+    view_verified = bool(probe_matches or prior_view_verified)
     evidence = old_view.get("evidence", "") if prior_view_verified else ""
     if view_verified and probe_matches:
         signature = json.dumps(scope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        import hashlib
         scope_hash = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:16]
-        evidence = ("desktop-readonly-probe/v1; "
+        evidence = ("desktop-readonly-probe/v2; "
                     f"tasks={probe['task_count']}; activities={probe['activity_count']}; "
                     f"selection={probe['selection']['start']}/{probe['selection']['end_exclusive']}; "
-                    f"scope_sha256={scope_hash}; operator_confirmed=true")
-    proposed["api_contract_verified"] = bool(prior_api_verified or probe_matches)
+                    f"scope_sha256={scope_hash}; selection_saved=true")
+    proposed["api_contract_verified"] = view_verified
     proposed["view"] = {"verified": view_verified,
                          "evidence": evidence if view_verified else "",
                          "task_equals": dict(filters)}
     return proposed
+
+
+def _teambition_identity(credentials: dict) -> str | None:
+    """Compare authentication in memory without returning credential material."""
+    values = [credentials.get("teambition_app_id"), credentials.get("teambition_app_secret")]
+    if not all(isinstance(value, str) and value for value in values):
+        return None
+    return hashlib.sha256(json.dumps(values, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _probe_matches(probe: dict | None, scope: dict, credential_identity: str | None) -> bool:
+    return bool(credential_identity and probe and probe.get("scope") == scope
+                and probe.get("credential_identity") == credential_identity)
 
 
 def _merge_probe_inputs(settings: dict, payload: dict) -> dict:

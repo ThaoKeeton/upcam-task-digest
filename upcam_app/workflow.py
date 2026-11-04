@@ -51,7 +51,7 @@ class DigestWorkflow:
         view = validate_view(config)
         if (config.get("api_contract_verified") is not True or view.get("verified") is not True
                 or not view.get("evidence")):
-            raise WorkflowBlocked("请先在“项目映射与范围”完成 Teambition 只读字段验证、确认项目范围并保存。")
+            raise WorkflowBlocked("请先保存项目范围配置并完成自动只读核验；核验未通过时不会发送。可在项目范围页选择有动态的时间区间后重新保存。")
 
         required = tuple(key for key in SECRET_FIELDS if key != "openai_api_key") + INTERNAL_SECRET_FIELDS
         missing = [name for name in required if not self.secrets.get(name)]

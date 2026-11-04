@@ -8,6 +8,7 @@ from teambition_readonly import CollectionError, identifier, validate_binding
 
 
 MAX_CONTENT = 65536
+QUOTE_ROLE = 'quoted-context-not-author-opinion'
 OBSERVED_ACTIONS = frozenset({'create', 'comment', 'involve.add', 'update.taskflowstatus',
                               'standard', 'update_content', 'update_executor'})
 
@@ -32,6 +33,51 @@ def _unique_object(pairs):
 
 def _invalid_constant(value):
     raise ValueError('Nonstandard JSON constant')
+
+
+def quoted_context(value):
+    """Decode only the verified single-layer ID/content envelope, or plain text.
+
+    The reference is evidence, never a task event or the current author's opinion.
+    No HTML cleanup, recursive decoding, field dropping or external lookup occurs.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        if len(value.encode('utf-8')) > MAX_CONTENT:
+            return None
+    except UnicodeError:
+        return None
+    candidate = None
+    if value.lstrip().startswith(('{', '[', '"')):
+        try:
+            candidate = json.loads(value, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
+        except (ValueError, TypeError, RecursionError):
+            # A serialized-looking container/string cannot fall back to text.
+            return None
+    if isinstance(candidate, dict):
+        if set(candidate) != {'_id', 'content'}:
+            return None
+        reference, text = candidate['_id'], candidate['content']
+        try:
+            identifier(reference)
+        except CollectionError:
+            return None
+        if len(reference) != 24 or not isinstance(text, str) or not text.strip():
+            return None
+        try:
+            text.encode('utf-8')
+        except UnicodeError:
+            return None
+        if unsupported_markup(text) or unsafe_controls(text):
+            return None
+        return {'format': 'id-content-json', 'reference_id': reference,
+                'text': text, 'role': QUOTE_ROLE}
+    if isinstance(candidate, (list, str)):
+        return None
+    if unsupported_markup(value) or unsafe_controls(value):
+        return None
+    return {'format': 'plain-text', 'reference_id': None, 'text': value, 'role': QUOTE_ROLE}
 
 
 def status_transition(content, config):
@@ -93,11 +139,19 @@ def comment_input(raw, event_id, when):
             reasons.append('存在尚未识别的评论字段；完整对象保留')
     quotes = {source_name: source['quote'] for source_name, source in
               (('content', payload or {}), ('event', extra)) if 'quote' in source}
-    for quote in quotes.values():
+    quote_contexts = {}
+    for source_name, quote in quotes.items():
         if not isinstance(quote, str):
             reasons.append('quote 不是字符串；仅保留为引用证据，待复核')
-        elif unsupported_markup(quote) or unsafe_controls(quote):
-            reasons.append('quote 包含未支持标记或控制字符；不作为作者新意见')
+        else:
+            parsed_quote = quoted_context(quote)
+            if parsed_quote is None:
+                reasons.append('quote 不是已支持的纯文本或 _id/content 单层引用；不清洗或猜测内容')
+            else:
+                quote_contexts[source_name] = parsed_quote
+    structured = [item for item in quote_contexts.values() if item['format'] == 'id-content-json']
+    if len(structured) > 1 and any(item != structured[0] for item in structured[1:]):
+        reasons.append('评论内部与外层引用身份或内容冲突')
     for source in (payload or {}, extra):
         for key in ('attachments', 'dingFiles', 'files', 'mentions'):
             if key in source and not isinstance(source[key], (list, dict) if key == 'mentions' else list):
@@ -130,7 +184,7 @@ def comment_input(raw, event_id, when):
     return {'event_id': event_id, 'create_time': when.isoformat() if when else None,
             'raw_content': content, 'parsed_payload': payload, 'body': body,
             'normalized_body': normalized_body,
-            'quote_evidence': quotes, 'quote_role': 'quoted-context-not-author-opinion',
+            'quote_evidence': quotes, 'quote_role': QUOTE_ROLE, 'quote_contexts': quote_contexts,
             'text': normalized, 'render_mode': mode,
             'is_only_notify_mentions': payload.get('isOnlyNotifyMentions') if payload is not None else None,
             'extra_evidence': extra, 'payload_evidence': payload_evidence,
