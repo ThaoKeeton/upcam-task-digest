@@ -86,11 +86,20 @@ class ProjectSetupTests(unittest.TestCase):
         self.assertNotIn("demo-done", probe.status_name_suggestions)
         self.assertIn("demo-done", probe.conflicting_status_ids)
 
-    def test_bulk_owner_mapping_import_is_atomic_and_requires_unique_id_name_rows(self):
+    def test_bulk_owner_mapping_import_accepts_json_objects_and_tab_rows(self):
+        self.assertEqual(
+            parse_owner_mapping_tsv('{"demo-person":"虚构成员","demo-person-2":"虚构乙"}'),
+            {"demo-person": "虚构成员", "demo-person-2": "虚构乙"},
+        )
         self.assertEqual(parse_owner_mapping_tsv("demo-person\t虚构成员\n"),
                          {"demo-person": "虚构成员"})
+
+    def test_bulk_owner_mapping_import_is_atomic_and_rejects_malformed_or_duplicate_rows(self):
         for source in ("demo-person,虚构成员", "demo-person\t\n",
-                       "demo-person\t虚构成员\ndemo-person\t另一个姓名"):
+                       "demo-person\t虚构成员\ndemo-person\t另一个姓名",
+                       '{"demo-person":"虚构成员","demo-person":"另一个姓名"}',
+                       '{"demo-person":"虚构成员","demo-person-2":"  "}',
+                       '{"demo-person":"虚构成员",}'):
             with self.subTest(source=source), self.assertRaises(ProjectSetupError):
                 parse_owner_mapping_tsv(source)
 
