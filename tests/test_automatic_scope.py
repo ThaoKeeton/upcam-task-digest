@@ -216,6 +216,9 @@ class AutomaticScopeTests(unittest.TestCase):
         self.assertEqual(self.readonly.calls, [])
 
     def test_missing_configured_filter_field_cannot_receive_scope_verification(self):
+        # The shared UI sample now includes a position event, so make the
+        # missing-field failure explicit instead of relying on that fixture.
+        self.readonly.change_response = lambda response: response["records"][0]["task"].pop("stageId", None)
         proposed = self.service.settings_store.load()
         proposed["view"]["task_equals"] = {"stageId": "synthetic-stage"}
 

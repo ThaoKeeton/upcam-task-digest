@@ -11,7 +11,8 @@ import uuid
 
 from activity_adapter import (
     MAX_CONTENT, OBSERVED_ACTIONS, _unique_object, bounded_object, comment_input,
-    executor_change, standard_commit_candidate, unsafe_controls,
+    executor_change, standard_commit_candidate, unsafe_controls, stage_movement,
+    standard_association_notification,
 )
 from report_contract import report_window, updated_selection
 from teambition_readonly import CollectionError, identifier, validate_binding
@@ -249,6 +250,7 @@ def _executor_shape_check(activity, owner_names):
 
 
 def _commit_shape_check(activity):
+    notice = standard_association_notification(activity)
     candidate = standard_commit_candidate(activity)
     data = bounded_object(activity.get("content"))
     reasons = ["title_pattern_does_not_prove_source"] if candidate is not None else []
@@ -272,8 +274,11 @@ def _commit_shape_check(activity):
         for source_name, source in (("content", data or {}), ("event", activity))
     }
     return {"candidate_recognized": candidate is not None,
-            "automatic_review_required": True, "rejection_reasons": reasons,
+            "display_notice_supported": notice is not None,
+            "association_kind": notice['association_kind'] if notice else None,
+            "automatic_review_required": notice is None, "rejection_reasons": [] if notice else reasons,
             "source_field_shapes": source_shapes, "source_verified": False,
+            "object_verified": False,
             "field_presence_is_proof": False}
 
 
@@ -403,6 +408,9 @@ def _activity_shape(activity, task_id, owner_names, status_names, bounds):
         shaped["commit_check"] = _commit_shape_check(activity)
     elif safe_action == "update_executor":
         shaped["executor_check"] = _executor_shape_check(activity, owner_names)
+    elif safe_action == "move.cross.from.stage.to.stage":
+        shaped["movement_check"] = {"adapter_supported": stage_movement(activity) is not None,
+                                     "completion_evidence": False}
     return shaped
 
 

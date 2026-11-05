@@ -62,15 +62,17 @@ historical_event_coverage=false，并进入报告 scope。生成日报时重新�
 以及通过既有只读测试脱敏核验的以下内容（demo-* ID 与人员均为虚构）：
 
 - `activity_fields`：固定为 time=createTime、action=action；不允许回退任务 created 或任意覆盖字段。
-- 动作采用明确适配表：create→新建、comment→评论复核、involve.add/update_content→其他变更；update_executor 需通过结构校验。standard 仅识别受限标题候选，其余保持未知待复核，未来动作同样待复核。
+- 动作采用明确适配表：create→新建、comment→评论复核、involve.add/update_content→其他变更；update_executor 需通过结构校验。move.cross.from.stage.to.stage 仅按下述已核验结构记录位置变更；standard 区分下述展示通知与旧的宽泛标题候选。未知动作或未支持结构继续阻断。
 - `update.taskflowstatus`：安全解析 content JSON 字符串，要求 tfsId、oldTfsId、taskflowstatus、oldTaskflowstatus、isDone 齐全且类型、ID/名称映射一致；重复 JSON 键、非标准数值、缺失/错误字段都待复核。当前只支持已核验的字符串状态名，其他结构不猜测。
 - 事件 isDone 只验证结构类型并以 event_is_done 保留，**不假设它表达目标状态，也不要求与解决状态一致**。解决与否由事件目标状态 ID 及已核验映射判断。
-- 同一任务当日状态事件按时间排序，前一目标 ID 必须衔接后一旧状态 ID；任意同时间多次状态变化、事件链断裂、最后目标与当前 tfsId 不符或当前完成标记冲突均待复核。当前状态只用于校验，不能凭它生成昨日解决事件。oldTfsId 与 tfsId 相同的事件标记待复核，即使目标名称为已解决，也不能据此认定进入已解决。
+- 同一任务窗口内状态事件按时间排序，前一目标 ID 必须衔接后一旧状态 ID；任意同时间多次状态变化、事件链断裂、最后目标与当前 tfsId 不符或当前完成标记不是布尔值均阻断。配置的“已解决”是分类集合，不必包含所有 API 已完成状态：目标不在该集合但当前 isDone=true 时仍属其他状态变化，不误判成冲突，也不分类为已解决。目标在集合内时，当前 isDone 必须为 true；否则阻断。当前状态只用于校验，不能凭它生成解决事件。oldTfsId 与 tfsId 相同的事件继续阻断，即使名称为已解决，也不能据此认定进入新状态。
+- move.cross.from.stage.to.stage：content 必须是有界、无重复键、仅有 from/to 的 JSON；两端仅含 tasklist（_id/title）与 stage（_id/name），ID 为有效 24 字符 ID，名称为非空、无标记和控制字符的单行 UTF-8。两端位置 ID 组合必须变化，同 ID 的名称不得冲突。按时间核对位置链、同刻歧义及末次目标与当前 tasklistId/stageId；任一冲突或未支持结构均阻断。仅记录“任务位置变更 N 条”，不据工作池/完成池等名称或当前完成标记推断解决，位置原文不交给模型。
 - update_executor 的 content 按有界、无重复键的 JSON 对象解析，要求 _executorId/_oldExecutorId；姓名仅从 owner_names 的 ID 映射获得，缺失不猜测。content.payload 和事件外层 payload 分开保留；fromAutomation 必须为布尔值，双来源冲突则待复核。该标记只描述来源，不能推断操作人身份。执行人事件按时间排序后检查旧/新 ID 链连续性、任何同一时刻的多条变更、末次目标与当前 executorId 一致性；任一冲突均阻断发送，不能用事件 ID 排序消除同刻歧义。
 - standard 只对 title 精确为“关联了提交”，或以该短语加冒号/空白分隔后续文本，并且有 customCreator.name 的 JSON 识别 commit-link-title 候选。该受限前缀后的内容允许 LF/CRLF 多行，原始 title 不归一化、不截断；额外控制字符仍拒绝识别。否定句、前置描述、无分隔后缀及其他标题不匹配；未匹配不推断为提交。候选仍需复核，customCreator.name 仅是来源原文，不作为已核验成员或实际提交的证明。
+- v0.3.6 新增独立的 association-display-notice：仅接受精确 title/customCreator 对象、customCreator 仅含 name，标题完整符合“关联了提交 「非空内容」”或“关联了合并请求 「非空内容」”。标题可在括号内容内含 LF/CRLF，不接受其他控制字符、标记或额外/冲突来源载荷。按现有动态 ID 去重后统计通知条数，不按标题、创建者或假定提交 ID 去重。日报只写“Teambition 显示关联提交/合并请求 N 条；代码来源、实际提交及合并结果未核实”；source_verified/object_verified 为 false，原文仅保留本机，不推断平台、实际提交数、作者、合并或解决，不交给 OpenAI。未符合该严格展示结构的旧候选仍阻断，没有批量放开 standard。
 - 仅附件评论只适配已核验的空字符串正文、空 attachments/dingFiles、无重复 24 字符文件 ID 列表、text/markdown 模式与布尔 isOnlyNotifyMentions；记录文件数与“未读取文件内容”，不下载、不推断内容或进度，不调用 OpenAI。它仍是评论动态，不能输出“无动态”。内外层冲突、未知附件/图片/数据或不明空正文仍阻断。
 - hrefPreview 仅适配精确的不可用预览空信息结构，URL 必须是无凭据 HTTP(S) 并与正文完整 URL 标记匹配；元数据完整保留本机，预览错误文本不进入模型。非空预览信息、额外字段、未绑定链接或来源冲突仍阻断，不据此推断链接内容。
-- audit.status_transitions 保留状态 ID、原始事件布尔值及事件 ID；audit.parsed_changes 保留执行人/来源/标题候选结构，原始 activity_evidence 始终保留。audit.executor_conflict/status_noop 明确记录执行人冲突及状态 ID 未变化的复核原因。
+- audit.status_transitions 保留状态 ID、原始事件布尔值及事件 ID；audit.parsed_changes 保留执行人、位置与通知/标题候选结构，原始 activity_evidence 始终保留。audit.executor_conflict/status_noop/position_conflict 明确记录对应冲突；position_changes 保留位置链证据。审计业务内容只存本机受控结果，不提交仓库、测试夹具或公开日志。
 - 每条动态必须具有匹配的 boundToObjectId 和 boundToObjectType=task；缺失或跨任务/类型冲突即失败。若同时存在 taskId，也必须一致。
 - `resolved_status_ids`、`status_names`、`owner_names`：已核验 ID 映射；无法识别则待复核。
 - `view.task_equals`：已核验的稳定视图字段等值筛选；目前只接受 executorId、tasklistId、stageId、tfsId、scenariofieldconfigId、visible、parentTaskId 的字符串等值。

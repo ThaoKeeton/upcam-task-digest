@@ -11,7 +11,8 @@ from render_digest import render_digest, text
 from report_contract import SHANGHAI, canonical_window, report_window, strict_day, updated_selection, updated_in_window
 from teambition_readonly import Client, CollectionError, identifier, record_id
 from activity_adapter import (comment_input, parse_activity, validate_binding, status_transition,
-                              executor_change, standard_commit_candidate)
+                              executor_change, standard_commit_candidate, stage_movement,
+                              standard_association_notification)
 from runtime_mappings import load_runtime_mappings, parse_config_json, validate_mappings
 
 
@@ -172,7 +173,9 @@ def build_digest(collection, config, day, window=None):
             latest = transitions[-1]
             status_conflict = status_conflict or task.get('tfsId') != latest['target_id']
             status_conflict = status_conflict or type(task.get('isDone')) is not bool
-            status_conflict = status_conflict or task.get('isDone') != latest['resolved']
+            # The configured resolved group is a subset of technical completed
+            # states. A different completed state does not become "resolved".
+            status_conflict = status_conflict or (latest['resolved'] and task.get('isDone') is not True)
         parsed_changes = []
         for event in events:
             raw = ids[event[1]]
@@ -180,7 +183,9 @@ def build_digest(collection, config, day, window=None):
             if raw.get('action') == 'update_executor':
                 change = executor_change(raw, config)
             elif raw.get('action') == 'standard':
-                change = standard_commit_candidate(raw)
+                change = standard_association_notification(raw) or standard_commit_candidate(raw)
+            elif raw.get('action') == 'move.cross.from.stage.to.stage':
+                change = stage_movement(raw)
             if change is not None:
                 parsed_changes.append(dict(change, event_id=event[1], action=raw['action']))
         executor_changes = [c for c in parsed_changes if c['action'] == 'update_executor']
@@ -190,7 +195,16 @@ def build_digest(collection, config, day, window=None):
                                                     for previous, current in zip(executor_changes, executor_changes[1:]))
         if executor_changes:
             executor_conflict = executor_conflict or executor_changes[-1]['target_id'] != task.get('executorId')
-        review = (review or ambiguous_status or status_conflict or status_noop or executor_conflict
+        position_changes = [c for c in parsed_changes if c['action'] == 'move.cross.from.stage.to.stage']
+        def position_key(value):
+            return value['tasklist_id'], value['stage_id']
+        position_conflict = (len({event_times[c['event_id']] for c in position_changes}) != len(position_changes)
+                             or any(position_key(previous['target']) != position_key(current['previous'])
+                                    for previous, current in zip(position_changes, position_changes[1:])))
+        if position_changes:
+            position_conflict = position_conflict or position_key(position_changes[-1]['target']) != (
+                task.get('tasklistId'), task.get('stageId'))
+        review = (review or ambiguous_status or status_conflict or status_noop or executor_conflict or position_conflict
                   or any(c['needs_review'] for c in parsed_changes))
         descriptions = []
         if no_window_evidence:
@@ -211,6 +225,17 @@ def build_digest(collection, config, day, window=None):
             descriptions.append("状态 ID 未变化，不能认定进入新状态，待复核")
         if executor_conflict:
             descriptions.append("执行人事件序列、同刻变更或当前执行人不一致，待复核")
+        if position_conflict:
+            descriptions.append("位置变更事件序列、同刻变更或当前任务位置不一致，待复核")
+        if position_changes:
+            descriptions.append(f"任务位置变更 {len(position_changes)} 条（不作为完成依据）")
+        notice_counts = Counter(c['association_kind'] for c in parsed_changes
+                                if c.get('pattern') == 'association-display-notice')
+        for kind, label in (('commit', '提交'), ('merge-request', '合并请求')):
+            if notice_counts[kind]:
+                descriptions.append(f"Teambition 显示关联{label} {notice_counts[kind]} 条")
+        if notice_counts:
+            descriptions.append("代码来源、实际提交及合并结果未核实")
         for change in parsed_changes:
             if change['action'] == 'update_executor':
                 if change['needs_review']:
@@ -219,7 +244,7 @@ def build_digest(collection, config, day, window=None):
                     descriptions.append(f"执行人变更：{change['previous_name']} → {change['target_name']}")
                 if change['from_automation'] is True:
                     descriptions.append("来源标记：自动化")
-            else:
+            elif change['action'] == 'standard' and change.get('pattern') != 'association-display-notice':
                 descriptions.append("检测到关联提交标题模式，具体提交及来源待复核")
         if comments:
             comments.sort(key=lambda c: (c['create_time'] or '', c['event_id']))
@@ -249,7 +274,7 @@ def build_digest(collection, config, day, window=None):
             review = True
             descriptions.append("标题、负责人或当前状态待复核")
         hard_review = (unknown_time or bool(counts["unknown"]) or no_window_evidence
-                       or ambiguous_status or status_conflict or status_noop or executor_conflict
+                       or ambiguous_status or status_conflict or status_noop or executor_conflict or position_conflict
                        or any(c['needs_review'] for c in parsed_changes)
                        or any(c['extraction_needs_review'] for c in comments)
                        or "待复核" in (title, owner, status))
@@ -270,6 +295,7 @@ def build_digest(collection, config, day, window=None):
         audit.append({"task_id": task_id, "event_ids": [e[1] for e in events], "needs_review": review,
                       "hard_review": bool(hard_review),
                       "executor_conflict": executor_conflict, "status_noop": status_noop,
+                      "position_changes": position_changes, "position_conflict": position_conflict,
                       "status_transitions": transitions, "parsed_changes": parsed_changes,
                       "undated_event_ids": sorted(undated_ids),
                       "activity_evidence": [ids[e[1]] for e in events] + [ids[k] for k in sorted(undated_ids)]})

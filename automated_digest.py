@@ -11,7 +11,7 @@ from pathlib import Path
 
 from activity_adapter import (
     OBSERVED_ACTIONS, bounded_object, comment_input, executor_change, parse_activity,
-    standard_commit_candidate, status_transition,
+    standard_commit_candidate, status_transition, stage_movement, standard_association_notification,
 )
 from digest_pipeline import build_digest, timestamp
 from openai_summarizer import OpenAIResponsesClient, SummaryError
@@ -185,7 +185,7 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
     status_name_mismatches = set()
     bad_executor_events, bad_commit_events, unrecognized_standard_events = set(), set(), set()
     status_conflicts, status_conflict_details = set(), {}
-    executor_conflicts, no_window_events = set(), set()
+    executor_conflicts, no_window_events, position_conflicts, malformed_moves = set(), set(), set(), set()
     generic_tasks = set()
     owner_names = config.get("owner_names", {})
     status_names = config.get("status_names", {})
@@ -227,6 +227,8 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
             status_conflict_details.setdefault(task_id, set()).add("事件中的旧状态 ID 与目标状态 ID 相同")
         if audit.get("executor_conflict"):
             executor_conflicts.add(task_id)
+        if audit.get("position_conflict"):
+            position_conflicts.add(task_id)
 
         transitions = audit.get("status_transitions", [])
         if transitions:
@@ -242,10 +244,10 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
             if type(task.get("isDone")) is not bool:
                 chain_bad = True
                 status_conflict_details.setdefault(task_id, set()).add("当前任务 isDone 缺失或不是布尔值")
-            elif task.get("isDone") != last.get("resolved"):
+            elif last.get("resolved") and task.get("isDone") is not True:
                 chain_bad = True
                 status_conflict_details.setdefault(task_id, set()).add(
-                    "当前任务完成标记与已配置的“已解决”状态映射不一致")
+                    "当前任务未完成，不能依据已配置的“已解决”状态映射确认解决")
             event_times = {}
             for activity in evidence:
                 try:
@@ -323,7 +325,12 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
                 change = executor_change(activity, config)
                 if change is None or change.get("automation_conflict"):
                     bad_executor_events.add(task_id)
+            elif action == "move.cross.from.stage.to.stage":
+                if stage_movement(activity) is None:
+                    malformed_moves.add(task_id)
             elif action == "standard":
+                if standard_association_notification(activity) is not None:
+                    continue  # An observed display notice never proves code provenance.
                 candidate = standard_commit_candidate(activity)
                 if candidate is None:
                     unrecognized_standard_events.add(task_id)
@@ -332,7 +339,8 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
                     bad_commit_events.add(task_id)
 
         for change in audit.get("parsed_changes", []):
-            if change.get("action") == "standard":
+            if (change.get("action") == "standard"
+                    and change.get("pattern") != "association-display-notice"):
                 bad_commit_events.add(task_id)
             elif (change.get("action") == "update_executor" and change.get("needs_review")
                   and change.get("automation_conflict")):
@@ -365,6 +373,12 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
     if status_name_mismatches:
         reasons.append("状态事件中的名称与已保存映射不一致：" + _display_ids(status_name_mismatches) +
                        "。请在“成员与状态映射”页核对动态返回的旧/新状态名称与对应 ID；诊断不会输出状态名称值。")
+    if malformed_moves:
+        reasons.append("位置变更动态不符合已核验的 from/to 分组与阶段结构：" + _display_ids(malformed_moves) +
+                       "。请核对字段、ID 和名称类型；不按目标分组名称判断完成。")
+    if position_conflicts:
+        reasons.append("位置变更事件序列与当前任务分组/阶段不一致或存在同刻冲突：" +
+                       _display_ids(position_conflicts) + "。请重新只读采集并核对任务位置历史。")
     if bad_commit_events:
         reasons.append("关联提交动态仅有标题模式，无法证明提交来源：" + _display_ids(bad_commit_events) +
                        "。在仓库规则补充可验证的提交证据前，该动态会继续阻断发送。")
