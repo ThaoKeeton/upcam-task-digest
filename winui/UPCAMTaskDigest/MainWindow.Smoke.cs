@@ -136,6 +136,36 @@ public sealed partial class MainWindow
             Invoke(Find<Button>("diagnose")!);
             await WaitForAsync(() => !_busy);
             Assert(_state.ExportAvailable && _state.Output.Contains("通过"), "Read-only diagnostic button and safe export availability");
+            Assert(_state.Output.Contains("窗口内未支持动作：0 条") && _state.Output.Contains("时间归属无法判断的未支持动作：0 条"),
+                "Native diagnostics distinguish unsupported actions from unknown time membership");
+            string previousDiagnostic = _state.DiagnosticText;
+            Invoke(Find<Button>("export-detailed-diagnostic")!);
+            await WaitForAsync(() => Find<ContentDialog>("detailed-export-consent") is not null);
+            var detailedDialog = Find<ContentDialog>("detailed-export-consent")!;
+            Assert(detailedDialog.DefaultButton == ContentDialogButton.Close &&
+                detailedDialog.Title.ToString()!.Contains("项目内容"), "Native detailed export discloses project content and defaults to cancel");
+            detailedDialog.Hide();
+            await WaitForAsync(() => !_busy);
+            Assert(_state.DiagnosticText == previousDiagnostic, "Canceling detailed export preserves the safe diagnostic");
+            string privateTemporary = Path.Combine(Path.GetTempPath(), "upcam-detailed-ci-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(privateTemporary);
+            try
+            {
+                string detailPath = Path.Combine(privateTemporary, "synthetic-detailed.json");
+                var detailPayload = _state.WindowPayload();
+                detailPayload["path"] = detailPath;
+                detailPayload["include_project_content"] = true;
+                var detailResult = await Worker.SendAsync("export_detailed_diagnostic_to_file", detailPayload);
+                string detailText = File.ReadAllText(detailPath);
+                Assert(detailResult["detailed_export"]?["saved"]?.GetValue<bool>() == true &&
+                    detailText.Contains("CI 虚构") && !detailText.Contains("synthetic-app-secret") &&
+                    !detailText.Contains("synthetic-key-cannot-call-openai") && !detailText.Contains("access_token=synthetic-only"),
+                    "Packaged worker exports synthetic project evidence without configured credentials");
+                Assert(detailResult["diagnostic_summary"]?["unknown_events_in_report_window"]?.GetValue<int>() == 0 &&
+                    JsonNode.Parse(detailText)?["sendable"]?.GetValue<bool>() == false,
+                    "Detailed snapshot remains diagnostic-only with explicit counters");
+            }
+            finally { Directory.Delete(privateTemporary, true); }
             var clipboardOptions = DiagnosticClipboardOptions();
             Assert(!clipboardOptions.IsAllowedInHistory && !clipboardOptions.IsRoamable,
                 "Diagnostic clipboard options disable history and device roaming");
@@ -218,7 +248,7 @@ public sealed partial class MainWindow
                             "Diagnostic output preserves all source lines");
                         Assert(textbox.ActualHeight >= 60, $"Diagnostic result has usable space {size.Width}x{size.Height}");
                         AssertInside(textbox, "Diagnostic output");
-                        foreach (string id in new[] { "diagnose", "run-manual", "preview-sample", "export-diagnostic", "copy-diagnostic" })
+                        foreach (string id in new[] { "diagnose", "run-manual", "preview-sample", "export-diagnostic", "copy-diagnostic", "export-detailed-diagnostic" })
                             AssertInside(Find<Button>(id)!, "Run toolbar " + id);
                     }
                 }

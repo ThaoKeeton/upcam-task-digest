@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import sys
 import threading
+from urllib.parse import parse_qsl, urlsplit
 
 from automated_digest import collection_validation_message, diagnose_automatic_source
 from delivery_guard import DeliveryBlocked, DeliveryGuard, initialize_ledger
@@ -24,6 +25,7 @@ from .config import (
     scheduled_window, user_data_dir, validate_settings,
 )
 from .diagnostic_export import safe_structure_export
+from .diagnostic_files import write_private_diagnostic
 from . import APP_VERSION, RULESET_REVISION
 from .history import HistoryError, HistoryStore
 from .openai_models import (
@@ -101,6 +103,7 @@ class WorkerService:
             "export_diagnostic": self._export_diagnostic,
             "diagnostic_status": self._diagnostic_status,
             "export_diagnostic_to_file": self._export_diagnostic_to_file,
+            "export_detailed_diagnostic_to_file": self._export_detailed_diagnostic_to_file,
             "preview_sample": self._preview_sample,
             "test_teambition": self._test_teambition,
             "validate_dingtalk_config": self._validate_dingtalk_config,
@@ -396,7 +399,8 @@ class WorkerService:
                 "task_count": probe.task_count, "activity_count": probe.activity_count,
                 "discovery": discovery}
 
-    def _diagnose(self, payload: dict) -> dict:
+    def _diagnose(self, payload: dict, *, detailed_target: Path | None = None,
+                  detailed_parent_identity: tuple | None = None) -> dict:
         # Any attempted refresh supersedes the previous result, including a
         # failure before collection (for example, cleared credentials).
         self._last_diagnostic_shape = None
@@ -418,6 +422,7 @@ class WorkerService:
             diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
             self._last_diagnostic_shape = safe_structure_export(collection, config, day, (start, end))
             self._last_diagnostic_context = _diagnostic_context(settings, secrets, payload)
+            latest_credentials = self.secret_store.load()
         except (CollectionError, OSError) as exc:
             self._last_diagnostic_shape = None
             return {"ok": False, "message": collection_validation_message(exc),
@@ -436,10 +441,90 @@ class WorkerService:
         metadata = self._last_diagnostic_shape["diagnostic"]
         created = datetime.fromisoformat(metadata["created_at_utc"]).strftime("%Y%m%dT%H%M%SZ")
         file_stem = f"teambition-diagnostic-v{APP_VERSION}-{created}-{metadata['id'][:8]}"
-        return {**diagnostic, "export_available": bool(self._last_diagnostic_shape),
+        catalog = self._last_diagnostic_shape.get("protocol_catalog", {})
+        result = {**diagnostic, "export_available": bool(self._last_diagnostic_shape),
                 "diagnostic_file_stem": file_stem,
                 "diagnostic": metadata,
+                "diagnostic_summary": {
+                    "unknown_events_in_report_window": catalog.get("unknown_events_considered", 0),
+                    "unknown_events_with_unknown_time": catalog.get("unknown_window_events", 0),
+                    "catalog_complete": catalog.get("complete") is True,
+                },
                 "safety": "未调用 OpenAI；未发送钉钉。"}
+        result["message"] = _redact_known_diagnostic_credentials(
+            result.get("message", ""), secrets, latest_credentials)
+        if detailed_target is not None:
+            result["detailed_export"] = {"saved": False}
+            try:
+                # A detailed snapshot is built only for this explicit request;
+                # the original project records never enter the protocol cache.
+                from .detailed_diagnostic import build_detailed_snapshot, DetailedDiagnosticError
+                current_credentials = latest_credentials
+                if (_credentials_fingerprint(current_credentials) != _credentials_fingerprint(secrets)
+                        or _diagnostic_context(self.settings_store.load(), current_credentials, payload)
+                        != self._last_diagnostic_context):
+                    raise WorkerApiError("设置或凭据在采集期间已改变，请重新执行详细诊断；未写入项目内容。")
+                snapshot = build_detailed_snapshot(collection, config, metadata, credentials=secrets)
+                content = (json.dumps(snapshot, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+                final_credentials = self.secret_store.load()
+                if (_credentials_fingerprint(final_credentials) != _credentials_fingerprint(secrets)
+                        or _diagnostic_context(self.settings_store.load(), final_credentials, payload)
+                        != self._last_diagnostic_context):
+                    raise WorkerApiError("设置或凭据在准备文件期间已改变，请重新执行详细诊断；未写入项目内容。")
+                checked_target = self._detailed_export_target(str(detailed_target))
+                parent_stat = checked_target.parent.stat()
+                if (checked_target != detailed_target or detailed_parent_identity != (parent_stat.st_dev, parent_stat.st_ino)):
+                    raise WorkerApiError("保存目录在诊断期间已改变；没有写入详细文件，请重新选择位置。")
+                write_private_diagnostic(detailed_target, content,
+                                         expected_parent_identity=detailed_parent_identity)
+            except WorkerApiError as exc:
+                result["detailed_export"]["message"] = str(exc)
+            except OSError:
+                result["detailed_export"]["message"] = "详细诊断未能确认保存成功，文件可能已生成；请检查本机保存位置、权限和可用空间。脱敏结构仍可导出。"
+            except Exception:
+                # Do not echo payloads or exceptions from credential filtering.
+                result["detailed_export"]["message"] = (
+                    "无法安全准备详细诊断：数据超过预算或认证信息无法可靠清理；没有保存项目正文。脱敏结构仍可导出。")
+            else:
+                result["detailed_export"] = {
+                    "saved": True, "bytes": len(content),
+                    "contains_project_content": True,
+                    "data_altered": True,
+                    "omissions": snapshot.get("omissions", {}),
+                    "message": "详细诊断已保存，包含项目内容并已剔除配置凭据；请仅私下分享用于排查。",
+                }
+        return result
+
+    def _export_detailed_diagnostic_to_file(self, payload: dict) -> dict:
+        if payload.get("include_project_content") is not True:
+            raise WorkerApiError("详细诊断包含项目内容，请先在界面明确选择该导出方式。")
+        target = self._detailed_export_target(payload.get("path"))
+        parent_stat = target.parent.stat()
+        result = self._diagnose(payload, detailed_target=target,
+                                detailed_parent_identity=(parent_stat.st_dev, parent_stat.st_ino))
+        if "detailed_export" not in result:
+            result["detailed_export"] = {"saved": False, "message": "采集或诊断未完成，没有写入详细项目数据。"}
+        return result
+
+    def _detailed_export_target(self, raw_target) -> Path:
+        if (not isinstance(raw_target, str) or not raw_target
+                or _is_windows_device_path(raw_target) or not Path(raw_target).is_absolute()):
+            raise WorkerApiError("请选择有效的本机 JSON 保存路径。")
+        try:
+            target = Path(raw_target).resolve()
+            data_dir = self.data_dir.resolve()
+            source_checkout = next((parent for parent in Path(__file__).resolve().parents
+                                    if (parent / ".git").exists()), None)
+            if (_is_windows_device_path(str(target)) or target.suffix.casefold() != ".json"
+                    or target.name.casefold() in {"settings.json", "openai_models.json", "credentials.json"}
+                    or str(target).casefold() == str(data_dir).casefold()
+                    or str(target).casefold().startswith(str(data_dir).casefold() + os.sep)
+                    or any(parent.name.casefold() == ".git" for parent in target.parents)
+                    or (source_checkout is not None and target.is_relative_to(source_checkout))):
+                raise ValueError("Protected output location")
+        except (OSError, ValueError, RuntimeError):
+            raise WorkerApiError("请选择应用数据目录及 Git 仓库之外的本机 JSON 文件，避免覆盖配置或提交项目内容。") from None
+        return target
 
     def _export_diagnostic(self, payload: dict) -> dict:
         return {"shape": self._checked_diagnostic(payload)}
@@ -825,6 +910,37 @@ def _teambition_identity(credentials: dict) -> str | None:
     if not all(isinstance(value, str) and value for value in values):
         return None
     return hashlib.sha256(json.dumps(values, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _is_windows_device_path(value: str) -> bool:
+    """Device aliases have different comparison rules from ordinary paths."""
+    normalized = value.replace("/", "\\")
+    return normalized.startswith(("\\\\?\\", "\\\\.\\", "\\??\\"))
+
+
+def _credentials_fingerprint(credentials: dict) -> str:
+    """Compare the in-memory redaction set without exposing any credential."""
+    return hashlib.sha256(json.dumps(credentials, ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _redact_known_diagnostic_credentials(message: str, *credential_sets: dict) -> str:
+    """Diagnostic names/IDs must not echo configured credential values."""
+    values = set()
+    for credentials in credential_sets:
+        for value in credentials.values():
+            if isinstance(value, str) and value:
+                values.add(value)
+        webhook = credentials.get("dingtalk_webhook", "")
+        try:
+            for key, value in parse_qsl(urlsplit(webhook).query, keep_blank_values=False):
+                if key.casefold() in {"access_token", "token", "sign", "signature"} and value:
+                    values.add(value)
+        except (TypeError, ValueError):
+            pass
+    for value in sorted(values, key=len, reverse=True):
+        message = message.replace(value, "[凭据已移除]")
+    return message
 
 
 def _diagnostic_context(settings: dict, credentials: dict, payload: dict) -> str:

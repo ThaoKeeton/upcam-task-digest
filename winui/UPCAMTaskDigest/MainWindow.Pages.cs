@@ -378,12 +378,7 @@ public sealed partial class MainWindow
                 _state.DiagnosticText = "";
                 Navigate("run");
                 var result = await Worker.SendAsync("diagnose", _state.WindowPayload());
-                _state.Output = Value(result, "message");
-                _state.ExportAvailable = result["export_available"]?.GetValue<bool>() == true;
-                _state.DiagnosticFileStem = Value(result, "diagnostic_file_stem");
-                if (result["diagnostic"] is JsonObject metadata)
-                    _state.Output += $"\n\n诊断 v{Value(metadata, "application_version")} · UTC {Value(metadata, "created_at_utc")}";
-                _state.DiagnosticText = _state.Output;
+                ApplyDiagnosticResult(result);
                 Navigate("run"); SetStatus(Value(result, "safety", "未调用 OpenAI；未发送钉钉。"));
             }, accent: true),
             ActionButton("生成并自动发送", "run-manual", async () =>
@@ -398,7 +393,8 @@ public sealed partial class MainWindow
             {
                 var result = await Worker.SendAsync("preview_sample", _state.WindowPayload());
                 _state.Output = Value(result, "markdown"); Navigate("run"); SetStatus(Value(result, "status"));
-            }), export, copy);
+            }), export, copy,
+            ActionButton("详细诊断导出…", "export-detailed-diagnostic", ExportDetailedDiagnosticAsync));
         var range = new Grid { ColumnSpacing = 12 };
         range.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         range.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -444,6 +440,62 @@ public sealed partial class MainWindow
         if (file is null) return;
         await Worker.SendAsync("export_diagnostic_to_file", _state.DiagnosticExportPayload(file.Path));
         SetStatus("已导出版本、时间窗、字段结构及任务/动态/缺失成员 ID；不含标题、姓名、评论正文或凭据。分享前请检查 ID。");
+    }
+
+    private void ApplyDiagnosticResult(JsonObject result)
+    {
+        _state.Output = Value(result, "message");
+        _state.ExportAvailable = result["export_available"]?.GetValue<bool>() == true;
+        _state.DiagnosticFileStem = Value(result, "diagnostic_file_stem");
+        if (result["diagnostic_summary"] is JsonObject counts)
+        {
+            int inWindow = counts["unknown_events_in_report_window"]?.GetValue<int>() ?? 0;
+            int unknownTime = counts["unknown_events_with_unknown_time"]?.GetValue<int>() ?? 0;
+            _state.Output += $"\n\n窗口内未支持动作：{inWindow} 条。时间归属无法判断的未支持动作：{unknownTime} 条。";
+            if (counts["catalog_complete"]?.GetValue<bool>() != true)
+                _state.Output += "\n诊断目录未完整，以上仅为已扫描部分，不能据此认定没有其他动态。";
+        }
+        if (result["diagnostic"] is JsonObject metadata)
+            _state.Output += $"\n\n诊断 v{Value(metadata, "application_version")} · UTC {Value(metadata, "created_at_utc")}";
+        _state.DiagnosticText = _state.Output;
+    }
+
+    private async Task ExportDetailedDiagnosticAsync()
+    {
+        var consent = Identify(new ContentDialog
+        {
+            XamlRoot = RootGrid.XamlRoot, RequestedTheme = ElementTheme.Dark,
+            Title = "详细诊断包含项目内容", PrimaryButtonText = "选择本机文件夹", CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Close,
+            Content = new ScrollViewer { MaxHeight = 360, Content = Paragraph(
+                "文件会保留所选时间段的任务标题、动态正文、引用、实际动作及必要映射，供私下分析。" +
+                "应用将剔除配置凭据和识别到的认证字段；项目正文仍可能含手工写入的私人信息。" +
+                "请选择未同步的本机文件夹，勿放入代码仓库或公开分享。此操作只读采集，不调用模型、不发送群消息。") }
+        }, "detailed-export-consent");
+        if (await ShowDialogAsync(consent) != ContentDialogResult.Primary)
+        {
+            SetStatus("已取消详细诊断，没有采集或保存项目内容。");
+            return;
+        }
+        var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.Downloads };
+        picker.FileTypeFilter.Add("*");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+        StorageFolder? folder = await picker.PickSingleFolderAsync();
+        if (folder is null) { SetStatus("已取消保存，没有采集详细项目数据。"); return; }
+        await EnsureSavedAsync();
+        string fileName = $"teambition-detailed-diagnostic-v{_state.ApplicationVersion}-{DateTime.UtcNow:yyyyMMddTHHmmssZ}-{Guid.NewGuid():N}.json";
+        var payload = _state.WindowPayload();
+        payload["path"] = Path.Combine(folder.Path, fileName);
+        payload["include_project_content"] = true;
+        _state.ExportAvailable = false;
+        _state.DiagnosticText = "";
+        var result = await Worker.SendAsync("export_detailed_diagnostic_to_file", payload);
+        ApplyDiagnosticResult(result);
+        Navigate("run");
+        string message = Value(result["detailed_export"], "message", "详细诊断没有保存。");
+        if (result["detailed_export"]?["saved"]?.GetValue<bool>() == true)
+            message += " 文件名：" + fileName;
+        SetStatus(message);
     }
 
     private async Task CopyDiagnosticAsync()

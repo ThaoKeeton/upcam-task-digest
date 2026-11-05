@@ -16,7 +16,7 @@ from activity_adapter import (
 from report_contract import report_window, updated_selection
 from teambition_readonly import CollectionError, identifier, validate_binding
 from . import APP_VERSION, RULESET_REVISION
-from .diagnostic_protocol import action_fingerprint
+from .diagnostic_protocol import _counter_labels, action_fingerprint
 from .diagnostic_markup import markup_shape
 
 
@@ -333,6 +333,7 @@ def _protocol_catalog(records, bounds, total_events):
         "omitted_events": omitted,
         "unscanned_events": unscanned,
         "unknown_window_events": unknown_window,
+        **_counter_labels(considered, unknown_window),
         "groups": [{"action_fingerprint": group["action_fingerprint"],
                     "event_count": group["event_count"], "task_count": len(group["tasks"])}
                    for _digest, group in sorted(groups.items())],
@@ -507,7 +508,8 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
             "application_version": APP_VERSION,
             "ruleset_revision": RULESET_REVISION,
             "capabilities": ["action-fingerprint/v1", "comment-markup-shape/v1",
-                             "commit-source-field-shapes/v1", "protocol-catalog/v1"],
+                             "commit-source-field-shapes/v1", "protocol-catalog/v1",
+                             "explicit-counter-labels/v1"],
             "report_window": ({"start": bounds[0].isoformat(), "end_exclusive": bounds[1].isoformat(),
                                "timezone": "Asia/Shanghai"} if bounds else None),
         },

@@ -12,3 +12,4 @@ winui/**/bin/
 winui/**/obj/
 .vs/
 *.user
+teambition-detailed-diagnostic-*.json
