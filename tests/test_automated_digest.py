@@ -253,7 +253,9 @@ class AutomatedDigestTests(unittest.TestCase):
         )
         self.assertTrue(report["ready_to_send"])
         self.assertEqual(client.calls, [])
-        self.assertIn("筛选时间段内未发现任务动态", report["markdown"])
+        self.assertEqual(report["markdown"],
+            "**Teambition｜UPCAM 项目任务动态日报**  \n"
+            "🕒 时间范围：2026-01-02 00:00 — 2026-01-03 00:00  \n📊 更新 0 项\n")
         validate_automated_report(report, self.collection, self.config, "gpt-6-luna", "max")
 
     def test_incomplete_collection_is_not_reported_as_no_activity(self):

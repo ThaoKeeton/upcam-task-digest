@@ -155,9 +155,12 @@ class WorkflowTests(unittest.TestCase):
             datetime(2026, 1, 2, 8, 50, tzinfo=SHANGHAI),
             schedule_key="2026-01-02:morning",
         )
-        self.assertIn("筛选时间段内未发现任务动态", result["report"]["markdown"])
+        self.assertEqual(result["report"]["markdown"],
+            "**Teambition｜UPCAM 项目任务动态日报**  \n"
+            "🕒 时间范围：2026-01-01 16:50 — 2026-01-02 08:50  \n📊 更新 0 项\n")
         self.assertEqual(self.summarizer.calls, 0)
         self.assertEqual(len(self.ding.calls), 1)
+        self.assertEqual(self.ding.calls[0][2], result["report"]["markdown"])
 
     def test_incomplete_query_is_blocked_without_openai_or_dingtalk(self):
         original_factory = self.client_factory
