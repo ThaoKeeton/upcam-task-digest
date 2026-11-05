@@ -359,7 +359,7 @@ public sealed partial class MainWindow
         FrameworkElement Slot(string label, string prefix) => Card(Column(Paragraph(label, size: 18),
             SettingText("运行时间", prefix + "_run_at", prefix + "-run-at", "HH:MM"),
             Pair(SettingText(prefix == "morning" ? "采集开始（前一日）" : "采集开始", prefix + "_start_at", prefix + "-start-at", "HH:MM"),
-                 SettingText("采集结束（当日，不含）", prefix + "_end_at", prefix + "-end-at", "HH:MM"))));
+                 SettingText(prefix == "morning" ? "采集结束（当日）" : "采集结束", prefix + "_end_at", prefix + "-end-at", "HH:MM"))));
         return LocalScroll(Column(
             Card(Column(Toggle("应用运行期间自动采集、校验、摘要并发送", "auto_send_enabled", "auto-run"),
                 Toggle("当前 Windows 用户登录后启动，并以系统托盘运行", "start_with_windows", "startup"),
@@ -412,7 +412,7 @@ public sealed partial class MainWindow
         var range = new Grid { ColumnSpacing = 12 };
         range.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         range.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var details = Column(Paragraph("本机采集范围 · 结束不含", true, 12),
+        var details = Column(Paragraph("本机采集范围", true, 12),
             Paragraph($"开始  {_state.ManualStart}\n结束  {_state.ManualEnd}", true));
         details.Spacing = 4;
         range.Children.Add(details);
@@ -429,7 +429,7 @@ public sealed partial class MainWindow
     private async Task EditWindowAsync()
     {
         var start = Identify(new TextBox { Header = "开始（本机时间）", Text = _state.ManualStart }, "edit-window-start");
-        var end = Identify(new TextBox { Header = "结束（不含，本机时间）", Text = _state.ManualEnd }, "edit-window-end");
+        var end = Identify(new TextBox { Header = "结束（本机时间）", Text = _state.ManualEnd }, "edit-window-end");
         var dialog = EditorDialog("修改采集时间", Column(start, end,
             Paragraph("格式为 YYYY-MM-DD HH:MM。只读诊断不会调用模型或发送；正式运行会按该区间自动发送。", true)), "应用");
         if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary) return;

@@ -272,6 +272,21 @@ public sealed partial class MainWindow
                     await Task.Delay(60);
                     RootGrid.UpdateLayout();
                     Assert(PageHost.ActualWidth > 300 && PageHost.ActualHeight > 180, $"Layout {route} {size.Width}x{size.Height}");
+                    if (route == "schedule")
+                    {
+                        var morningStart = Find<TextBox>("morning-start-at")!;
+                        var morningEnd = Find<TextBox>("morning-end-at")!;
+                        var afternoonStart = Find<TextBox>("afternoon-start-at")!;
+                        var afternoonEnd = Find<TextBox>("afternoon-end-at")!;
+                        Assert(morningStart.Header.ToString() == "采集开始（前一日）" &&
+                            morningEnd.Header.ToString() == "采集结束（当日）" &&
+                            afternoonStart.Header.ToString() == "采集开始" &&
+                            afternoonEnd.Header.ToString() == "采集结束",
+                            "Schedule date labels apply only to the morning range at " + size.Width);
+                        Assert(morningStart.Text == "16:50" && morningEnd.Text == "08:50" &&
+                            afternoonStart.Text == "00:00" && afternoonEnd.Text == "16:50",
+                            "Label correction preserves original scheduled window values at " + size.Width);
+                    }
                     if (route == "statuses")
                     {
                         var list = Find<ListView>("status-list")!;
@@ -293,7 +308,7 @@ public sealed partial class MainWindow
                 }
             }
             AppWindow.Resize(new SizeInt32(1180, 800));
-            foreach (string route in new[] { "home", "statuses", "run" })
+            foreach (string route in new[] { "home", "statuses", "schedule", "run" })
             {
                 Navigate(route); await Task.Delay(200);
                 await CaptureAsync(Path.Combine(output, route + ".png"));

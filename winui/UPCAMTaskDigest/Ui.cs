@@ -73,7 +73,7 @@ public sealed partial class MainWindow
     {
         var input = Identify(new TextBox
         {
-            Header = start ? "开始（本机时间）" : "结束（不含，本机时间）",
+            Header = start ? "开始（本机时间）" : "结束（本机时间）",
             Text = start ? _state.ManualStart : _state.ManualEnd,
             PlaceholderText = "YYYY-MM-DD HH:MM"
         }, start ? "window-start" : "window-end");
