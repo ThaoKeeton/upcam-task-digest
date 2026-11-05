@@ -20,6 +20,25 @@ _MAX_FILE_BYTES = 32 * 1024 * 1024
 _MAX_CANDIDATES = 128
 
 
+def _counter_labels(considered, unknown_window):
+    """Describe compatibility counters without interpreting input-provided prose."""
+    return {
+        "unknown_events_in_report_window": considered,
+        "unknown_events_with_unknown_time": unknown_window,
+        "counter_definitions": {
+            "unknown_events_considered": (
+                "Unsupported-action events confirmed inside the report window among scanned events."
+            ),
+            "unknown_events_in_report_window": "Alias of unknown_events_considered.",
+            "unknown_window_events": (
+                "Unsupported-action events with undetermined report-window membership because event "
+                "time is missing/invalid or the report window is unavailable."
+            ),
+            "unknown_events_with_unknown_time": "Alias of unknown_window_events.",
+        },
+    }
+
+
 def _fingerprint_digest(value):
     if (isinstance(value, dict) and value.get("algorithm") == FINGERPRINT_ALGORITHM
             and isinstance(value.get("sha256"), str) and _DIGEST.fullmatch(value["sha256"])
@@ -38,6 +57,10 @@ def _match_catalog(catalog, by_digest):
     unknown_window = catalog.get("unknown_window_events", 0)
     if type(unknown_window) is not int or unknown_window < 0:
         raise ValueError("Invalid unknown window count")
+    labels = _counter_labels(catalog["unknown_events_considered"], unknown_window)
+    for alias in ("unknown_events_in_report_window", "unknown_events_with_unknown_time"):
+        if alias in catalog and (type(catalog[alias]) is not int or catalog[alias] != labels[alias]):
+            raise ValueError("Protocol catalog counter aliases are inconsistent")
     if catalog["complete"] and (catalog["omitted_events"] or catalog["unscanned_events"] or unknown_window):
         raise ValueError("Incomplete catalog cannot claim completeness")
     matches, seen, represented = [], set(), 0
@@ -58,7 +81,7 @@ def _match_catalog(catalog, by_digest):
         raise ValueError("Protocol catalog counts are inconsistent")
     order = {candidate: i for i, candidate in enumerate(by_digest.values())}
     matches.sort(key=lambda match: order[match["candidate"]])
-    return {**{k: catalog[k] for k in keys}, "unknown_window_events": unknown_window,
+    return {**{k: catalog[k] for k in keys}, "unknown_window_events": unknown_window, **labels,
             "catalog_complete": catalog["complete"], "matches": matches}
 
 
@@ -90,14 +113,19 @@ def match_action_candidates(report: dict, candidates: list[str]) -> dict:
     by_digest = {action_fingerprint(candidate)["sha256"]: candidate for candidate in counts}
     if "protocol_catalog" in report:
         return _match_catalog(report["protocol_catalog"], by_digest)
-    considered, unidentified = 0, 0
+    considered = unidentified = unknown_window = 0
     for index, task in enumerate(report["tasks"]):
         if not isinstance(task, dict) or not isinstance(task.get("activities"), list) or len(task["activities"]) > 1000:
             raise ValueError("Invalid diagnostic task structure")
         for event in task["activities"]:
             if not isinstance(event, dict):
                 raise ValueError("Invalid diagnostic event structure")
-            if event.get("action") != "unknown" or event.get("in_report_window") is not True:
+            if event.get("action") != "unknown":
+                continue
+            membership = event.get("in_report_window")
+            if membership is not True:
+                if membership is not False:
+                    unknown_window += 1
                 continue
             considered += 1
             fingerprint = event.get("action_fingerprint")
@@ -115,6 +143,8 @@ def match_action_candidates(report: dict, candidates: list[str]) -> dict:
                 item["tasks"].add(index)
     return {
         "unknown_events_considered": considered,
+        "unknown_window_events": unknown_window,
+        **_counter_labels(considered, unknown_window),
         "unidentified_events": unidentified,
         "matches": [{"candidate": candidate, "event_count": value["events"],
                      "task_count": len(value["tasks"]), "semantics_verified": False}
