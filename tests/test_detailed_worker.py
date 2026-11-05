@@ -237,6 +237,7 @@ class DetailedWorkerTests(unittest.TestCase):
             self.assertTrue(result["export_available"])
             self.assertFalse(target.exists())
             self.assertNotIn("PRIVATE_ERROR_BODY", json.dumps(result))
+            self.assertIn("文件可能已生成", result["detailed_export"]["message"])
 
     def test_credentials_changed_during_collection_prevent_unsafe_export(self):
         with tempfile.TemporaryDirectory() as directory:

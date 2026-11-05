@@ -250,12 +250,19 @@ class _WindowsApi:
                         ("FileName", self.wintypes.WCHAR * 1)]
 
         encoded = target.encode("utf-16-le")
-        length = RenameInfo.FileName.offset + len(encoded)
+        # FileNameLength excludes the terminator, but Win32's FileName member
+        # is a NUL-terminated string. Keep the terminator inside the allocated
+        # and submitted buffer so path conversion cannot read past its end.
+        length = RenameInfo.FileName.offset + len(encoded) + 2
         storage = ctypes.create_string_buffer(max(length, ctypes.sizeof(RenameInfo)))
         info = ctypes.cast(storage, ctypes.POINTER(RenameInfo)).contents
         info.ReplaceIfExists, info.RootDirectory, info.FileNameLength = 0, None, len(encoded)
         ctypes.memmove(ctypes.addressof(storage) + RenameInfo.FileName.offset, encoded, len(encoded))
-        self.require(self.kernel.SetFileInformationByHandle(handle, 3, storage, length))
+        self.require(self.kernel.SetFileInformationByHandle(handle, 3, storage, len(storage)))
+        # Verify the destination through the still-exclusive file handle. An
+        # unexpected name must not be reported as a successfully saved file.
+        if self.final_path(handle).casefold() != target.casefold():
+            raise DiagnosticFileError(_SAVE_ERROR)
 
     def discard(self, handle) -> None:
         # FILE_DISPOSITION_INFO deletes this exact open file, never a path entry

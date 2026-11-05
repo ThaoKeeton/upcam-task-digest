@@ -480,7 +480,7 @@ class WorkerService:
             except WorkerApiError as exc:
                 result["detailed_export"]["message"] = str(exc)
             except OSError:
-                result["detailed_export"]["message"] = "详细诊断未能确认保存成功，请检查本机保存位置、权限和可用空间；脱敏结构仍可导出。"
+                result["detailed_export"]["message"] = "详细诊断未能确认保存成功，文件可能已生成；请检查本机保存位置、权限和可用空间。脱敏结构仍可导出。"
             except Exception:
                 # Do not echo payloads or exceptions from credential filtering.
                 result["detailed_export"]["message"] = (
