@@ -16,6 +16,7 @@ from runtime_mappings import validate_mappings
 from teambition_readonly import Client, CollectionError
 
 from .dingtalk import DingTalkSender
+from .dingtalk_mentions import MentionConfigError, mention_options, reject_credential_mentions
 from .history import HistoryError, HistoryStore
 from .openai_models import ModelCatalogError, OpenAIModelCatalog, cache_matches_key
 from .secrets import SECRET_FIELDS, INTERNAL_SECRET_FIELDS
@@ -55,6 +56,11 @@ class DigestWorkflow:
         if not self.settings.get("tenant_id") or not self.settings.get("project_id"):
             raise WorkflowBlocked("Teambition tenant and project IDs must be configured")
         config = runtime_config(self.settings)
+        try:
+            reject_credential_mentions(config, self.secrets)
+        except MentionConfigError as exc:
+            raise WorkflowBlocked(str(exc)) from None
+        sender_options = mention_options(config)
         view = validate_view(config)
         if (config.get("api_contract_verified") is not True or view.get("verified") is not True
                 or not view.get("evidence")):
@@ -163,7 +169,8 @@ class DigestWorkflow:
                 report, tenant=config["tenant_id"], project=config["project_id"],
                 destination=self.secrets["dingtalk_webhook"],
                 send=lambda markdown: self.ding_sender.send_markdown(
-                    self.secrets["dingtalk_webhook"], self.secrets["dingtalk_signing_secret"], markdown),
+                    self.secrets["dingtalk_webhook"], self.secrets["dingtalk_signing_secret"], markdown,
+                    **sender_options),
                 current_collection=collection, current_config=config,
                 current_model=model, current_effort=effort, current_service_tier=service_tier,
                 allow_confirmed_repeat=allow_confirmed_repeat, manual_request_id=manual_request_id,

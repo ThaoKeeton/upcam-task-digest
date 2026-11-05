@@ -13,6 +13,7 @@ from digest_pipeline import validate_view
 from runtime_mappings import validate_mappings
 from teambition_readonly import CollectionError
 from task_display import TaskDisplayError, validate_task_prefix, normalize_task_link_view
+from .dingtalk_mentions import MentionConfigError, normalize_mentions
 
 
 SCHEMA_VERSION = 1
@@ -43,6 +44,8 @@ DEFAULT_SETTINGS = {
     "openai_model": "gpt-6-luna",
     "openai_reasoning_effort": "max",
     "openai_service_tier": "default",
+    "dingtalk_mention_mode": "mobile",
+    "dingtalk_mentions": "",
 }
 
 
@@ -62,6 +65,11 @@ def validate_settings(settings: dict) -> dict:
     merged = {**DEFAULT_SETTINGS, **settings}
     if merged.get("schema_version") != SCHEMA_VERSION:
         raise SettingsError("Unsupported settings version")
+    try:
+        merged["dingtalk_mentions"] = normalize_mentions(
+            merged["dingtalk_mention_mode"], merged["dingtalk_mentions"])
+    except MentionConfigError as exc:
+        raise SettingsError(str(exc)) from None
     if any(not isinstance(merged.get(key), str) for key in ("tenant_id", "project_id")):
         raise SettingsError("Teambition tenant and project IDs must be text")
     try:

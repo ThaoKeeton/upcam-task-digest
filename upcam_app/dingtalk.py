@@ -10,6 +10,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit, quote_plus
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from render_digest import BLOCK_SEPARATOR
+from .dingtalk_mentions import MentionConfigError, reject_credential_mentions, validate_mention_targets
+
 
 MAX_RESPONSE_BYTES = 1024 * 1024
 
@@ -55,11 +58,20 @@ class DingTalkSender:
         self.clock_ms = clock_ms or (lambda: __import__("time").time_ns() // 1_000_000)
         self.timeout = timeout
 
-    def send_markdown(self, webhook: str, secret: str, markdown: str) -> bool:
+    def send_markdown(self, webhook: str, secret: str, markdown: str, *,
+                      at_mobiles=(), at_user_ids=()) -> bool:
         if not isinstance(markdown, str) or not markdown.strip():
             return False
+        mobiles = validate_mention_targets("mobile", at_mobiles)
+        user_ids = validate_mention_targets("user_id", at_user_ids)
+        credentials = {"dingtalk_webhook": webhook, "dingtalk_signing_secret": secret}
+        for mode, targets in (("mobile", mobiles), ("user_id", user_ids)):
+            reject_credential_mentions({"dingtalk_mention_mode": mode, "dingtalk_mentions": "\n".join(targets)},
+                                       credentials)
+        payload = _markdown_payload("UPCAM 站会日报", markdown,
+                                    at_mobiles=mobiles, at_user_ids=user_ids)
         destination = signed_webhook(webhook, secret, self.clock_ms())
-        result = self.transport(destination, _markdown_payload("UPCAM 站会日报", markdown), self.timeout)
+        result = self.transport(destination, payload, self.timeout)
         return isinstance(result, dict) and type(result.get("errcode")) is int and result["errcode"] == 0
 
     @staticmethod
@@ -92,6 +104,15 @@ def _unique_object(pairs):
     return result
 
 
-def _markdown_payload(title: str, markdown: str) -> bytes:
-    return json.dumps({"msgtype": "markdown", "markdown": {"title": title, "text": markdown}},
-                      ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+def _markdown_payload(title: str, markdown: str, *, at_mobiles=(), at_user_ids=()) -> bytes:
+    mobiles = validate_mention_targets("mobile", at_mobiles)
+    user_ids = validate_mention_targets("user_id", at_user_ids)
+    if mobiles and user_ids:
+        raise MentionConfigError("钉钉提醒只能选择一种标识类型；请使用手机号或钉钉 userId。")
+    payload = {"msgtype": "markdown", "markdown": {"title": title, "text": markdown}}
+    targets = mobiles or user_ids
+    if targets:
+        footer = " ".join("@" + target for target in targets)
+        payload["markdown"]["text"] = markdown.rstrip("\r\n") + BLOCK_SEPARATOR + footer + "\n"
+        payload["at"] = {"atMobiles" if mobiles else "atUserIds": list(targets), "isAtAll": False}
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

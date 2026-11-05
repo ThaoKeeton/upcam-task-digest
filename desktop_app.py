@@ -38,6 +38,7 @@ from upcam_app.openai_models import (
 from openai_summarizer import KNOWN_FAST_MODELS
 from upcam_app.secrets import DpapiSecretStore, SECRET_FIELDS, SecretStoreError
 from upcam_app.workflow import DigestWorkflow, WorkflowBlocked
+from upcam_app.dingtalk_mentions import MentionConfigError, reject_credential_mentions
 from delivery_guard import DeliveryBlocked, DeliveryGuard, initialize_ledger
 from report_contract import SHANGHAI, updated_selection
 
@@ -467,6 +468,19 @@ class DigestDesktopApp:
         for key in SECRET_FIELDS:
             self._secret_field(form, row, key)
             row += 1
+
+        ttk.Label(form, text="艾特指定成员（可选，留空保持原消息）",
+                  font=("Microsoft YaHei UI", 10, "bold")).grid(row=row, column=0, columnspan=4, sticky="w", pady=(8, 4))
+        row += 1
+        self.values["dingtalk_mention_mode"] = tk.StringVar(value="mobile")
+        ttk.Label(form, text="标识类型").grid(row=row, column=0, sticky="w")
+        ttk.Combobox(form, textvariable=self.values["dingtalk_mention_mode"],
+                     values=("mobile", "user_id"), state="readonly", width=18).grid(row=row, column=1, sticky="ew", padx=(0, 18))
+        self._text_field(form, row, 2, "指定成员", "dingtalk_mentions", width=30)
+        row += 1
+        ttk.Label(form, text="mobile 为手机号，user_id 为钉钉 userId；多个标识用逗号、分号或空格分隔，不加 @，最多 50 人。不要填姓名、员工编号或 Teambition ID。",
+                  foreground="#536174", wraplength=self.wraplength).grid(row=row, column=0, columnspan=4, sticky="w", pady=(3, 5))
+        row += 1
 
         ttk.Separator(form).grid(row=row, column=0, columnspan=4, sticky="ew", pady=10)
         row += 1
@@ -1055,7 +1069,8 @@ class DigestDesktopApp:
     def _load_form(self):
         for key, variable in self.values.items():
             if key in self.settings:
-                variable.set(self.settings[key])
+                value = self.settings[key]
+                variable.set(value.replace("\n", ", ") if key == "dingtalk_mentions" else value)
         self.owner_map = dict(self.settings.get("owner_names", {}))
         self.status_map = dict(self.settings.get("status_names", {}))
         self.resolved_status_ids = set(self.settings.get("resolved_status_ids", []))
@@ -1166,8 +1181,10 @@ class DigestDesktopApp:
         startup_changed = clean["start_with_windows"] != previous_startup
         startup_applied = False
         try:
-            merged = self.secret_store.load()
+            prior_credentials = self.secret_store.load()
+            merged = dict(prior_credentials)
             merged.update(entered)
+            reject_credential_mentions(clean, prior_credentials, merged)
             if clean["auto_send_enabled"]:
                 self._validate_auto_ready(clean, merged)
             if startup_changed:
@@ -1175,7 +1192,7 @@ class DigestDesktopApp:
                 startup_applied = True
             self.secret_store.save(merged)
             self.settings_store.save(clean)
-        except (SettingsError, SecretStoreError, StartupIntegrationError, OSError) as exc:
+        except (SettingsError, SecretStoreError, StartupIntegrationError, MentionConfigError, OSError) as exc:
             if startup_applied:
                 try:
                     configure_user_startup(previous_startup)

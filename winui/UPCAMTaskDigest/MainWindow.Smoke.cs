@@ -81,6 +81,15 @@ public sealed partial class MainWindow
             await VerifyUtf8PipeBoundariesAsync();
             _state.ManualStart = DateTime.Now.AddHours(-2).ToString("yyyy-MM-dd HH:mm");
             _state.ManualEnd = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+            Navigate("accounts");
+            Find<TabView>("account-tabs")!.SelectedIndex = 1;
+            await WaitForAsync(() => Find<TextBox>("dingtalk-mentions") is not null);
+            Find<ComboBox>("dingtalk-mention-mode")!.SelectedIndex = 1;
+            Find<TextBox>("dingtalk-mentions")!.Text = "ci-mention-one\nci-mention-two";
+            await WaitForAsync(() => _state.Text("dingtalk_mention_mode") == "user_id");
+            Assert(_state.Text("dingtalk_mention_mode") == "user_id" &&
+                _state.Text("dingtalk_mentions").Replace("\r\n", "\n").Replace("\r", "\n") == "ci-mention-one\nci-mention-two",
+                "Native optional mention controls accept two explicit DingTalk userIds");
             var models = await Worker.SendAsync("refresh_models");
             _state.ApplyModels(models);
             Assert(_state.Models.Count == 2, "Synthetic model refresh and IPC");
@@ -130,6 +139,21 @@ public sealed partial class MainWindow
             await WaitForAsync(() => !_busy);
             Assert(_state.ScopeVerified && _state.Flag("api_contract_verified"),
                 "Save automatically verifies the scope with a real read-only synthetic query");
+            Assert(_state.Text("dingtalk_mention_mode") == "user_id" &&
+                _state.Text("dingtalk_mentions") == "ci-mention-one\nci-mention-two",
+                "Mention preferences survive ordinary native save without changing collection scope");
+            Navigate("accounts");
+            Find<TabView>("account-tabs")!.SelectedIndex = 1;
+            await WaitForAsync(() => Find<Button>("check-dingtalk") is not null);
+            Invoke(Find<Button>("check-dingtalk")!);
+            await WaitForAsync(() => !_busy);
+            var mentionCheck = await Worker.SendAsync("validate_dingtalk_config");
+            Assert(mentionCheck["mention_count"]?.GetValue<int>() == 2 &&
+                !mentionCheck.ToJsonString().Contains("ci-mention-one") &&
+                !mentionCheck.ToJsonString().Contains("ci-mention-two"),
+                "Local DingTalk check validates two targets without exposing identifiers or sending");
+            await CaptureAsync(Path.Combine(output, "dingtalk.png"));
+            Navigate("project");
             Assert(_state.Text("task_number_prefix") == "DEMO" && _state.Text("task_link_view_id") == new string('f', 24),
                 "Native task display settings save confirmed prefix and normalize the all-view URL");
             prefixInput.Text = "STALE";

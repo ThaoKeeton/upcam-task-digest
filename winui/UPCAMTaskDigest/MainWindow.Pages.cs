@@ -57,19 +57,37 @@ public sealed partial class MainWindow
         tabs.TabItems.Add(new TabViewItem
         {
             Header = "钉钉", IsClosable = false,
-            Content = LocalScroll(Column(Card(Column(
-                SecretInput("机器人 Webhook（含 access_token）", "dingtalk_webhook"),
-                SecretInput("机器人签名密钥", "dingtalk_signing_secret"),
-                Paragraph("这里的检查只验证本机 URL 与签名配置，不向群里发送测试消息。", true),
-                ActionButton("检查本机机器人配置", "check-dingtalk", async () =>
-                {
-                    await EnsureSavedAsync();
-                    var result = await Worker.SendAsync("validate_dingtalk_config");
-                    SetStatus(Value(result, "status"));
-                })))))
+            Content = BuildDingTalk()
         });
         tabs.TabItems.Add(new TabViewItem { Header = "OpenAI", IsClosable = false, Content = BuildOpenAi() });
         return tabs;
+    }
+
+    private FrameworkElement BuildDingTalk()
+    {
+        var mode = Identify(new ComboBox { Header = "艾特标识类型", HorizontalAlignment = HorizontalAlignment.Stretch },
+            "dingtalk-mention-mode");
+        mode.Items.Add("手机号");
+        mode.Items.Add("钉钉 userId");
+        mode.SelectedIndex = _state.Text("dingtalk_mention_mode", "mobile") == "user_id" ? 1 : 0;
+        mode.SelectionChanged += (_, _) => _state.Set("dingtalk_mention_mode", mode.SelectedIndex == 1 ? "user_id" : "mobile");
+        var targets = SettingText("艾特指定成员（可选，最多 50 人）", "dingtalk_mentions", "dingtalk-mentions", "留空不艾特；每行一个标识，不加 @");
+        targets.AcceptsReturn = true;
+        targets.TextWrapping = TextWrapping.Wrap;
+        targets.Height = 112;
+        targets.MaxLength = 8000;
+        return LocalScroll(Column(
+            Card(Column(SecretInput("机器人 Webhook（含 access_token）", "dingtalk_webhook"),
+                SecretInput("机器人签名密钥", "dingtalk_signing_secret"))),
+            Card(Column(Paragraph("艾特指定成员", size: 18), mode, targets,
+                Paragraph("可用换行、逗号、分号或空格分隔。填写群内成员的手机号或钉钉 userId；不要填写姓名、员工编号或 Teambition 成员 ID。", true),
+                Paragraph("填写后会在群消息末尾添加 @ 标识；实际通知与姓名显示由钉钉处理。留空沿用原消息，不艾特所有人。", true))),
+            ActionButton("检查本机机器人配置", "check-dingtalk", async () =>
+            {
+                await EnsureSavedAsync();
+                var result = await Worker.SendAsync("validate_dingtalk_config");
+                SetStatus(Value(result, "status"));
+            }), Paragraph("这里只检查本机格式，不验证群成员，也不发送测试消息。", true)));
     }
 
     private FrameworkElement SecretInput(string label, string key)
