@@ -37,6 +37,7 @@ class SyntheticClient:
                     "isArchived": False, "content": "CI 虚构：验证原生界面布局",
                     "executorId": "demo-person", "tfsId": "demo-open",
                     "created": timestamp, "updated": timestamp, "isDone": False,
+                    "tasklistId": "2" * 24, "stageId": "4" * 24,
                 },
                 "activities": [{
                     "id": "ci-synthetic-event", "action": "create",
@@ -50,6 +51,28 @@ class SyntheticClient:
                         "comment": "CI 虚构回复：验证仍未结束。",
                         "quote": json.dumps({"_id": "a" * 24, "content": "CI 虚构历史引用：初稿已准备。"}, ensure_ascii=False),
                     }, ensure_ascii=False),
+                }, {
+                    "id": "ci-synthetic-position", "action": "move.cross.from.stage.to.stage",
+                    "boundToObjectId": "ci-synthetic-task", "boundToObjectType": "task",
+                    "createTime": timestamp,
+                    "content": json.dumps({
+                        "from": {"tasklist": {"_id": "1" * 24, "title": "CI 虚构分组甲"},
+                                 "stage": {"_id": "3" * 24, "name": "CI 虚构阶段甲"}},
+                        "to": {"tasklist": {"_id": "2" * 24, "title": "CI 虚构完成分组"},
+                               "stage": {"_id": "4" * 24, "name": "CI 虚构阶段乙"}},
+                    }, ensure_ascii=False),
+                }, {
+                    "id": "ci-synthetic-commit-notice", "action": "standard",
+                    "boundToObjectId": "ci-synthetic-task", "boundToObjectType": "task",
+                    "createTime": timestamp,
+                    "content": json.dumps({"title": "关联了提交 「CI 虚构通知内容\n」",
+                                           "customCreator": {"name": "ci-unverified-account"}}, ensure_ascii=False),
+                }, {
+                    "id": "ci-synthetic-mr-notice", "action": "standard",
+                    "boundToObjectId": "ci-synthetic-task", "boundToObjectType": "task",
+                    "createTime": timestamp,
+                    "content": json.dumps({"title": "关联了合并请求 「CI 虚构通知内容」",
+                                           "customCreator": {"name": "ci-unverified-account"}}, ensure_ascii=False),
                 }],
             }],
         }

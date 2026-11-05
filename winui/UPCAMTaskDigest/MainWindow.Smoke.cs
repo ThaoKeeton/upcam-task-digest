@@ -200,6 +200,13 @@ public sealed partial class MainWindow
             Invoke(Find<Button>("run-manual")!);
             await WaitForAsync(() => !_busy);
             Assert(_state.History.Count == 1, "Synthetic workflow and local history");
+            Assert(_state.Output.Contains("任务位置变更 1 条") &&
+                _state.Output.Contains("Teambition 显示关联提交 1 条") &&
+                _state.Output.Contains("Teambition 显示关联合并请求 1 条"),
+                "Packaged workflow supports bounded position and association display events");
+            Assert(_state.Output.Contains("代码来源、实际提交及合并结果未核实") &&
+                !_state.Output.Contains("CI 虚构通知内容") && !_state.Output.Contains("ci-unverified-account"),
+                "Native report keeps association evidence unverified and notice text local");
 
             foreach (var size in new[] { new SizeInt32(1180, 800), new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540) })
             {

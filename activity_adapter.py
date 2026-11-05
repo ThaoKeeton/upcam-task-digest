@@ -6,12 +6,14 @@ import unicodedata
 from urllib.parse import unquote, urlsplit
 
 from teambition_readonly import CollectionError, identifier, validate_binding
+from standard_notices import standard_association_notification
 
 
 MAX_CONTENT = 65536
 QUOTE_ROLE = 'quoted-context-not-author-opinion'
 OBSERVED_ACTIONS = frozenset({'create', 'comment', 'involve.add', 'update.taskflowstatus',
-                              'standard', 'update_content', 'update_executor'})
+                              'standard', 'update_content', 'update_executor',
+                              'move.cross.from.stage.to.stage'})
 
 
 def unsafe_controls(value):
@@ -330,6 +332,46 @@ def executor_change(raw, config):
             'needs_review': not valid_names or automation_conflict}
 
 
+def stage_movement(raw):
+    """Parse the evidenced task-position move, never a completion transition."""
+    if raw.get('action') != 'move.cross.from.stage.to.stage':
+        return None
+    try:
+        data = bounded_object(raw.get('content'))
+        if data is None or set(data) != {'from', 'to'}:
+            return None
+        positions = {}
+        for endpoint in ('from', 'to'):
+            value = data[endpoint]
+            if not isinstance(value, dict) or set(value) != {'tasklist', 'stage'}:
+                return None
+            parsed = {}
+            for key, label_key in (('tasklist', 'title'), ('stage', 'name')):
+                node = value[key]
+                if not isinstance(node, dict) or set(node) != {'_id', label_key}:
+                    return None
+                identity = identifier(node['_id'])
+                label = node[label_key]
+                if (len(identity) != 24 or not isinstance(label, str) or not label.strip()
+                        or label != label.strip() or any(char in '\r\n\t' for char in label)
+                        or unsafe_controls(label) or unsupported_markup(label)):
+                    return None
+                label.encode('utf-8', errors='strict')
+                parsed[key + '_id'] = identity
+                parsed[key + '_label'] = label
+            positions[endpoint] = parsed
+        before, after = positions['from'], positions['to']
+        if (before['tasklist_id'], before['stage_id']) == (after['tasklist_id'], after['stage_id']):
+            return None
+        for key in ('tasklist', 'stage'):
+            if before[key + '_id'] == after[key + '_id'] and before[key + '_label'] != after[key + '_label']:
+                return None
+        return {'pattern': 'task-position-movement', 'previous': before, 'target': after,
+                'parsed_payload': data, 'completion_evidence': False, 'needs_review': False}
+    except (CollectionError, ValueError, TypeError, UnicodeError, RecursionError):
+        return None
+
+
 def standard_commit_candidate(raw):
     data = bounded_object(raw.get('content'))
     if data is None:
@@ -357,8 +399,11 @@ def parse_activity(raw, config):
         return 'status', transition['resolved']
     if action == 'update_executor':
         return ('other', False) if executor_change(raw, config) is not None else ('unknown', False)
+    if action == 'move.cross.from.stage.to.stage':
+        return ('other', False) if stage_movement(raw) is not None else ('unknown', False)
     if action == 'standard':
-        return ('other', False) if standard_commit_candidate(raw) is not None else ('unknown', False)
+        return ('other', False) if (standard_association_notification(raw) is not None
+                                   or standard_commit_candidate(raw) is not None) else ('unknown', False)
     kinds = {'create': 'created', 'comment': 'comment', 'involve.add': 'other',
              'update_content': 'other'}
     return kinds.get(action, 'unknown') if isinstance(action, str) else 'unknown', False

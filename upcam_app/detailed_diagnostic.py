@@ -63,6 +63,7 @@ _FILTER_FIELDS = frozenset({
 })
 _OBSERVED_ACTIONS = frozenset({
     "create", "comment", "involve.add", "update.taskflowstatus", "standard", "update_content", "update_executor",
+    "move.cross.from.stage.to.stage",
 })
 _CREDENTIAL_NAMES = frozenset({
     "authorization", "proxyauthorization", "authentication", "auth", "cookie", "setcookie",
