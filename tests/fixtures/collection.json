@@ -10,6 +10,8 @@
         "projectId": "demo-project",
         "isArchived": false,
         "content": "虚构旧任务",
+        "uniqueId": 101,
+        "project": {"_id": "demo-project", "uniqueIdPrefix": "DEMO"},
         "executorId": "demo-person",
         "tfsId": "demo-open",
         "created": "2020-01-01T00:00:00Z",

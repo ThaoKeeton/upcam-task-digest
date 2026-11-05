@@ -441,10 +441,20 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
 
 
 def _validated_source_report(collection: dict, config: dict, day, window=None) -> dict:
+    if (collection.get('data_altered') is True or collection.get('sendable') is False
+            or collection.get('format') == 'upcam-teambition-detailed-diagnostic-v1'):
+        raise AutomatedDigestBlocked("诊断导出经过删改，只用于定位，不能作为可发送来源。")
     clean_config = validate_mappings(config)
     base = build_digest(collection, clean_config, day, window=window)
     if _base_failure_issues(base):
         raise AutomatedDigestBlocked(_source_event_failure_message(base, collection, clean_config))
+    from task_display import TaskDisplayError, format_task_reference
+    records = {record_id(row['task']): row['task'] for row in collection['records']}
+    for audit in base['audit']:
+        try:
+            audit['display_reference'] = format_task_reference(records[audit['task_id']], clean_config)
+        except TaskDisplayError as exc:
+            raise AutomatedDigestBlocked(f"任务 {audit['task_id']}：{exc}") from None
     return base
 
 
@@ -464,6 +474,7 @@ def diagnose_automatic_source(collection: dict, config: dict, day, window=None) 
 
 def _apply_summaries(base_report: dict, summary_by_task: dict[str, str],
                      substantive: dict[str, list[str]]) -> dict:
+    from formal_content import formal_task_content, FormalContentError
     result = deepcopy(base_report)
     hard_task_ids = {item["task_id"] for item in result.get("audit", []) if item.get("hard_review")}
     result["issues"] = _base_failure_issues(result)
@@ -474,17 +485,23 @@ def _apply_summaries(base_report: dict, summary_by_task: dict[str, str],
         if task_id in hard_task_ids:
             continue
         proposed = summary_by_task.get(task_id, "")
+        if not isinstance(proposed, str):
+            raise AutomatedDigestBlocked("Summary text failed local validation; this digest was not sent")
         if task_id in substantive and not proposed:
             raise AutomatedDigestBlocked("OpenAI omitted a nonempty comment summary; this digest was not sent")
         if (len(proposed) > MAX_SUMMARY_CHARS or any(ord(char) < 32 for char in proposed)
                 or any(char in "\u2028\u2029" for char in proposed)
                 or proposed != proposed.strip()):
             raise AutomatedDigestBlocked("Summary text failed local validation; this digest was not sent")
-        pieces = [piece for piece in task.get("summary", "").split("；")
-                  if piece != "评论内容语义归纳待复核" and not piece.startswith("原文摘录：")]
-        if proposed:
-            pieces.append(proposed)
-        task["summary"] = "；".join(pieces)
+        if proposed and task_id not in substantive:
+            raise AutomatedDigestBlocked("Unexpected summary text for acknowledgement-only comments")
+        try:
+            task.update(formal_task_content(audit, summary_by_input.get(task_id), proposed,
+                                            task_id in substantive))
+        except FormalContentError:
+            raise AutomatedDigestBlocked("正式日报内容未通过结构化证据校验，未发送。") from None
+        task['title'] = audit['display_reference']['title']
+        task['url'] = audit['display_reference']['url']
         audit["needs_review"] = False
         if task_id in summary_by_input:
             summary_by_input[task_id]["semantic_summary"] = proposed
@@ -563,7 +580,7 @@ def validate_automated_report(report: dict, collection: dict, config: dict,
     if not isinstance(attested, str) or fingerprint(copy) != attested:
         raise AutomatedDigestBlocked("Automated report changed after generation")
     # Recompute deterministic data and bind the rendered output to the model summary.
-    base = build_digest(collection, validate_mappings(config), report["digest"]["date"],
+    base = _validated_source_report(collection, validate_mappings(config), report["digest"]["date"],
                         window=(report["scope"]["start"], report["scope"]["end_exclusive"]))
     request_rows, row_to_task, substantive = _summary_inputs(base)
     summaries = report.get("summary_inputs")
@@ -582,6 +599,7 @@ def validate_automated_report(report: dict, collection: dict, config: dict,
     if not request_rows and any(by_task.values()):
         raise AutomatedDigestBlocked("Unexpected summary text for acknowledgement-only comments")
     expected = _apply_summaries(base, by_task, substantive)
-    if not expected["ready_to_send"] or expected["markdown"] != report.get("markdown"):
+    if (not expected["ready_to_send"] or expected["digest"] != report.get("digest")
+            or expected["markdown"] != report.get("markdown")):
         raise AutomatedDigestBlocked("Rendered report differs from locally validated evidence")
 

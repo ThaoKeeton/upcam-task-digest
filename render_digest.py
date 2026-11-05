@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
+from report_contract import report_window
 
 
 TEMPLATE = Path(__file__).parent / "templates" / "daily_digest.json"
@@ -28,6 +29,26 @@ def text(value):
 def summary_text(value):
     """Only an explicit empty string means no substantive supplement."""
     return '' if isinstance(value, str) and value == '' else text(value)
+
+
+def time_range_text(data):
+    """Display the frozen collection window, never the current sending clock."""
+    value = data.get('time_range')
+    if value is None:
+        start, end = report_window(data['date'])
+    else:
+        if (not isinstance(value, dict) or set(value) != {'start', 'end_exclusive', 'timezone'}
+                or value['timezone'] != 'Asia/Shanghai'):
+            raise ValueError('Invalid displayed report window')
+        start, end = report_window(data['date'], value['start'], value['end_exclusive'])
+    def display(instant, include_date):
+        result = instant.strftime('%Y-%m-%d %H:%M' if include_date else '%H:%M')
+        if instant.second or instant.microsecond:
+            result += instant.strftime(':%S')
+            if instant.microsecond:
+                result += ('.%06d' % instant.microsecond).rstrip('0')
+        return result
+    return display(start, True) + ' — ' + display(end, end.date() != start.date())
 
 
 def render_digest(data):
@@ -60,8 +81,8 @@ def render_digest(data):
         f'{category["label"]} {len(groups[category["key"]])} 项'
         for category in active
     )
-    overview = f'📊 更新 {len(data["tasks"])} 项' + (f"：{counts}" if counts else "")
-    blocks = [f'**{template["title"]}**  \n🗓️ 日期：{day}  \n{overview}']
+    overview = f'{template.get("update_label", "📊 更新")} {len(data["tasks"])} 项' + (f"：{counts}" if counts else "")
+    blocks = [f'**{template["title"]}**  \n{template.get("time_range_label", "🕒 时间范围")}：{time_range_text(data)}  \n{overview}']
     if not data["tasks"]:
         empty_message = template.get("no_activity_message")
         if not isinstance(empty_message, str) or not empty_message.strip():

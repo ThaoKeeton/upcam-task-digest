@@ -66,10 +66,10 @@ historical_event_coverage=false，并进入报告 scope。生成日报时重新�
 - `update.taskflowstatus`：安全解析 content JSON 字符串，要求 tfsId、oldTfsId、taskflowstatus、oldTaskflowstatus、isDone 齐全且类型、ID/名称映射一致；重复 JSON 键、非标准数值、缺失/错误字段都待复核。当前只支持已核验的字符串状态名，其他结构不猜测。
 - 事件 isDone 只验证结构类型并以 event_is_done 保留，**不假设它表达目标状态，也不要求与解决状态一致**。解决与否由事件目标状态 ID 及已核验映射判断。
 - 同一任务窗口内状态事件按时间排序，前一目标 ID 必须衔接后一旧状态 ID；任意同时间多次状态变化、事件链断裂、最后目标与当前 tfsId 不符或当前完成标记不是布尔值均阻断。配置的“已解决”是分类集合，不必包含所有 API 已完成状态：目标不在该集合但当前 isDone=true 时仍属其他状态变化，不误判成冲突，也不分类为已解决。目标在集合内时，当前 isDone 必须为 true；否则阻断。当前状态只用于校验，不能凭它生成解决事件。oldTfsId 与 tfsId 相同的事件继续阻断，即使名称为已解决，也不能据此认定进入新状态。
-- move.cross.from.stage.to.stage：content 必须是有界、无重复键、仅有 from/to 的 JSON；两端仅含 tasklist（_id/title）与 stage（_id/name），ID 为有效 24 字符 ID，名称为非空、无标记和控制字符的单行 UTF-8。两端位置 ID 组合必须变化，同 ID 的名称不得冲突。按时间核对位置链、同刻歧义及末次目标与当前 tasklistId/stageId；任一冲突或未支持结构均阻断。仅记录“任务位置变更 N 条”，不据工作池/完成池等名称或当前完成标记推断解决，位置原文不交给模型。
+- move.cross.from.stage.to.stage：content 必须是有界、无重复键、仅有 from/to 的 JSON；两端仅含 tasklist（_id/title）与 stage（_id/name），ID 为有效 24 字符 ID，名称为非空、无标记和控制字符的单行 UTF-8。两端位置 ID 组合必须变化，同 ID 的名称不得冲突。按时间核对位置链、同刻歧义及末次目标与当前 tasklistId/stageId；任一冲突或未支持结构均阻断。本机诊断记录“任务位置变更 N 条”，正式摘要不复制该技术计数，不据工作池/完成池等名称或当前完成标记推断解决，位置原文不交给模型。
 - update_executor 的 content 按有界、无重复键的 JSON 对象解析，要求 _executorId/_oldExecutorId；姓名仅从 owner_names 的 ID 映射获得，缺失不猜测。content.payload 和事件外层 payload 分开保留；fromAutomation 必须为布尔值，双来源冲突则待复核。该标记只描述来源，不能推断操作人身份。执行人事件按时间排序后检查旧/新 ID 链连续性、任何同一时刻的多条变更、末次目标与当前 executorId 一致性；任一冲突均阻断发送，不能用事件 ID 排序消除同刻歧义。
 - standard 只对 title 精确为“关联了提交”，或以该短语加冒号/空白分隔后续文本，并且有 customCreator.name 的 JSON 识别 commit-link-title 候选。该受限前缀后的内容允许 LF/CRLF 多行，原始 title 不归一化、不截断；额外控制字符仍拒绝识别。否定句、前置描述、无分隔后缀及其他标题不匹配；未匹配不推断为提交。候选仍需复核，customCreator.name 仅是来源原文，不作为已核验成员或实际提交的证明。
-- v0.3.6 新增独立的 association-display-notice：仅接受精确 title/customCreator 对象、customCreator 仅含 name，标题完整符合“关联了提交 「非空内容」”或“关联了合并请求 「非空内容」”。标题可在括号内容内含 LF/CRLF，不接受其他控制字符、标记或额外/冲突来源载荷。按现有动态 ID 去重后统计通知条数，不按标题、创建者或假定提交 ID 去重。日报只写“Teambition 显示关联提交/合并请求 N 条；代码来源、实际提交及合并结果未核实”；source_verified/object_verified 为 false，原文仅保留本机，不推断平台、实际提交数、作者、合并或解决，不交给 OpenAI。未符合该严格展示结构的旧候选仍阻断，没有批量放开 standard。
+- association-display-notice：仅接受精确 title/customCreator 对象、customCreator 仅含 name，标题完整符合“关联了提交 「非空内容」”或“关联了合并请求 「非空内容」”。标题可在括号内容内含 LF/CRLF，不接受其他控制字符、标记或额外/冲突来源载荷。按动态 ID 去重后在本机审计统计通知，不按标题、创建者或假定提交 ID 去重。source_verified/object_verified 仍为 false，不推断平台、实际提交数、作者、合并或解决，原文不交给 OpenAI。v0.3.7 正式内容筛选不再复制通知计数和来源诊断语；原始证据继续保留，未符合严格展示结构的旧候选继续阻断。
 - 仅附件评论只适配已核验的空字符串正文、空 attachments/dingFiles、无重复 24 字符文件 ID 列表、text/markdown 模式与布尔 isOnlyNotifyMentions；记录文件数与“未读取文件内容”，不下载、不推断内容或进度，不调用 OpenAI。它仍是评论动态，不能输出“无动态”。内外层冲突、未知附件/图片/数据或不明空正文仍阻断。
 - hrefPreview 仅适配精确的不可用预览空信息结构，URL 必须是无凭据 HTTP(S) 并与正文完整 URL 标记匹配；元数据完整保留本机，预览错误文本不进入模型。非空预览信息、额外字段、未绑定链接或来源冲突仍阻断，不据此推断链接内容。
 - audit.status_transitions 保留状态 ID、原始事件布尔值及事件 ID；audit.parsed_changes 保留执行人、位置与通知/标题候选结构，原始 activity_evidence 始终保留。audit.executor_conflict/status_noop/position_conflict 明确记录对应冲突；position_changes 保留位置链证据。审计业务内容只存本机受控结果，不提交仓库、测试夹具或公开日志。
@@ -82,9 +82,19 @@ historical_event_coverage=false，并进入报告 scope。生成日报时重新�
 已接入交接的动态字段、已观察动作以及经独立只读验证的最近更新时间筛选；不扩大为历史任意事件口径。
 `view` 仅接受 verified、evidence、task_equals 三个字段；未知字段、拼写错误、错误类型及不支持的筛选
 在采集前直接失败，即使零任务也不能静默忽略。不支持的视图规则必须先扩展适配器并补测试。
-同任务事件合并一次：存在未知/歧义时归其他变更待复核；否则最后一次状态变更为已解决优先，
-其次新建、最后其他；含评论因语义待复核暂归其他变更。后续重开覆盖此前解决；同一时刻多次状态变更待复核。
-分类在动态与标题、负责人、当前状态等所有复核检查后决定；缺失负责人等情况也不能留在已解决分类。
+同任务事件合并一次：原始诊断阶段存在未知/歧义时保持硬性阻断，含评论可暂记语义待处理。正式生成完成摘要后重新分类：最后有效状态事件进入已解决优先，其次有实质评论摘要的工作进展，再次有窗口内新建事件的新建，最后其他。后续重开覆盖此前解决；当前状态自身不能生成解决事件。同刻冲突和缺失映射等硬性问题在请求模型前停止。
+
+正式摘要只从结构化审计和已验证摘要选择：实质工作结果/风险/下一步、有效执行人变化、去重的文件数量及“未读取文件内容”。不复制原始诊断摘要中的新建、评论、状态、其他条数或位置/关联通知计数，不解析诊断字符串来拼接正式内容。没有补充时 summary 为显式空字符串；任意非确认评论的模型空回复仍阻断。分类和显示内容在发送验证时按相同规则重建，并逐项比较 digest 与 Markdown。
+
+## 标题、时间与任务链接
+
+标题编号来自任务 detail 的真实 `uniqueId`（正整数或 ASCII 数字字符串，保留字符串前导零）以及 API `project.uniqueIdPrefix` 或已确认的本机前缀。任务、嵌套项目标识和前缀冲突时失败；缺失编号不得从 API 长 ID、标题、评论或提交信息猜测。编号后一个空格连接原始 content，冒号和其他标点保持。编号及显示设置不扩充模型输入，模型仍只得到原始任务标题和必要评论。
+
+可选 `task_link_view_id` 保存在既有 view 过滤对象之外，接受当前项目的完整“全部”视图地址或 24 字符 ID；构造 `/project/{projectId}/tasks/view/{viewId}/task/{taskId}`。未设置时使用官方 `/task/{taskId}`，不使用旧的短项目路由。手动前缀及视图绑定企业/项目；切换来源清空旧值，后台拒绝陈旧绑定。
+
+头部使用 🕒 时间范围和 📊 更新。窗口来自采集前冻结并校验的 Asia/Shanghai 起止时间，跨日显示两端日期，同日可省略结束日期；显示不改变结束边界右开的采集语义。分类内从 1 编号，条目间保持既定空段，当前状态和负责人保留独立信息行。
+
+编号字段资料：[任务详情](https://open.teambition.com/docs/apis/6321c6d2912d20d3b5a4a7b8)、[官方 Task SDK](https://github.com/teambition/teambition-sdk/blob/release/src/schemas/Task.ts)、[官方任务链接规范](https://github.com/teambition/tb-skills/blob/main/dingtalk-teambition/SKILL.md)。这些资料支持字段与路由实现，不等于目标企业实际响应、真实链接跳转或已发消息均已验收。
 创建任务字段与当前 isDone 都不能证明昨天新建/解决。当前状态与负责人仅作当前信息展示。
 未知时间会保留候选任务并明确“是否属于本日待复核”，不将其声称为昨日已发生动态。
 已由更新时间视图选中但没有本日可归类动态的任务也保留为“动态证据不足，待复核”，不静默漏掉视图成员。

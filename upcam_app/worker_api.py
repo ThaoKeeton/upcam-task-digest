@@ -558,9 +558,12 @@ class WorkerService:
 
     def _preview_sample(self, payload: dict) -> dict:
         try:
-            _start, end = parse_manual_window(payload.get("start", ""), payload.get("end", ""))
+            start, end = parse_manual_window(payload.get("start", ""), payload.get("end", ""))
+            start, end = start.astimezone(SHANGHAI), end.astimezone(SHANGHAI)
             sample = json.loads(self.sample_path.read_text(encoding="utf-8"))
             sample["date"] = end.date().isoformat()
+            sample['time_range'] = {'start': start.isoformat(), 'end_exclusive': end.isoformat(),
+                                    'timezone': 'Asia/Shanghai'}
             markdown = render_digest(sample)
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
             raise WorkerApiError("无法读取仓库样例或当前日期范围无效。") from None

@@ -1546,9 +1546,12 @@ class DigestDesktopApp:
 
     def _preview_sample(self):
         try:
-            _, end = parse_manual_window(self.manual_start.get(), self.manual_end.get())
+            start, end = parse_manual_window(self.manual_start.get(), self.manual_end.get())
+            start, end = start.astimezone(SHANGHAI), end.astimezone(SHANGHAI)
             data = json.loads(SAMPLE.read_text(encoding="utf-8"))
             data["date"] = end.date().isoformat()
+            data['time_range'] = {'start': start.isoformat(), 'end_exclusive': end.isoformat(),
+                                  'timezone': 'Asia/Shanghai'}
             output = render_digest(data)
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
             messagebox.showerror("无法生成样例", str(exc), parent=self.root)

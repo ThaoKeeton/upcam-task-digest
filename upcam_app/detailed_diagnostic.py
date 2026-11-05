@@ -34,7 +34,7 @@ _REDACTED = "[REDACTED]"
 
 _TASK_FIELDS = frozenset({
     "id", "_id", "taskId", "projectId", "content", "executorId", "tfsId", "isDone",
-    "isArchived", "created", "updated", "tasklistId", "stageId", "scenariofieldconfigId", "visible", "parentTaskId",
+    "isArchived", "created", "updated", "tasklistId", "stageId", "scenariofieldconfigId", "visible", "parentTaskId", "uniqueId",
 })
 _EVENT_FIELDS = frozenset({
     "id", "_id", "taskId", "action", "boundToObjectId", "boundToObjectType", "createTime", "content",
@@ -57,6 +57,8 @@ _DIAGNOSTIC_FIELDS = frozenset({
 })
 _CONFIG_FIELDS = frozenset({
     "tenant_id", "project_id", "include_archived", "api_contract_verified", "action_rules",
+    "task_number_prefix", "task_link_view_id",
+    "task_display_scope",
 })
 _FILTER_FIELDS = frozenset({
     "executorId", "tasklistId", "stageId", "tfsId", "scenariofieldconfigId", "visible", "parentTaskId",
@@ -659,7 +661,11 @@ def _build(collection, config, metadata, credentials):
     charged = 0
     task_budget = max(512, available // 4)
     for index in sorted(task_priorities, key=lambda i: (task_priorities[i], i)):
-        task = scrubber.clean(_project(source_records[index]["task"], _TASK_FIELDS))
+        raw_task = source_records[index]["task"]
+        task_fields = _project(raw_task, _TASK_FIELDS)
+        if 'project' in raw_task:
+            task_fields['project'] = _project(raw_task['project'], {'id', '_id', 'uniqueIdPrefix'})
+        task = scrubber.clean(task_fields)
         record = {"task": task, "activities": []}
         cost = _json_size(record, extra_indent=4) + 32
         if charged + cost > task_budget:
