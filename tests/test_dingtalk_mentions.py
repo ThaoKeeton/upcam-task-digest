@@ -256,6 +256,9 @@ class MentionWorkflowTests(unittest.TestCase):
         with patch.object(self.catalog, "load", side_effect=AssertionError("No model cache required")):
             result = self.workflow.run(self.start, self.end)
         self.assertEqual(self.model_requests, [])
+        self.assertEqual(result["report"]["markdown"],
+                         "**Teambition｜UPCAM 项目任务动态日报**  \n"
+                         "🕒 时间范围：2026-01-01 16:50 — 2026-01-02 08:50  \n📊 更新 0 项\n")
         self.assertEqual(json.loads(self.bodies[0])["markdown"]["text"],
                          result["report"]["markdown"].removesuffix("\n") + "\n\n\u3000\n\n@ci-no-dynamic\n")
 

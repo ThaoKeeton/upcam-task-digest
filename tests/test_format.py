@@ -58,7 +58,23 @@ class FormatTests(unittest.TestCase):
         for absent in ("已解决", "新建任务", "其他变更"):
             self.assertNotIn(absent, output)
         self.data["tasks"] = []
-        self.assertEqual(render_digest(self.data), "**Teambition｜UPCAM 项目任务动态日报**  \n🕒 时间范围：2026-01-01 00:00 — 2026-01-02 00:00  \n📊 更新 0 项\n\n\u3000\n\nℹ️ 经完整采集，筛选时间段内未发现任务动态。\n")
+        self.assertEqual(render_digest(self.data), "**Teambition｜UPCAM 项目任务动态日报**  \n🕒 时间范围：2026-01-01 00:00 — 2026-01-02 00:00  \n📊 更新 0 项\n")
+
+    def test_empty_custom_windows_keep_only_title_range_and_zero_count(self):
+        self.data.update(date="2026-01-02", tasks=[])
+        for start, end, displayed in (
+            ("2026-01-01T16:50:00+08:00", "2026-01-02T08:50:00+08:00",
+             "2026-01-01 16:50 — 2026-01-02 08:50"),
+            ("2026-01-02T00:00:00+08:00", "2026-01-02T16:50:00+08:00",
+             "2026-01-02 00:00 — 16:50"),
+        ):
+            with self.subTest(start=start, end=end):
+                self.data["time_range"] = {
+                    "start": start, "end_exclusive": end, "timezone": "Asia/Shanghai",
+                }
+                self.assertEqual(render_digest(self.data),
+                    "**Teambition｜UPCAM 项目任务动态日报**  \n"
+                    f"🕒 时间范围：{displayed}  \n📊 更新 0 项\n")
 
     def test_spacer_paragraphs_and_literal_numbering(self):
         output = render_digest(self.data)
