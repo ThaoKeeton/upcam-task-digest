@@ -1222,6 +1222,18 @@ class DigestDesktopApp:
         if not messagebox.askyesno("清除密钥", "清除本机保存的 Teambition、钉钉与 OpenAI 密钥？防重复账本身份会保留。",
                                    parent=self.root):
             return
+        try:
+            current_credentials = self.secret_store.load()
+            entered = {key: self.values[key].get() for key in SECRET_FIELDS if self.values[key].get()}
+            pending = dict(self.settings)
+            for key in ("dingtalk_mention_mode", "dingtalk_mentions"):
+                if key in self.values:
+                    pending[key] = self.values[key].get()
+            reject_credential_mentions(self.settings, self.saved_secrets, current_credentials, entered)
+            reject_credential_mentions(pending, self.saved_secrets, current_credentials, entered)
+        except (MentionConfigError, SecretStoreError, OSError) as exc:
+            messagebox.showerror("无法清除密钥", str(exc), parent=self.root)
+            return
         self.settings["auto_send_enabled"] = False
         self.settings["auto_send_enabled_since_local"] = ""
         self._auto_run_enabled_since = datetime.now().replace(microsecond=0)

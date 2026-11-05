@@ -154,6 +154,7 @@ public sealed partial class MainWindow
                 "Local DingTalk check validates two targets without exposing identifiers or sending");
             await CaptureAsync(Path.Combine(output, "dingtalk.png"));
             Navigate("project");
+            await WaitForAsync(() => Find<Button>("probe-project") is not null);
             Assert(_state.Text("task_number_prefix") == "DEMO" && _state.Text("task_link_view_id") == new string('f', 24),
                 "Native task display settings save confirmed prefix and normalize the all-view URL");
             prefixInput.Text = "STALE";
