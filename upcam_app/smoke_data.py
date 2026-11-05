@@ -50,8 +50,18 @@ class SyntheticClient:
                     "createTime": timestamp,
                     "content": json.dumps({
                         "comment": "CI 虚构回复：验证仍未结束。",
+                        "attachments": [], "dingFiles": [],
+                        "files": [char * 24 for char in "abcde"],
+                        "renderMode": "markdown", "isOnlyNotifyMentions": False,
                         "quote": json.dumps({"_id": "a" * 24, "content": "CI 虚构历史引用：初稿已准备。"}, ensure_ascii=False),
                     }, ensure_ascii=False),
+                }, {
+                    "id": "ci-synthetic-assignment", "action": "update_executor",
+                    "boundToObjectId": "ci-synthetic-task", "boundToObjectType": "task",
+                    "createTime": timestamp,
+                    "content": json.dumps({"_oldExecutorId": "demo-person-2",
+                                           "_executorId": "demo-person",
+                                           "payload": {"fromAutomation": True}}),
                 }, {
                     "id": "ci-synthetic-position", "action": "move.cross.from.stage.to.stage",
                     "boundToObjectId": "ci-synthetic-task", "boundToObjectType": "task",

@@ -9,7 +9,7 @@ from automated_digest import (
     AutomatedDigestBlocked, build_automated_digest, collection_validation_message,
     requires_openai_summary,
 )
-from delivery_guard import DeliveryBlocked, DeliveryGuard
+from delivery_guard import DeliveryBlocked, DeliveryGuard, validate_manual_delivery_options
 from digest_pipeline import validate_view
 from report_contract import SHANGHAI
 from runtime_mappings import validate_mappings
@@ -40,8 +40,15 @@ class DigestWorkflow:
         self.model_catalog = model_catalog or OpenAIModelCatalog(self.data_dir / "openai_models.json")
         self.guard_factory = guard_factory
 
-    def run(self, start_local: datetime, end_local: datetime, *, schedule_key: str | None = None) -> dict:
+    def run(self, start_local: datetime, end_local: datetime, *, schedule_key: str | None = None,
+            allow_confirmed_repeat: bool = False, manual_request_id: str | None = None) -> dict:
         """Run one fixed local-time range; every delivery enters DeliveryGuard."""
+        try:
+            validate_manual_delivery_options(allow_confirmed_repeat, manual_request_id)
+        except DeliveryBlocked as exc:
+            raise WorkflowBlocked(str(exc)) from None
+        if allow_confirmed_repeat and schedule_key is not None:
+            raise WorkflowBlocked("定时任务不能使用手动重复发送选项；未发送消息。")
         if (not isinstance(start_local, datetime) or not isinstance(end_local, datetime)
                 or end_local <= start_local):
             raise WorkflowBlocked("The selected collection window is invalid")
@@ -159,6 +166,7 @@ class DigestWorkflow:
                     self.secrets["dingtalk_webhook"], self.secrets["dingtalk_signing_secret"], markdown),
                 current_collection=collection, current_config=config,
                 current_model=model, current_effort=effort, current_service_tier=service_tier,
+                allow_confirmed_repeat=allow_confirmed_repeat, manual_request_id=manual_request_id,
             )
             self.history.finish_delivery(run_id, "sent", "DingTalk acknowledged delivery.")
         except DeliveryBlocked as exc:

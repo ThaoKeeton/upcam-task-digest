@@ -396,7 +396,9 @@ public sealed partial class MainWindow
             ActionButton("生成并自动发送", "run-manual", async () =>
             {
                 await EnsureSavedAsync();
-                var result = await Worker.SendAsync("run_manual", _state.WindowPayload());
+                var payload = _state.WindowPayload();
+                payload["manual_request_id"] = Guid.NewGuid().ToString("D");
+                var result = await Worker.SendAsync("run_manual", payload);
                 _state.Output = Value(result, "markdown");
                 await RefreshHistoryAsync(); Navigate("run");
                 SetStatus("日报已发送并收到钉钉确认。运行记录：" + Value(result, "run_id"));

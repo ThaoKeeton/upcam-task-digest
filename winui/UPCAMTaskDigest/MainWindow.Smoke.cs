@@ -230,8 +230,15 @@ public sealed partial class MainWindow
                 "Packaged formal report uses business number, actual time range, progress category and all-view route");
             Assert(!_state.Output.Contains("评论 1 条") && !_state.Output.Contains("其他变更 3 条") &&
                 !_state.Output.Contains("任务位置变更") && !_state.Output.Contains("未核实") &&
+                !_state.Output.Contains("评论附有") && !_state.Output.Contains("未读取文件内容") &&
+                !_state.Output.Contains("执行人变更") && _state.Output.Contains("CI 虚构摘要  \n当前：") &&
                 !_state.Output.Contains("CI 虚构通知内容") && !_state.Output.Contains("ci-unverified-account"),
-                "Native formal report excludes diagnostic prose while retaining validated source evidence locally");
+                "Native formal report keeps communication summary without file processing or assignee appendices");
+
+            Invoke(Find<Button>("run-manual")!);
+            await WaitForAsync(() => !_busy);
+            Assert(_state.History.Count == 2 && _state.History.All(row => Value(row, "state") == "sent"),
+                "Deliberate second manual click resends the same window without an extra confirmation dialog");
 
             foreach (var size in new[] { new SizeInt32(1180, 800), new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540) })
             {

@@ -63,7 +63,7 @@ class FormalContentTests(unittest.TestCase):
         self.assertEqual(formal_task_content(audit, entry, "虚构：保留风险。", True),
                          {"category": "progress", "summary": "虚构：保留风险。"})
 
-    def test_owner_chain_is_preserved_without_splitting_names(self):
+    def test_system_owner_chain_does_not_append_administrative_text(self):
         audit = self.audit(parsed_changes=[
             {"action": "update_executor", "needs_review": False,
              "previous_name": "虚构甲；原文摘录：甲", "target_name": "虚构乙",
@@ -72,8 +72,15 @@ class FormalContentTests(unittest.TestCase):
              "previous_name": "虚构乙", "target_name": "虚构丙"},
         ])
         self.assertEqual(formal_task_content(audit, None, "虚构：等待验证。", True),
-                         {"category": "progress", "summary":
-                          "虚构：等待验证。；执行人变更：虚构甲；原文摘录：甲 → 虚构乙；执行人变更：虚构乙 → 虚构丙"})
+                         {"category": "progress", "summary": "虚构：等待验证。"})
+
+    def test_owner_only_event_keeps_an_explicit_empty_supplement(self):
+        audit = self.audit(event_counts={"other": 1}, parsed_changes=[{
+            "action": "update_executor", "needs_review": False,
+            "previous_name": "虚构甲", "target_name": "虚构乙", "from_automation": True,
+        }])
+        self.assertEqual(formal_task_content(audit, None, "", False),
+                         {"category": "other", "summary": ""})
 
     def test_owner_change_needing_review_does_not_supply_display_names(self):
         audit = self.audit(parsed_changes=[{
@@ -83,7 +90,7 @@ class FormalContentTests(unittest.TestCase):
         self.assertEqual(formal_task_content(audit, None, "", False),
                          {"category": "other", "summary": ""})
 
-    def test_files_are_deduplicated_across_comments_and_mirrored_fields(self):
+    def test_validated_file_metadata_does_not_supply_a_formal_summary(self):
         entry = {"comments": [
             self.comment(["a" * 24, "b" * 24], extra_evidence={"files": ["a" * 24, "b" * 24]}),
             self.comment(["b" * 24]),
@@ -91,14 +98,19 @@ class FormalContentTests(unittest.TestCase):
         ]}
         self.assertEqual(formal_task_content(self.audit(event_counts={"comment": 3}),
                                             entry, "", False),
-                         {"category": "other", "summary": "评论附有 3 个文件，未读取文件内容"})
+                         {"category": "other", "summary": ""})
 
-    def test_comment_summary_and_files_are_both_retained(self):
+    def test_material_comment_summary_has_no_appended_file_processing_notice(self):
         entry = {"comments": [self.comment(["a" * 24], file_count=999,
                                            attachment_only=True)]}
         self.assertEqual(formal_task_content(self.audit(), entry, "虚构：仍待复查。", True),
-                         {"category": "progress", "summary":
-                          "虚构：仍待复查。；评论附有 1 个文件，未读取文件内容"})
+                         {"category": "progress", "summary": "虚构：仍待复查。"})
+
+    def test_explicit_communication_about_deliverables_and_handoff_is_preserved(self):
+        summary = "虚构：三份验收报告已补齐并交接给值班同事；兼容风险仍待复查。"
+        entry = {"comments": [self.comment(["a" * 24])]}
+        self.assertEqual(formal_task_content(self.audit(), entry, summary, True),
+                         {"category": "progress", "summary": summary})
 
     def test_unreviewed_file_evidence_is_not_counted(self):
         entry = {"comments": [self.comment(["a" * 24], extraction_needs_review=True)]}

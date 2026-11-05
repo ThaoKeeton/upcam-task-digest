@@ -155,8 +155,8 @@ class CommentEvidenceTests(unittest.TestCase):
         summary = report["digest"]["tasks"][0]["summary"]
         self.assertNotIn("评论 1 条", summary)
         self.assertNotIn("仅附件评论 1 条", summary)
-        self.assertIn("评论附有 2 个文件", summary)
-        self.assertIn("未读取文件内容", summary)
+        self.assertEqual(summary, "")
+        self.assertEqual(report["summary_inputs"][0]["comments"][0]["file_count"], 2)
         self.assertNotIn("未发现任务动态", report["markdown"])
         self.assertNotIn("已完成", summary)
         self.assertNotIn("待复核", summary)
@@ -176,7 +176,10 @@ class CommentEvidenceTests(unittest.TestCase):
         summary = report["digest"]["tasks"][0]["summary"]
         self.assertNotIn("评论 2 条", summary)
         self.assertNotIn("仅附件评论 2 条", summary)
-        self.assertIn("评论附有 3 个文件", summary)
+        self.assertEqual(summary, "")
+        self.assertEqual({file_id for comment in report["summary_inputs"][0]["comments"]
+                          for file_id in comment["payload_evidence"]["files"]},
+                         {"a" * 24, "b" * 24, "c" * 24})
         self.assertEqual(len(report["audit"][0]["event_ids"]), 2)
         self.assertEqual(client.calls, [])
 
@@ -190,8 +193,9 @@ class CommentEvidenceTests(unittest.TestCase):
         report = self.build(collection, config, client)
         summary = report["digest"]["tasks"][0]["summary"]
         self.assertNotIn("仅附件评论 2 条", summary)
-        self.assertIn("评论附有 2 个文件", summary)
-        self.assertNotIn("评论附有 3 个文件", summary)
+        self.assertEqual(summary, "")
+        self.assertEqual({file_id for comment in report["summary_inputs"][0]["comments"]
+                          for file_id in comment["payload_evidence"]["files"]}, set(FILES))
         self.assertEqual(len(report["audit"][0]["event_ids"]), 2)
         self.assertEqual(client.calls, [])
 
@@ -295,7 +299,7 @@ class CommentEvidenceTests(unittest.TestCase):
                         "demo-old-task", "demo-event-1", "demo-person"):
             self.assertNotIn(private, encoded)
         self.assertNotIn("SYNTHETIC_UNAVAILABLE_ERROR", report["markdown"])
-        self.assertIn("评论附有 2 个文件", report["digest"]["tasks"][0]["summary"])
+        self.assertEqual(report["digest"]["tasks"][0]["summary"], "虚构：验证仍未完成。")
         validate_automated_report(report, collection, config, "gpt-6-luna", "max")
 
     def test_opaque_preview_errors_with_markup_or_json_stay_local_and_out_of_model_request(self):
