@@ -145,6 +145,10 @@ public sealed partial class MainWindow
             Navigate("accounts");
             Find<TabView>("account-tabs")!.SelectedIndex = 1;
             await WaitForAsync(() => Find<Button>("check-dingtalk") is not null);
+            var reloadedMentions = Find<TextBox>("dingtalk-mentions")!;
+            Assert(reloadedMentions.AcceptsReturn &&
+                reloadedMentions.Text.Replace("\r\n", "\n").Replace("\r", "\n") == "ci-mention-one\nci-mention-two",
+                "Reloaded native multiline mention input retains every saved recipient");
             Invoke(Find<Button>("check-dingtalk")!);
             await WaitForAsync(() => !_busy);
             var mentionCheck = await Worker.SendAsync("validate_dingtalk_config");

@@ -71,9 +71,7 @@ public sealed partial class MainWindow
         mode.Items.Add("钉钉 userId");
         mode.SelectedIndex = _state.Text("dingtalk_mention_mode", "mobile") == "user_id" ? 1 : 0;
         mode.SelectionChanged += (_, _) => _state.Set("dingtalk_mention_mode", mode.SelectedIndex == 1 ? "user_id" : "mobile");
-        var targets = SettingText("艾特指定成员（可选，最多 50 人）", "dingtalk_mentions", "dingtalk-mentions", "留空不艾特；每行一个标识，不加 @");
-        targets.AcceptsReturn = true;
-        targets.TextWrapping = TextWrapping.Wrap;
+        var targets = SettingText("艾特指定成员（可选，最多 50 人）", "dingtalk_mentions", "dingtalk-mentions", "留空不艾特；每行一个标识，不加 @", multiline: true);
         targets.Height = 112;
         targets.MaxLength = 8000;
         return LocalScroll(Column(

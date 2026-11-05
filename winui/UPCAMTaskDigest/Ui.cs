@@ -56,9 +56,14 @@ public sealed partial class MainWindow
         return button;
     }
 
-    private TextBox SettingText(string header, string key, string id, string? placeholder = null)
+    private TextBox SettingText(string header, string key, string id, string? placeholder = null, bool multiline = false)
     {
-        var input = Identify(new TextBox { Header = header, Text = _state.Text(key), PlaceholderText = placeholder ?? "" }, id);
+        var input = Identify(new TextBox
+        {
+            Header = header, AcceptsReturn = multiline,
+            TextWrapping = multiline ? TextWrapping.Wrap : TextWrapping.NoWrap,
+            Text = _state.Text(key), PlaceholderText = placeholder ?? ""
+        }, id);
         var settingsAtCreation = _state.Settings;
         // TextChanged is deferred by WinUI. Commit synchronously before a
         // page switch/save, and ignore controls belonging to replaced state.
