@@ -98,7 +98,7 @@ class AutomaticScopeTests(unittest.TestCase):
         result = self.save(verification_window=self.window)
 
         self.assert_verified(result)
-        self.assertEqual(result["scope_probe"]["owner_ids"], ["demo-person"])
+        self.assertEqual(result["scope_probe"]["owner_ids"], ["demo-person", "demo-person-2"])
         self.assertEqual(result["scope_probe"]["status_ids"], ["demo-open"])
         self.assertEqual(result["scope_probe"]["status_name_suggestions"], {})
         for private in ("CI 虚构：验证原生界面布局", "synthetic-app-secret", "credentials", "credential_identity"):
@@ -109,7 +109,7 @@ class AutomaticScopeTests(unittest.TestCase):
 
         result = self.save()
 
-        self.assertEqual(result["scope_probe"]["owner_ids"], ["demo-person"])
+        self.assertEqual(result["scope_probe"]["owner_ids"], ["demo-person", "demo-person-2"])
         self.assertEqual(len(self.readonly.calls), 1)
 
     def test_initialize_and_unconfigured_save_perform_no_read_only_network_query(self):

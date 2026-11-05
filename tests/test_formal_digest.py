@@ -101,6 +101,55 @@ class FormalDigestTests(unittest.TestCase):
             self.assertNotIn(marker, summary)
         self.assertEqual(len(report["audit"][0]["activity_evidence"]), 4)
 
+    def test_five_files_and_automated_owner_change_stay_out_of_communication_summary(self):
+        self.record["activities"][0]["content"] = json.dumps({
+            "comment": "虚构：已有定位，下一步回归。", "attachments": [], "dingFiles": [],
+            "files": [char * 24 for char in "abcde"], "renderMode": "markdown",
+            "isOnlyNotifyMentions": False,
+        }, ensure_ascii=False)
+        previous_owner = self.record["task"]["executorId"]
+        self.config["owner_names"]["synthetic-new-owner"] = "虚构成员乙"
+        self.record["task"]["executorId"] = "synthetic-new-owner"
+        self.record["activities"].append(self.event("update_executor", "assign", {
+            "_oldExecutorId": previous_owner, "_executorId": "synthetic-new-owner",
+            "payload": {"fromAutomation": True},
+        }, "2026-01-02T01:05:00Z"))
+        client = FixedSummaries()
+        report = self.build(client)
+        self.assertEqual(report["digest"]["tasks"][0]["summary"],
+                         "虚构：已定位入口限制；下一步回归边界，仍有兼容风险。")
+        self.assertIn("负责人：虚构成员乙", report["markdown"])
+        for noise in ("评论附有", "未读取文件内容", "执行人变更"):
+            self.assertNotIn(noise, report["markdown"])
+        self.assertEqual(len(report["audit"][0]["activity_evidence"]), 2)
+        self.assertTrue(report["audit"][0]["parsed_changes"][0]["from_automation"])
+        self.assertEqual(report["summary_inputs"][0]["comments"][0]["file_count"], 5)
+        self.assertEqual(client.rows[0]["comment_bodies"], ["虚构：已有定位，下一步回归。"])
+        for file_id in [char * 24 for char in "abcde"]:
+            self.assertNotIn(file_id, json.dumps(client.rows))
+        validate_automated_report(report, self.collection, self.config, "gpt-6-luna", "max")
+
+    def test_owner_only_activity_keeps_current_owner_without_requesting_a_model(self):
+        previous_owner = self.record["task"]["executorId"]
+        self.config["owner_names"]["synthetic-new-owner"] = "虚构成员乙"
+        self.record["task"]["executorId"] = "synthetic-new-owner"
+        self.record["activities"] = [self.event("update_executor", "assign-only", {
+            "_oldExecutorId": previous_owner, "_executorId": "synthetic-new-owner",
+            "payload": {"fromAutomation": True},
+        })]
+        class NoModel:
+            def summarize(self, *_args, **_kwargs):
+                raise AssertionError("Assignee-only activity must not request a model")
+        report = self.build(NoModel())
+        task = report["digest"]["tasks"][0]
+        self.assertEqual(task["category"], "other")
+        self.assertEqual(task["summary"], "")
+        self.assertIn("负责人：虚构成员乙", report["markdown"])
+        self.assertNotIn("执行人变更", report["markdown"])
+        self.assertNotIn("未发现任务动态", report["markdown"])
+        self.assertEqual(len(report["audit"][0]["parsed_changes"]), 1)
+        validate_automated_report(report, self.collection, self.config, "gpt-6-luna", "max")
+
     def test_missing_actual_number_blocks_before_openai_instead_of_guessing(self):
         self.record["task"].pop("uniqueId")
         client = FixedSummaries()

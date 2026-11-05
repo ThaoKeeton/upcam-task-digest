@@ -175,8 +175,10 @@ class WorkerApiTests(unittest.TestCase):
             history = service.dispatch({"op": "history"})["runs"]
             self.assertEqual(len(history), 1)
             self.assertEqual(history[0]["state"], "sent")
-            with self.assertRaisesRegex(ValueError, "duplicate|confirmed"):
-                service.dispatch({"op": "run_manual", "payload": window})
+            repeated = service.dispatch({"op": "run_manual", "payload": window})
+            self.assertEqual(repeated["state"], "sent")
+            self.assertNotEqual(run["manual_request_id"], repeated["manual_request_id"])
+            self.assertEqual(len(service.dispatch({"op": "history"})["runs"]), 2)
 
     def test_missing_ledger_blocks_before_constructing_any_network_workflow(self):
         with tempfile.TemporaryDirectory() as directory:

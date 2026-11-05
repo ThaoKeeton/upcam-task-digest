@@ -10,6 +10,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import threading
+import uuid
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -1461,7 +1462,10 @@ class DigestDesktopApp:
             try:
                 workflow = DigestWorkflow(self.settings, self.saved_secrets, self.data_dir,
                                           history=self.history, model_catalog=self.model_catalog)
-                result = workflow.run(start, end, schedule_key=schedule_key)
+                manual_options = {} if scheduled else {
+                    "allow_confirmed_repeat": True, "manual_request_id": str(uuid.uuid4()),
+                }
+                result = workflow.run(start, end, schedule_key=schedule_key, **manual_options)
             except WorkflowBlocked as exc:
                 error = str(exc)
             except Exception:

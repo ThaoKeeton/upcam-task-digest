@@ -67,7 +67,8 @@ def formal_task_content(audit: dict, summary_entry: dict | None,
     else:
         category = "other"
 
-    pieces = [proposed] if proposed else []
+    # Keep validating local evidence, even though administrative event details
+    # and file processing metadata do not belong in the communication summary.
     for change in changes:
         if change.get("action") != "update_executor" or change.get("needs_review") is not False:
             continue
@@ -76,8 +77,5 @@ def formal_task_content(audit: dict, summary_entry: dict | None,
                or any(ord(char) < 32 or char in "\x7f\u2028\u2029" for char in name)
                for name in (previous, target)):
             raise FormalContentError("Invalid formal owner evidence")
-        pieces.append(f"执行人变更：{previous} → {target}")
-    count = _file_count(summary_entry)
-    if count:
-        pieces.append(f"评论附有 {count} 个文件，未读取文件内容")
-    return {"category": category, "summary": "；".join(pieces)}
+    _file_count(summary_entry)
+    return {"category": category, "summary": proposed}

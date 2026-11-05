@@ -10,10 +10,11 @@ from pathlib import Path
 import re
 import sys
 import threading
+import uuid
 from urllib.parse import parse_qsl, urlsplit
 
 from automated_digest import collection_validation_message, diagnose_automatic_source
-from delivery_guard import DeliveryBlocked, DeliveryGuard, initialize_ledger
+from delivery_guard import DeliveryBlocked, DeliveryGuard, initialize_ledger, validate_manual_delivery_options
 from openai_summarizer import KNOWN_FAST_MODELS
 from render_digest import render_digest
 from report_contract import SHANGHAI, updated_selection
@@ -606,8 +607,14 @@ class WorkerService:
                 "safety": "未调用 OpenAI；未发送钉钉。"}
 
     def _run_manual(self, payload: dict) -> dict:
+        if set(payload) - {"start", "end", "manual_request_id"}:
+            raise WorkerApiError("手动发送请求包含不支持的选项；未发送消息。")
+        request_id = payload["manual_request_id"] if "manual_request_id" in payload else str(uuid.uuid4())
+        validate_manual_delivery_options(True, request_id)
         start, end = self._manual_window(payload)
-        return self._run(start, end, schedule_key=None)
+        result = self._run(start, end, schedule_key=None,
+                           allow_confirmed_repeat=True, manual_request_id=request_id)
+        return {**result, "manual_request_id": request_id}
 
     def _run_due(self, payload: dict) -> dict:
         self._require_empty_payload(payload)
@@ -661,7 +668,8 @@ class WorkerService:
         self._shutdown = True
         return {"status": "worker stopped"}
 
-    def _run(self, start: datetime, end: datetime, schedule_key: str | None) -> dict:
+    def _run(self, start: datetime, end: datetime, schedule_key: str | None, *,
+             allow_confirmed_repeat: bool = False, manual_request_id: str | None = None) -> dict:
         if not self._job_lock.acquire(blocking=False):
             raise WorkerApiError("已有日报或诊断任务正在运行；当前操作未并行执行。")
         try:
@@ -670,10 +678,14 @@ class WorkerService:
             ready, message = self._ensure_ledger(secrets)
             if not ready:
                 raise WorkerApiError(message)
+            run_options = {"schedule_key": schedule_key}
+            if allow_confirmed_repeat or manual_request_id is not None:
+                run_options.update(allow_confirmed_repeat=allow_confirmed_repeat,
+                                   manual_request_id=manual_request_id)
             result = self.workflow_factory(settings, secrets, self.data_dir,
                                            history=self.history,
                                            model_catalog=self.model_catalog).run(
-                                               start, end, schedule_key=schedule_key)
+                                               start, end, **run_options)
             return {"run_id": result["run_id"], "state": result["state"],
                     "markdown": result["report"]["markdown"],
                     "window_start": start.isoformat(timespec="minutes"),
