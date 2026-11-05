@@ -7,6 +7,9 @@ import unittest
 
 from digest_pipeline import build_digest
 from report_contract import updated_selection
+from report_contract import SHANGHAI
+from upcam_app.config import DEFAULT_SETTINGS, scheduled_window
+from datetime import date, timedelta
 from teambition_readonly import CollectionError
 from test_collection import FakeTransport, client, page
 
@@ -146,6 +149,34 @@ class UpdatedSelectionTests(unittest.TestCase):
             with self.assertRaises(CollectionError):
                 client(t).collect('demo-project',day=self.day,window=window)
             self.assertEqual(t.requests,[])
+
+    def test_original_scheduled_cutoffs_keep_end_day_and_exclude_only_endpoint(self):
+        windows = (
+            ('morning', '2026-01-01T16:50:00+08:00', '2026-01-02T08:50:00+08:00'),
+            ('afternoon', '2026-01-02T00:00:00+08:00', '2026-01-02T16:50:00+08:00'),
+        )
+        for kind, expected_start, expected_end in windows:
+            with self.subTest(kind=kind):
+                local_start, local_end = scheduled_window(DEFAULT_SETTINGS, kind, date(2026, 1, 2))
+                start, end = local_start.replace(tzinfo=SHANGHAI), local_end.replace(tzinfo=SHANGHAI)
+                self.assertEqual(start.isoformat(), expected_start)
+                self.assertEqual(end.isoformat(), expected_end)
+                ending_day_midnight = end.replace(hour=0, minute=0)
+                instants = (ending_day_midnight, end - timedelta(microseconds=1), end,
+                            end + timedelta(seconds=59, microseconds=999999))
+                task = dict(self.task, updated=(end - timedelta(seconds=1)).isoformat())
+                events = [{'id': 'synthetic-boundary-' + str(i), 'action': 'create',
+                           'boundToObjectId': task['id'], 'boundToObjectType': 'task',
+                           'createTime': instant.isoformat(), 'content': ''}
+                          for i, instant in enumerate(instants)]
+                t = FakeTransport(page([task]), {'code': 200, 'result': task}, page(events))
+                collection = client(t).collect('demo-project', day=self.day, window=(start, end))
+                report = build_digest(collection, self.config, self.day, window=(start, end))
+                self.assertEqual(report['audit'][0]['event_ids'],
+                                 ['synthetic-boundary-0', 'synthetic-boundary-1'])
+                self.assertEqual(report['scope']['end_exclusive'], expected_end)
+                q = parse_qs(urlsplit(t.requests[0].full_url).query)['q'][0]
+                self.assertEqual(q, f"updated >= '{expected_start}' AND updated < '{expected_end}'")
 
 
 if __name__=='__main__':unittest.main()

@@ -152,7 +152,7 @@ jobs:
             Write-Output ("UPCAM_STATUS_PNG_BASE64=" + [Convert]::ToBase64String([IO.File]::ReadAllBytes($image)))
             Write-Output "::endgroup::"
           }
-          foreach ($name in @('native-window', 'tray-icon', 'run')) {
+          foreach ($name in @('native-window', 'tray-icon', 'run', 'schedule', 'dingtalk')) {
             $nativeImage = "$PWD/dist/ui-evidence/$name.png"
             if (-not (Test-Path $nativeImage)) { $nativeImage = "$PWD/dist/winui/smoke-output/$name.png" }
             if (Test-Path $nativeImage) {

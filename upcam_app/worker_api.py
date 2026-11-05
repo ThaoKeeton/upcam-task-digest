@@ -26,6 +26,7 @@ from .config import (
     scheduled_window, user_data_dir, validate_settings,
 )
 from .diagnostic_export import safe_structure_export
+from .dingtalk_mentions import MentionConfigError, mention_options, reject_credential_mentions
 from .diagnostic_files import write_private_diagnostic
 from . import APP_VERSION, RULESET_REVISION
 from .history import HistoryError, HistoryStore
@@ -121,7 +122,7 @@ class WorkerService:
             return handler(payload)
         except WorkerApiError:
             raise
-        except (SettingsError, SecretStoreError, ModelCatalogError, ProjectSetupError,
+        except (SettingsError, SecretStoreError, ModelCatalogError, ProjectSetupError, MentionConfigError,
                 CollectionError, WorkflowBlocked, HistoryError, DeliveryBlocked,
                 StartupIntegrationError):
             raise WorkerApiError(_safe_error_message(sys.exc_info()[1])) from None
@@ -133,6 +134,7 @@ class WorkerService:
         self._require_empty_payload(payload)
         settings = self.settings_store.load()
         credentials = self.secret_store.load()
+        reject_credential_mentions(settings, credentials)
         self.history.recover_interrupted_sends()
         ledger_ready, ledger_message = self._ensure_ledger(credentials)
         credentials = self.secret_store.load()
@@ -183,6 +185,7 @@ class WorkerService:
             credential_identity=credential_identity, previous_credential_identity=previous_identity,
         )
         clean = validate_settings(proposed)
+        reject_credential_mentions(clean, previous_secrets, proposed_secrets)
         scope_probe = (self._setup_probe.get("discovery") if _probe_matches(
             self._setup_probe, _scope_signature(clean), credential_identity) else None)
         scope_status = "项目范围只读核验有效。"
@@ -263,12 +266,13 @@ class WorkerService:
     def _clear_credentials(self, payload: dict) -> dict:
         self._require_empty_payload(payload)
         settings = self.settings_store.load()
+        current = self.secret_store.load()
+        reject_credential_mentions(settings, current)
         settings["auto_send_enabled"] = False
         settings["auto_send_enabled_since_local"] = ""
         settings["api_contract_verified"] = False
         settings["view"] = dict(settings["view"], verified=False, evidence="")
         self.settings_store.save(settings)
-        current = self.secret_store.load()
         retained = {key: value for key, value in current.items()
                     if key in INTERNAL_SECRET_FIELDS}
         self.secret_store.save(retained)
@@ -593,7 +597,11 @@ class WorkerService:
 
     def _validate_dingtalk_config(self, payload: dict) -> dict:
         self._require_empty_payload(payload)
+        settings = self.settings_store.load()
+        options = mention_options(settings)
+        mention_count = sum(len(targets) for targets in options.values())
         credentials = self.secret_store.load()
+        reject_credential_mentions(settings, credentials)
         webhook = credentials.get("dingtalk_webhook", "")
         secret = credentials.get("dingtalk_signing_secret", "")
         if not webhook or not secret:
@@ -603,7 +611,8 @@ class WorkerService:
             signed_webhook(webhook, secret, 1)
         except (ValueError, TypeError):
             raise WorkerApiError("钉钉 Webhook 或签名密钥格式无效；没有发送测试消息。") from None
-        return {"status": "Webhook 与签名格式通过本机检查；没有发送测试消息。",
+        return {"status": f"Webhook 与签名格式通过本机检查；提醒对象 {mention_count} 个，仅校验本机格式，未核验群成员资格；没有发送测试消息。",
+                "mention_count": mention_count, "mention_mode": settings["dingtalk_mention_mode"],
                 "safety": "未调用 OpenAI；未发送钉钉。"}
 
     def _run_manual(self, payload: dict) -> dict:

@@ -81,6 +81,15 @@ public sealed partial class MainWindow
             await VerifyUtf8PipeBoundariesAsync();
             _state.ManualStart = DateTime.Now.AddHours(-2).ToString("yyyy-MM-dd HH:mm");
             _state.ManualEnd = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+            Navigate("accounts");
+            Find<TabView>("account-tabs")!.SelectedIndex = 1;
+            await WaitForAsync(() => Find<TextBox>("dingtalk-mentions") is not null);
+            Find<ComboBox>("dingtalk-mention-mode")!.SelectedIndex = 1;
+            Find<TextBox>("dingtalk-mentions")!.Text = "ci-mention-one\nci-mention-two";
+            await WaitForAsync(() => _state.Text("dingtalk_mention_mode") == "user_id");
+            Assert(_state.Text("dingtalk_mention_mode") == "user_id" &&
+                _state.Text("dingtalk_mentions").Replace("\r\n", "\n").Replace("\r", "\n") == "ci-mention-one\nci-mention-two",
+                "Native optional mention controls accept two explicit DingTalk userIds");
             var models = await Worker.SendAsync("refresh_models");
             _state.ApplyModels(models);
             Assert(_state.Models.Count == 2, "Synthetic model refresh and IPC");
@@ -130,6 +139,26 @@ public sealed partial class MainWindow
             await WaitForAsync(() => !_busy);
             Assert(_state.ScopeVerified && _state.Flag("api_contract_verified"),
                 "Save automatically verifies the scope with a real read-only synthetic query");
+            Assert(_state.Text("dingtalk_mention_mode") == "user_id" &&
+                _state.Text("dingtalk_mentions") == "ci-mention-one\nci-mention-two",
+                "Mention preferences survive ordinary native save without changing collection scope");
+            Navigate("accounts");
+            Find<TabView>("account-tabs")!.SelectedIndex = 1;
+            await WaitForAsync(() => Find<Button>("check-dingtalk") is not null);
+            var reloadedMentions = Find<TextBox>("dingtalk-mentions")!;
+            Assert(reloadedMentions.AcceptsReturn &&
+                reloadedMentions.Text.Replace("\r\n", "\n").Replace("\r", "\n") == "ci-mention-one\nci-mention-two",
+                "Reloaded native multiline mention input retains every saved recipient");
+            Invoke(Find<Button>("check-dingtalk")!);
+            await WaitForAsync(() => !_busy);
+            var mentionCheck = await Worker.SendAsync("validate_dingtalk_config");
+            Assert(mentionCheck["mention_count"]?.GetValue<int>() == 2 &&
+                !mentionCheck.ToJsonString().Contains("ci-mention-one") &&
+                !mentionCheck.ToJsonString().Contains("ci-mention-two"),
+                "Local DingTalk check validates two targets without exposing identifiers or sending");
+            await CaptureAsync(Path.Combine(output, "dingtalk.png"));
+            Navigate("project");
+            await WaitForAsync(() => Find<Button>("probe-project") is not null);
             Assert(_state.Text("task_number_prefix") == "DEMO" && _state.Text("task_link_view_id") == new string('f', 24),
                 "Native task display settings save confirmed prefix and normalize the all-view URL");
             prefixInput.Text = "STALE";
@@ -272,6 +301,21 @@ public sealed partial class MainWindow
                     await Task.Delay(60);
                     RootGrid.UpdateLayout();
                     Assert(PageHost.ActualWidth > 300 && PageHost.ActualHeight > 180, $"Layout {route} {size.Width}x{size.Height}");
+                    if (route == "schedule")
+                    {
+                        var morningStart = Find<TextBox>("morning-start-at")!;
+                        var morningEnd = Find<TextBox>("morning-end-at")!;
+                        var afternoonStart = Find<TextBox>("afternoon-start-at")!;
+                        var afternoonEnd = Find<TextBox>("afternoon-end-at")!;
+                        Assert(morningStart.Header.ToString() == "采集开始（前一日）" &&
+                            morningEnd.Header.ToString() == "采集结束（当日）" &&
+                            afternoonStart.Header.ToString() == "采集开始" &&
+                            afternoonEnd.Header.ToString() == "采集结束",
+                            "Schedule date labels apply only to the morning range at " + size.Width);
+                        Assert(morningStart.Text == "16:50" && morningEnd.Text == "08:50" &&
+                            afternoonStart.Text == "00:00" && afternoonEnd.Text == "16:50",
+                            "Label correction preserves original scheduled window values at " + size.Width);
+                    }
                     if (route == "statuses")
                     {
                         var list = Find<ListView>("status-list")!;
@@ -293,7 +337,7 @@ public sealed partial class MainWindow
                 }
             }
             AppWindow.Resize(new SizeInt32(1180, 800));
-            foreach (string route in new[] { "home", "statuses", "run" })
+            foreach (string route in new[] { "home", "statuses", "schedule", "run" })
             {
                 Navigate(route); await Task.Delay(200);
                 await CaptureAsync(Path.Combine(output, route + ".png"));

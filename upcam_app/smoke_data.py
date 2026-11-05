@@ -7,12 +7,14 @@ from pathlib import Path
 import uuid
 
 from report_contract import updated_selection
+from render_digest import BLOCK_SEPARATOR
 
 from .config import DEFAULT_SETTINGS, SettingsStore
 from .openai_models import OpenAIModelCatalog
 from .secrets import MemorySecretStore
 from .worker_api import WorkerService
 from .workflow import DigestWorkflow
+from .dingtalk import DingTalkSender
 
 
 class SyntheticClient:
@@ -90,8 +92,34 @@ class SyntheticClient:
 
 
 class SyntheticDingTalk:
-    def send_markdown(self, *_args):
-        return True
+    """Exercise the actual payload builder with a transport that cannot send."""
+
+    def __init__(self, settings=None):
+        settings = settings or {}
+        self.targets = tuple(settings.get("dingtalk_mentions", "").splitlines())
+        self.mode = settings.get("dingtalk_mention_mode", "mobile")
+        self.sender = DingTalkSender(transport=self._transport, clock_ms=lambda: 1)
+
+    def send_markdown(self, webhook, secret, markdown, **kwargs):
+        self.base_markdown = markdown
+        return self.sender.send_markdown(webhook, secret, markdown, **kwargs)
+
+    def _transport(self, _url, payload, _timeout):
+        envelope = json.loads(payload)
+        if self.targets:
+            field = "atUserIds" if self.mode == "user_id" else "atMobiles"
+            expected = {field: list(self.targets), "isAtAll": False}
+            if envelope.get("at") != expected:
+                raise AssertionError("Synthetic mention envelope mismatch")
+            expected_text = (self.base_markdown.rstrip("\r\n") + BLOCK_SEPARATOR +
+                             " ".join("@" + value for value in self.targets) + "\n")
+            if envelope["markdown"]["text"] != expected_text:
+                raise AssertionError("Synthetic mention block must preserve body and repository blank spacing")
+        elif "at" in envelope:
+            raise AssertionError("Empty synthetic configuration must not add mentions")
+        elif envelope["markdown"]["text"] != self.base_markdown:
+            raise AssertionError("Empty synthetic configuration must preserve exact body")
+        return {"errcode": 0}
 
 
 class SyntheticSummarizer:
@@ -130,7 +158,7 @@ def make_smoke_service(directory: Path) -> WorkerService:
         return DigestWorkflow(settings, credentials, data_dir,
                               client_factory=SyntheticClient,
                               summarizer=SyntheticSummarizer(),
-                              ding_sender=SyntheticDingTalk(), **kwargs)
+                              ding_sender=SyntheticDingTalk(settings), **kwargs)
 
     return WorkerService(
         directory, settings_store=store, secret_store=secret_store,

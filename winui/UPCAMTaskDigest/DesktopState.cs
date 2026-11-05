@@ -70,7 +70,8 @@ internal sealed class DesktopState
             InvalidateDiagnostic();
         }
         Dirty = true;
-        if (key is "owner_names" or "status_names" or "resolved_status_ids" or "max_tasks_per_run")
+        if (key is "owner_names" or "status_names" or "resolved_status_ids" or "max_tasks_per_run"
+            or "dingtalk_mention_mode" or "dingtalk_mentions")
             InvalidateDiagnostic();
         if (key is "tenant_id" or "project_id" or "include_archived") InvalidateScope();
     }

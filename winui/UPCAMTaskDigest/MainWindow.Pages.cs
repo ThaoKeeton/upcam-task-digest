@@ -57,19 +57,35 @@ public sealed partial class MainWindow
         tabs.TabItems.Add(new TabViewItem
         {
             Header = "钉钉", IsClosable = false,
-            Content = LocalScroll(Column(Card(Column(
-                SecretInput("机器人 Webhook（含 access_token）", "dingtalk_webhook"),
-                SecretInput("机器人签名密钥", "dingtalk_signing_secret"),
-                Paragraph("这里的检查只验证本机 URL 与签名配置，不向群里发送测试消息。", true),
-                ActionButton("检查本机机器人配置", "check-dingtalk", async () =>
-                {
-                    await EnsureSavedAsync();
-                    var result = await Worker.SendAsync("validate_dingtalk_config");
-                    SetStatus(Value(result, "status"));
-                })))))
+            Content = BuildDingTalk()
         });
         tabs.TabItems.Add(new TabViewItem { Header = "OpenAI", IsClosable = false, Content = BuildOpenAi() });
         return tabs;
+    }
+
+    private FrameworkElement BuildDingTalk()
+    {
+        var mode = Identify(new ComboBox { Header = "艾特标识类型", HorizontalAlignment = HorizontalAlignment.Stretch },
+            "dingtalk-mention-mode");
+        mode.Items.Add("手机号");
+        mode.Items.Add("钉钉 userId");
+        mode.SelectedIndex = _state.Text("dingtalk_mention_mode", "mobile") == "user_id" ? 1 : 0;
+        mode.SelectionChanged += (_, _) => _state.Set("dingtalk_mention_mode", mode.SelectedIndex == 1 ? "user_id" : "mobile");
+        var targets = SettingText("艾特指定成员（可选，最多 50 人）", "dingtalk_mentions", "dingtalk-mentions", "留空不艾特；每行一个标识，不加 @", multiline: true);
+        targets.Height = 112;
+        targets.MaxLength = 8000;
+        return LocalScroll(Column(
+            Card(Column(SecretInput("机器人 Webhook（含 access_token）", "dingtalk_webhook"),
+                SecretInput("机器人签名密钥", "dingtalk_signing_secret"))),
+            Card(Column(Paragraph("艾特指定成员", size: 18), mode, targets,
+                Paragraph("可用换行、逗号、分号或空格分隔。填写群内成员的手机号或钉钉 userId；不要填写姓名、员工编号或 Teambition 成员 ID。", true),
+                Paragraph("填写后会在群消息末尾添加 @ 标识；实际通知与姓名显示由钉钉处理。留空沿用原消息，不艾特所有人。", true))),
+            ActionButton("检查本机机器人配置", "check-dingtalk", async () =>
+            {
+                await EnsureSavedAsync();
+                var result = await Worker.SendAsync("validate_dingtalk_config");
+                SetStatus(Value(result, "status"));
+            }), Paragraph("这里只检查本机格式，不验证群成员，也不发送测试消息。", true)));
     }
 
     private FrameworkElement SecretInput(string label, string key)
@@ -359,7 +375,7 @@ public sealed partial class MainWindow
         FrameworkElement Slot(string label, string prefix) => Card(Column(Paragraph(label, size: 18),
             SettingText("运行时间", prefix + "_run_at", prefix + "-run-at", "HH:MM"),
             Pair(SettingText(prefix == "morning" ? "采集开始（前一日）" : "采集开始", prefix + "_start_at", prefix + "-start-at", "HH:MM"),
-                 SettingText("采集结束（当日，不含）", prefix + "_end_at", prefix + "-end-at", "HH:MM"))));
+                 SettingText(prefix == "morning" ? "采集结束（当日）" : "采集结束", prefix + "_end_at", prefix + "-end-at", "HH:MM"))));
         return LocalScroll(Column(
             Card(Column(Toggle("应用运行期间自动采集、校验、摘要并发送", "auto_send_enabled", "auto-run"),
                 Toggle("当前 Windows 用户登录后启动，并以系统托盘运行", "start_with_windows", "startup"),
@@ -412,7 +428,7 @@ public sealed partial class MainWindow
         var range = new Grid { ColumnSpacing = 12 };
         range.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         range.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var details = Column(Paragraph("本机采集范围 · 结束不含", true, 12),
+        var details = Column(Paragraph("本机采集范围", true, 12),
             Paragraph($"开始  {_state.ManualStart}\n结束  {_state.ManualEnd}", true));
         details.Spacing = 4;
         range.Children.Add(details);
@@ -429,7 +445,7 @@ public sealed partial class MainWindow
     private async Task EditWindowAsync()
     {
         var start = Identify(new TextBox { Header = "开始（本机时间）", Text = _state.ManualStart }, "edit-window-start");
-        var end = Identify(new TextBox { Header = "结束（不含，本机时间）", Text = _state.ManualEnd }, "edit-window-end");
+        var end = Identify(new TextBox { Header = "结束（本机时间）", Text = _state.ManualEnd }, "edit-window-end");
         var dialog = EditorDialog("修改采集时间", Column(start, end,
             Paragraph("格式为 YYYY-MM-DD HH:MM。只读诊断不会调用模型或发送；正式运行会按该区间自动发送。", true)), "应用");
         if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary) return;
