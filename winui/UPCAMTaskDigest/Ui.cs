@@ -59,7 +59,13 @@ public sealed partial class MainWindow
     private TextBox SettingText(string header, string key, string id, string? placeholder = null)
     {
         var input = Identify(new TextBox { Header = header, Text = _state.Text(key), PlaceholderText = placeholder ?? "" }, id);
-        input.TextChanged += (_, _) => _state.Set(key, input.Text);
+        var settingsAtCreation = _state.Settings;
+        // TextChanged is deferred by WinUI. Commit synchronously before a
+        // page switch/save, and ignore controls belonging to replaced state.
+        input.TextChanging += (_, _) =>
+        {
+            if (ReferenceEquals(_state.Settings, settingsAtCreation)) _state.Set(key, input.Text);
+        };
         return input;
     }
 

@@ -112,8 +112,13 @@ public sealed partial class MainWindow
             var projectTabs = Find<TabView>("project-tabs")!;
             projectTabs.SelectedIndex = 1;
             await WaitForAsync(() => Find<TextBox>("task-number-prefix") is not null);
-            Find<TextBox>("task-number-prefix")!.Text = "DEMO";
-            Find<TextBox>("task-link-view")!.Text = "https://www.teambition.com/project/demo-project/tasks/view/" + new string('f', 24);
+            var prefixInput = Find<TextBox>("task-number-prefix")!;
+            var viewInput = Find<TextBox>("task-link-view")!;
+            prefixInput.Text = "DEMO";
+            viewInput.Text = "https://www.teambition.com/project/demo-project/tasks/view/" + new string('f', 24);
+            Assert(_state.Text("task_number_prefix") == "DEMO" &&
+                _state.Text("task_link_view_id") == viewInput.Text,
+                "Display text edits reach the saved state synchronously before switching tabs");
             projectTabs.SelectedIndex = 0;
             Assert(Find<CheckBox>("confirm-scope") is null, "Project page has no scope confirmation checkbox");
             JsonObject savePayload = _state.SavePayload();
@@ -127,6 +132,10 @@ public sealed partial class MainWindow
                 "Save automatically verifies the scope with a real read-only synthetic query");
             Assert(_state.Text("task_number_prefix") == "DEMO" && _state.Text("task_link_view_id") == new string('f', 24),
                 "Native task display settings save confirmed prefix and normalize the all-view URL");
+            prefixInput.Text = "STALE";
+            viewInput.Text = new string('e', 24);
+            Assert(_state.Text("task_number_prefix") == "DEMO" && _state.Text("task_link_view_id") == new string('f', 24),
+                "Detached settings controls cannot overwrite reloaded saved preferences");
             Assert(_state.CandidateOwners.Contains("demo-person") && _state.CandidateStatuses.Contains("demo-open"),
                 "Automatic save also discovers mapping IDs");
             Assert(_state.Number("schema_version", 0) == 1 && !_state.Flag("auto_send_enabled") && _state.History.Count == 0,
