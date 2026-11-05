@@ -290,17 +290,20 @@ def build_digest(collection, config, day, window=None):
             elif counts["created"]:
                 category = "new"
         items.append({"category": category, "title": title,
-                      "url": f"https://www.teambition.com/project/{project}/task/{task_id}",
+                      "url": f"https://www.teambition.com/task/{task_id}",
                       "summary": "；".join(descriptions), "owner": owner, "status": status})
         audit.append({"task_id": task_id, "event_ids": [e[1] for e in events], "needs_review": review,
                       "hard_review": bool(hard_review),
                       "executor_conflict": executor_conflict, "status_noop": status_noop,
                       "position_changes": position_changes, "position_conflict": position_conflict,
+                      "event_counts": dict(counts),
                       "status_transitions": transitions, "parsed_changes": parsed_changes,
                       "undated_event_ids": sorted(undated_ids),
                       "activity_evidence": [ids[e[1]] for e in events] + [ids[k] for k in sorted(undated_ids)]})
     combined = sorted(zip(items, audit), key=lambda pair: pair[1]["task_id"])
-    data = {"date": report_day, "tasks": [pair[0] for pair in combined]}
+    data = {"date": report_day, "tasks": [pair[0] for pair in combined],
+            "time_range": {"start": start.isoformat(), "end_exclusive": end.isoformat(),
+                           "timezone": "Asia/Shanghai"}}
     return {"digest": data, "markdown": render_digest(data), "audit": [pair[1] for pair in combined],
             "summary_inputs": sorted(summary_inputs, key=lambda item: item['task_id']),
             "issues": issues, "ready_to_send": not issues,

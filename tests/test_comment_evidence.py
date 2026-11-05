@@ -153,8 +153,8 @@ class CommentEvidenceTests(unittest.TestCase):
         self.assertTrue(report["ready_to_send"])
         self.assertEqual(len(report["digest"]["tasks"]), 1)
         summary = report["digest"]["tasks"][0]["summary"]
-        self.assertIn("评论 1 条", summary)
-        self.assertIn("仅附件评论 1 条", summary)
+        self.assertNotIn("评论 1 条", summary)
+        self.assertNotIn("仅附件评论 1 条", summary)
         self.assertIn("评论附有 2 个文件", summary)
         self.assertIn("未读取文件内容", summary)
         self.assertNotIn("未发现任务动态", report["markdown"])
@@ -174,8 +174,8 @@ class CommentEvidenceTests(unittest.TestCase):
         client = RecordingSummary()
         report = self.build(collection, config, client)
         summary = report["digest"]["tasks"][0]["summary"]
-        self.assertIn("评论 2 条", summary)
-        self.assertIn("仅附件评论 2 条", summary)
+        self.assertNotIn("评论 2 条", summary)
+        self.assertNotIn("仅附件评论 2 条", summary)
         self.assertIn("评论附有 3 个文件", summary)
         self.assertEqual(len(report["audit"][0]["event_ids"]), 2)
         self.assertEqual(client.calls, [])
@@ -189,7 +189,7 @@ class CommentEvidenceTests(unittest.TestCase):
         client = RecordingSummary()
         report = self.build(collection, config, client)
         summary = report["digest"]["tasks"][0]["summary"]
-        self.assertIn("仅附件评论 2 条", summary)
+        self.assertNotIn("仅附件评论 2 条", summary)
         self.assertIn("评论附有 2 个文件", summary)
         self.assertNotIn("评论附有 3 个文件", summary)
         self.assertEqual(len(report["audit"][0]["event_ids"]), 2)

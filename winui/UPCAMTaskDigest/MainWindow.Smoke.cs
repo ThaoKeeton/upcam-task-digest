@@ -102,6 +102,19 @@ public sealed partial class MainWindow
             Assert(_state.Map("status_names")["ci-status"]?.GetValue<string>() == "CI 虚构状态", "Native status editor dialog");
 
             Navigate("project");
+            _state.Set("task_number_prefix", "STALE");
+            _state.Set("task_link_view_id", new string('e', 24));
+            _state.Set("project_id", "ci-another-project");
+            Assert(_state.Text("task_number_prefix") == "" && _state.Text("task_link_view_id") == "" &&
+                _state.Settings["task_display_scope"] is null,
+                "Changing source project clears prior project display preferences");
+            _state.Set("project_id", "demo-project");
+            var projectTabs = Find<TabView>("project-tabs")!;
+            projectTabs.SelectedIndex = 1;
+            await WaitForAsync(() => Find<TextBox>("task-number-prefix") is not null);
+            Find<TextBox>("task-number-prefix")!.Text = "DEMO";
+            Find<TextBox>("task-link-view")!.Text = "https://www.teambition.com/project/demo-project/tasks/view/" + new string('f', 24);
+            projectTabs.SelectedIndex = 0;
             Assert(Find<CheckBox>("confirm-scope") is null, "Project page has no scope confirmation checkbox");
             JsonObject savePayload = _state.SavePayload();
             Assert(!savePayload.ContainsKey("scope_confirmed") &&
@@ -112,6 +125,8 @@ public sealed partial class MainWindow
             await WaitForAsync(() => !_busy);
             Assert(_state.ScopeVerified && _state.Flag("api_contract_verified"),
                 "Save automatically verifies the scope with a real read-only synthetic query");
+            Assert(_state.Text("task_number_prefix") == "DEMO" && _state.Text("task_link_view_id") == new string('f', 24),
+                "Native task display settings save confirmed prefix and normalize the all-view URL");
             Assert(_state.CandidateOwners.Contains("demo-person") && _state.CandidateStatuses.Contains("demo-open"),
                 "Automatic save also discovers mapping IDs");
             Assert(_state.Number("schema_version", 0) == 1 && !_state.Flag("auto_send_enabled") && _state.History.Count == 0,
@@ -200,13 +215,14 @@ public sealed partial class MainWindow
             Invoke(Find<Button>("run-manual")!);
             await WaitForAsync(() => !_busy);
             Assert(_state.History.Count == 1, "Synthetic workflow and local history");
-            Assert(_state.Output.Contains("任务位置变更 1 条") &&
-                _state.Output.Contains("Teambition 显示关联提交 1 条") &&
-                _state.Output.Contains("Teambition 显示关联合并请求 1 条"),
-                "Packaged workflow supports bounded position and association display events");
-            Assert(_state.Output.Contains("代码来源、实际提交及合并结果未核实") &&
+            Assert(_state.Output.Contains("DEMO\\-101") && _state.Output.Contains("🕒 时间范围") &&
+                _state.Output.Contains("📊 更新 1 项：工作进展 1 项") &&
+                _state.Output.Contains("/tasks/view/" + new string('f', 24) + "/task/ci-synthetic-task"),
+                "Packaged formal report uses business number, actual time range, progress category and all-view route");
+            Assert(!_state.Output.Contains("评论 1 条") && !_state.Output.Contains("其他变更 3 条") &&
+                !_state.Output.Contains("任务位置变更") && !_state.Output.Contains("未核实") &&
                 !_state.Output.Contains("CI 虚构通知内容") && !_state.Output.Contains("ci-unverified-account"),
-                "Native report keeps association evidence unverified and notice text local");
+                "Native formal report excludes diagnostic prose while retaining validated source evidence locally");
 
             foreach (var size in new[] { new SizeInt32(1180, 800), new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540) })
             {

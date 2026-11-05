@@ -58,15 +58,15 @@ class FormatTests(unittest.TestCase):
         for absent in ("已解决", "新建任务", "其他变更"):
             self.assertNotIn(absent, output)
         self.data["tasks"] = []
-        self.assertEqual(render_digest(self.data), "**Teambition｜UPCAM 项目任务动态日报**  \n🗓️ 日期：2026-01-01  \n📊 更新 0 项\n\n\u3000\n\nℹ️ 经完整采集，筛选时间段内未发现任务动态。\n")
+        self.assertEqual(render_digest(self.data), "**Teambition｜UPCAM 项目任务动态日报**  \n🕒 时间范围：2026-01-01 00:00 — 2026-01-02 00:00  \n📊 更新 0 项\n\n\u3000\n\nℹ️ 经完整采集，筛选时间段内未发现任务动态。\n")
 
     def test_spacer_paragraphs_and_literal_numbering(self):
         output = render_digest(self.data)
         self.assertTrue(output.startswith(
-            "**Teambition｜UPCAM 项目任务动态日报**  \n🗓️ 日期：2026-01-01  \n📊 更新 5 项："
+            "**Teambition｜UPCAM 项目任务动态日报**  \n🕒 时间范围：2026-01-01 00:00 — 2026-01-02 00:00  \n📊 更新 5 项："
         ))
         self.assertNotIn("📅", output)
-        self.assertEqual(output.count("🗓️"), 1)
+        self.assertEqual(output.count("🕒"), 1)
         self.assertEqual(output.count("📊"), 1)
         blocks = output.rstrip("\n").split("\n\n\u3000\n\n")
         # One compact header block + five tasks (category headings join first tasks).
@@ -121,7 +121,7 @@ class FormatTests(unittest.TestCase):
         self.data['tasks'] = [task]
         output = render_digest(self.data)
         self.assertIn(f'](<{task["url"]}>)  \n当前：{task["status"]}｜负责人：{task["owner"]}', output)
-        for forbidden in ('北京时间', '采集截止', '00:00'):
+        for forbidden in ('北京时间', '采集截止'):
             self.assertNotIn(forbidden, output)
         for key in ('owner', 'status'):
             bad = copy.deepcopy(self.data)
@@ -137,7 +137,7 @@ class FormatTests(unittest.TestCase):
             self.assertNotIn(task['status'], task['summary'])
         for omitted in ('北京时间', '采集截止', '新建筛选需求', '自动加参与者', '收到'):
             self.assertNotIn(omitted, output)
-        self.assertNotRegex(output, r'\d{2}:\d{2}')
+        self.assertIn('🕒 时间范围：2026-01-01 00:00 — 2026-01-02 00:00', output)
 
     def test_markdown_title_and_parenthesized_direct_link(self):
         self.data["tasks"] = [self.data["tasks"][0]]

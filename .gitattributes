@@ -1,0 +1,2 @@
+# Approved Markdown snapshots intentionally use two-space hard line breaks.
+examples/*.md whitespace=-blank-at-eol

@@ -35,6 +35,7 @@ class SyntheticClient:
                 "task": {
                     "id": "ci-synthetic-task", "projectId": project_id,
                     "isArchived": False, "content": "CI 虚构：验证原生界面布局",
+                    "uniqueId": 101, "project": {"_id": project_id, "uniqueIdPrefix": "DEMO"},
                     "executorId": "demo-person", "tfsId": "demo-open",
                     "created": timestamp, "updated": timestamp, "isDone": False,
                     "tasklistId": "2" * 24, "stageId": "4" * 24,

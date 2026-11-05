@@ -53,7 +53,22 @@ internal sealed class DesktopState
     public int Number(string key, int fallback) => Settings[key]?.GetValue<int>() ?? fallback;
     public void Set(string key, JsonNode? value)
     {
+        bool identityChanged = (key is "tenant_id" or "project_id") &&
+            Settings[key]?.ToJsonString() != value?.ToJsonString();
+        if (identityChanged)
+        {
+            Settings["task_number_prefix"] = "";
+            Settings["task_link_view_id"] = "";
+            Settings["task_display_scope"] = null;
+        }
         Settings[key] = value;
+        if (key is "task_number_prefix" or "task_link_view_id")
+        {
+            Settings["task_display_scope"] = (Text("task_number_prefix") != "" || Text("task_link_view_id") != "")
+                ? new JsonObject { ["tenant_id"] = Text("tenant_id"), ["project_id"] = Text("project_id") }
+                : null;
+            InvalidateDiagnostic();
+        }
         Dirty = true;
         if (key is "owner_names" or "status_names" or "resolved_status_ids" or "max_tasks_per_run")
             InvalidateDiagnostic();

@@ -172,7 +172,19 @@ public sealed partial class MainWindow
                 Navigate("project");
                 SetStatus(_state.Output);
             }, accent: true)));
-        return LocalScroll(Column(scope, probe));
+        var references = LocalScroll(Column(
+            Card(Column(Paragraph("任务编号", size: 18),
+                Paragraph("标题保留原文中的冒号等标点，前面显示项目任务编号。编号数字从 Teambition 的真实 uniqueId 读取；API 已提供项目前缀时可留空，否则填写已核实的项目编号前缀。", true),
+                SettingText("已确认的任务编号前缀（可选）", "task_number_prefix", "task-number-prefix", "例如 UPCAM"))),
+            Card(Column(Paragraph("任务打开位置", size: 18),
+                Paragraph("可粘贴当前项目“全部”视图的完整链接，或填写视图 ID。保存后只保留视图 ID；这不会改变日报采集范围。留空使用官方的任务直达链接。", true),
+                SettingText("“全部”视图链接或 ID（可选）", "task_link_view_id", "task-link-view", "https://www.teambition.com/project/项目ID/tasks/view/视图ID")))));
+        var tabs = Identify(new TabView { IsAddTabButtonVisible = false, CanDragTabs = false,
+            CanReorderTabs = false }, "project-tabs");
+        tabs.TabItems.Add(new TabViewItem { Header = "采集范围", IsClosable = false,
+            Content = LocalScroll(Column(scope, probe)) });
+        tabs.TabItems.Add(new TabViewItem { Header = "任务编号与链接", IsClosable = false, Content = references });
+        return tabs;
     }
 
     private FrameworkElement BuildFilterEditor()

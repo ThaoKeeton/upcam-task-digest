@@ -12,6 +12,7 @@ import tempfile
 from digest_pipeline import validate_view
 from runtime_mappings import validate_mappings
 from teambition_readonly import CollectionError
+from task_display import TaskDisplayError, validate_task_prefix, normalize_task_link_view
 
 
 SCHEMA_VERSION = 1
@@ -20,6 +21,9 @@ DEFAULT_SETTINGS = {
     "schema_version": SCHEMA_VERSION,
     "tenant_id": "",
     "project_id": "",
+    "task_number_prefix": "",
+    "task_link_view_id": "",
+    "task_display_scope": None,
     "include_archived": False,
     "max_tasks_per_run": 300,
     "api_contract_verified": False,
@@ -60,6 +64,19 @@ def validate_settings(settings: dict) -> dict:
         raise SettingsError("Unsupported settings version")
     if any(not isinstance(merged.get(key), str) for key in ("tenant_id", "project_id")):
         raise SettingsError("Teambition tenant and project IDs must be text")
+    try:
+        merged['task_number_prefix'] = validate_task_prefix(merged.get('task_number_prefix'))
+        merged['task_link_view_id'] = normalize_task_link_view(merged.get('task_link_view_id'), merged['project_id'])
+    except TaskDisplayError as exc:
+        raise SettingsError(str(exc)) from None
+    if merged['task_number_prefix'] or merged['task_link_view_id']:
+        current_display_scope = {'tenant_id': merged['tenant_id'], 'project_id': merged['project_id']}
+        saved_display_scope = merged.get('task_display_scope')
+        if saved_display_scope is not None and saved_display_scope != current_display_scope:
+            raise SettingsError("任务编号前缀或视图链接属于其他企业/项目，请重新填写本项目的显示设置。")
+        merged['task_display_scope'] = current_display_scope
+    else:
+        merged['task_display_scope'] = None
     if type(merged.get("include_archived")) is not bool or type(merged.get("api_contract_verified")) is not bool:
         raise SettingsError("Teambition scope verification flags must be true or false")
     max_tasks = merged.get("max_tasks_per_run")
