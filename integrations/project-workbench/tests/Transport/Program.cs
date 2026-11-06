@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -39,6 +40,7 @@ internal static class Program
             ("handshake, explicit profile and package paths containing spaces", ValidStart),
             ("synthetic mode is omitted when not explicitly requested", NoSyntheticFlag),
             ("a fresh explicit profile may be created by the worker", NewProfile),
+            ("short aliases bind the same long profile and reject a different profile", ShortLongAliases),
             ("all handshake fields are bound to the requested session", BadHandshakes),
             ("a standalone singleton prevents worker creation", OccupiedSingleton),
             ("racing starts permit one backend session", RacingStarts),
@@ -134,6 +136,39 @@ internal static class Program
         Check(created, "Another UPCAM backend is running; run acceptance on an isolated Windows user session.");
         await ExpectFailure(() => fixture.Start());
         Check(!File.Exists(fixture.File("worker.pid")), "Worker spawned despite standalone contention.");
+    }
+
+    private static async Task ShortLongAliases()
+    {
+        using var fixture = new Fixture();
+        string longProfile = ExistingWindowsPath(fixture.Profile, shortForm: false);
+        string shortProfile = ExistingWindowsPath(longProfile, shortForm: true);
+        string longPackage = ExistingWindowsPath(fixture.Package, shortForm: false);
+        string shortPackage = ExistingWindowsPath(longPackage, shortForm: true);
+        Check(!string.Equals(shortProfile, longProfile, StringComparison.OrdinalIgnoreCase),
+            "The Windows acceptance volume must provide an actual 8.3 profile alias for this regression.");
+        Check(PluginWorkerClient.CanonicalizeDirectory(shortProfile, mustExist: true) == longProfile,
+            "Existing short and long directory aliases had different identities.");
+        Check(PluginWorkerClient.CanonicalizeDirectory(longProfile, mustExist: true) == longProfile,
+            "The existing long directory identity changed.");
+        string newShort = Path.Combine(shortProfile, "uncreated parent", "new explicit profile");
+        string newLong = Path.Combine(longProfile, "uncreated parent", "new explicit profile");
+        Check(!Directory.Exists(newLong), "New descendant profile already existed.");
+        Check(PluginWorkerClient.CanonicalizeDirectory(newShort) == newLong,
+            "An existing short ancestor was not expanded for a new profile.");
+        await using (var client = await PluginWorkerClient.StartAsync(shortPackage, newShort, true, CancellationToken.None))
+        {
+            JsonObject invocation = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(newLong, "invocation.json")))!.AsObject();
+            Check(invocation["data_directory"]?.GetValue<string>() == newLong,
+                "Worker did not receive the canonical long profile.");
+            Check(invocation["working_directory"]?.GetValue<string>() == longPackage,
+                "Worker did not receive the canonical long package directory.");
+        }
+        fixture.SetMode("bad_path");
+        await ExpectFailure(() => PluginWorkerClient.StartAsync(shortPackage, shortProfile, true, CancellationToken.None));
+        await fixture.AssertStopped();
+        Check(fixture.Operations().SequenceEqual(new[] { "plugin_handshake" }),
+            "Short alias canonicalization allowed a handshake bound to a different directory.");
     }
 
     private static async Task RacingStarts()
@@ -564,9 +599,25 @@ internal static class Program
         Check(process.ExitCode == 0, "Could not create the offline junction fixture.");
     }
 
+    private static string ExistingWindowsPath(string path, bool shortForm)
+    {
+        // Independent OS oracle for fixtures, not the production canonicalizer.
+        var buffer = new StringBuilder(32768);
+        uint count = shortForm ? GetShortPathNameW(path, buffer, (uint)buffer.Capacity) :
+            GetLongPathNameW(path, buffer, (uint)buffer.Capacity);
+        Check(count > 0 && count < buffer.Capacity, "Could not obtain the Windows fixture path form.");
+        return Path.TrimEndingDirectorySeparator(buffer.ToString());
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern uint GetLongPathNameW(string path, StringBuilder buffer, uint length);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+    private static extern uint GetShortPathNameW(string path, StringBuilder buffer, uint length);
+
     private sealed class Fixture : IDisposable
     {
-        public string Root { get; } = Path.Combine(Path.GetTempPath(), "UPCAM transport spaces " + Guid.NewGuid().ToString("N"));
+        public string Root { get; } = Path.Combine(ExistingWindowsPath(Path.GetTempPath(), shortForm: false),
+            "UPCAM transport spaces " + Guid.NewGuid().ToString("N"));
         public string Package => Path.Combine(Root, "plugin package");
         public string Profile => Path.Combine(Root, "explicit profile");
         public Fixture(string mode = "valid")

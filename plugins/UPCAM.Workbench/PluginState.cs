@@ -12,6 +12,7 @@ internal sealed class PluginState
     internal ProfileDraft Current { get; private set; }
     internal bool Ready { get; set; }
     internal bool Busy { get; set; }
+    internal bool BackgroundActivity { get; set; }
     internal bool SavedAutoEnabled { get; set; }
     internal string? BindingError { get; set; }
     internal string Status { get; set; } = "Open a page or run a command to start the backend.";
@@ -20,6 +21,8 @@ internal sealed class PluginState
     internal string AdoptionPath { get; set; } = "";
     internal long OperationRevision { get; set; }
     internal string OperationResult { get; set; } = "0 · No operation yet.";
+    internal long ScheduleCheckRevision { get; set; }
+    internal string ScheduleCheckResult { get; set; } = "0 · 尚未检查已保存的计划。";
     internal event EventHandler<bool>? Changed;
 
     internal PluginState(string path) => Current = GetProfile(path);
@@ -42,13 +45,13 @@ internal sealed class PluginState
     internal void Edit(ProfileDraft profile, Action<DesktopState> action)
     {
         lock (Sync)
-            if (ReferenceEquals(profile, Current) && !Busy) action(profile.Data);
+            if (ReferenceEquals(profile, Current) && (!Busy || BackgroundActivity)) action(profile.Data);
     }
 
     internal void EditDraft(ProfileDraft profile, Action<ProfileDraft> action)
     {
         lock (Sync)
-            if (ReferenceEquals(profile, Current) && !Busy) action(profile);
+            if (ReferenceEquals(profile, Current) && (!Busy || BackgroundActivity)) action(profile);
     }
 }
 
@@ -118,7 +121,8 @@ internal static class ProfileBinding
             if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path) ||
                 path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal))
                 throw new IOException();
-            string canonical = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+            // Use the exact same Windows identity as the worker handshake, including existing 8.3 aliases.
+            string canonical = PluginWorkerClient.CanonicalizeDirectory(path, mustExist: requireExistingProfile);
             string? root = Path.GetPathRoot(canonical);
             if (root is null || string.Equals(canonical, Path.TrimEndingDirectorySeparator(root), StringComparison.OrdinalIgnoreCase))
                 throw new IOException();

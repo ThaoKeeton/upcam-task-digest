@@ -14,11 +14,15 @@ internal sealed partial class DigestPage : Grid
     private readonly bool _settings;
     private readonly TextBlock _status;
     private readonly TextBlock _operation;
+    private readonly TextBlock _scheduleCheck;
     private readonly ContentControl _body;
     private readonly Button _save;
     private readonly Button _cancel;
     private bool _subscribed;
     private bool _rendering;
+    private TextBox? _runOutput;
+    private ListView? _historyList;
+    private JsonArray? _historySource;
 
     internal DigestPage(PluginState state, PluginSession session, bool settings)
     {
@@ -35,6 +39,7 @@ internal sealed partial class DigestPage : Grid
         RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         _status = Identify(Paragraph("Open the local profile to begin."), "plugin-status", "UPCAM backend status");
         _operation = Identify(Paragraph("0 · No operation yet.", 12), "operation-result", "UPCAM operation result");
+        _scheduleCheck = Identify(Paragraph("0 · 尚未检查已保存的计划。", 12), "last-schedule-check", "Last saved schedule check");
         _save = ActionButton("Save business settings", "save-settings", async () => { await _session.SaveAsync(); });
         _save.Visibility = settings ? Visibility.Visible : Visibility.Collapsed;
         _cancel = ActionButton("Cancel current operation", "cancel-operation", () => { _session.CancelCurrent(); return Task.CompletedTask; });
@@ -45,7 +50,7 @@ internal sealed partial class DigestPage : Grid
         Children.Add(heading);
         var toolbar = Toolbar(_save, reconnect, _cancel);
         Children.Add(toolbar); SetRow(toolbar, 1);
-        var feedback = Column(_status, _operation); feedback.Spacing = 2;
+        var feedback = Column(_status, _operation, _scheduleCheck); feedback.Spacing = 2;
         Children.Add(feedback); SetRow(feedback, 2);
         _body = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
         Children.Add(_body); SetRow(_body, 3);
@@ -86,9 +91,18 @@ internal sealed partial class DigestPage : Grid
         {
             _status.Text = _state.Status;
             _operation.Text = _state.OperationResult;
-            _save.IsEnabled = _state.Ready && !_state.Busy;
+            _scheduleCheck.Text = _state.ScheduleCheckResult;
+            _save.IsEnabled = _state.Ready && (!_state.Busy || _state.BackgroundActivity);
             _cancel.IsEnabled = _state.Busy;
-            _body.IsEnabled = !_state.Busy;
+            _body.IsEnabled = !_state.Busy || _state.BackgroundActivity;
+            // A saved-schedule check updates only read-only results. Editors keep their tree, focus and cursor.
+            if (_runOutput is not null && _runOutput.Text != _state.Current.Data.Output)
+                _runOutput.Text = _state.Current.Data.Output;
+            if (_historyList is not null && !ReferenceEquals(_historySource, _state.Current.Data.History))
+            {
+                _historySource = _state.Current.Data.History;
+                FillHistoryList(_historyList, _historySource, _state.Current.SelectedHistoryId);
+            }
         }
     }
 
@@ -165,6 +179,7 @@ internal sealed partial class DigestPage : Grid
             TextWrapping = TextWrapping.Wrap, Text = profile.Data.Output, MinHeight = 180,
             HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch
         }, "diagnostic-output", "Digest and diagnostic output");
+        _runOutput = output;
         ScrollViewer.SetVerticalScrollBarVisibility(output, ScrollBarVisibility.Auto);
         var operations = Toolbar(
             ActionButton("Read-only diagnosis", "diagnose", async () =>
@@ -193,7 +208,7 @@ internal sealed partial class DigestPage : Grid
                     return "The worker returned the delivery result. Review History before sending again.";
                 });
             }));
-        var exports = new Expander
+        var exports = Identify(new Expander
         {
             Header = "诊断导出", HorizontalAlignment = HorizontalAlignment.Stretch,
             Content = Column(
@@ -233,14 +248,20 @@ internal sealed partial class DigestPage : Grid
                     }),
                     ActionButton("Export detailed project content", "export-detailed-diagnostic", async () =>
                     {
-                        await _session.CallAsync("export-detailed-diagnostic", "export_detailed_diagnostic_to_file", p =>
+                        await _session.PerformAsync("export-detailed-diagnostic", async (worker, p, token) =>
                         {
-                            if (!p.DetailedExportConsent) throw new InvalidOperationException("Give explicit local project-content export consent first.");
-                            var payload = p.Data.WindowPayload(); payload["path"] = ExportTarget(p); payload["include_project_content"] = true;
-                            return payload;
-                        }, ApplyDiagnostic, requireSaved: true);
+                            JsonObject payload;
+                            lock (_state.Sync)
+                            {
+                                PluginSession.RequireSaved(p);
+                                if (!p.DetailedExportConsent) throw new InvalidOperationException("Give explicit local project-content export consent first.");
+                                payload = p.Data.WindowPayload(); payload["path"] = ExportTarget(p); payload["include_project_content"] = true;
+                            }
+                            JsonObject result = await worker.SendAsync("export_detailed_diagnostic_to_file", payload, token);
+                            lock (_state.Sync) return ApplyDetailedExportResult(p, result);
+                        });
                     })))
-        };
+        }, "diagnostic-export", "Diagnostic export options");
         var top = Column(Paragraph("Range uses this computer's local time; format YYYY-MM-DD HH:MM."),
             WindowInputs(profile), operations, exports);
         return Fill(LocalScroll(top, 310), output);
@@ -265,18 +286,35 @@ internal sealed partial class DigestPage : Grid
         data.DiagnosticText = data.Output;
     }
 
+    private static string ApplyDetailedExportResult(ProfileDraft profile, JsonObject result)
+    {
+        // Diagnosis can succeed while writing the detailed snapshot is refused. Keep the diagnosis in both cases.
+        ApplyDiagnostic(profile, result);
+        JsonObject? export = result["detailed_export"] as JsonObject;
+        if (export?["saved"] is JsonValue saved && saved.TryGetValue<bool>(out bool confirmed) && confirmed)
+            return "详细诊断已保存，包含项目内容并已剔除配置凭据；请仅私下分享用于排查。";
+
+        string? reason = export?["message"] is JsonValue message && message.TryGetValue<string>(out string? text) ? text : null;
+        // Only fixed, reviewed worker messages cross into operation status; never copy arbitrary protocol/error text.
+        string safeReason = reason switch
+        {
+            "设置或凭据在采集期间已改变，请重新执行详细诊断；未写入项目内容。" => "设置或凭据在采集期间已改变，请重新执行详细诊断；未写入项目内容。",
+            "设置或凭据在准备文件期间已改变，请重新执行详细诊断；未写入项目内容。" => "设置或凭据在准备文件期间已改变，请重新执行详细诊断；未写入项目内容。",
+            "保存目录在诊断期间已改变；没有写入详细文件，请重新选择位置。" => "保存目录在诊断期间已改变；没有写入详细文件，请重新选择位置。",
+            "详细诊断未能确认保存成功，文件可能已生成；请检查本机保存位置、权限和可用空间。脱敏结构仍可导出。" => "详细诊断未能确认保存成功，文件可能已生成；请检查本机保存位置、权限和可用空间。脱敏结构仍可导出。",
+            "无法安全准备详细诊断：数据超过预算或认证信息无法可靠清理；没有保存项目正文。脱敏结构仍可导出。" => "无法安全准备详细诊断：数据超过预算或认证信息无法可靠清理；没有保存项目正文。脱敏结构仍可导出。",
+            "采集或诊断未完成，没有写入详细项目数据。" => "采集或诊断未完成，没有写入详细项目数据。",
+            _ => "未能确认详细诊断保存成功；请检查本机目标位置、文件名、权限和可用空间后重新导出。诊断结果已保留，不会自动重试。"
+        };
+        throw new InvalidOperationException(safeReason);
+    }
+
     private FrameworkElement BuildHistory(ProfileDraft profile)
     {
         var list = Identify(new ListView { SelectionMode = ListViewSelectionMode.Single, MinHeight = 100, MaxHeight = 260 }, "history-list", "Local digest run history");
-        foreach (JsonNode? run in profile.Data.History)
-        {
-            string id = Value(run, "run_id");
-            list.Items.Add(new ListViewItem
-            {
-                Tag = id, HorizontalContentAlignment = HorizontalAlignment.Stretch,
-                Content = Paragraph($"{Value(run, "created_at_utc")} · {Value(run, "state")}\n{Value(run, "window_start_local")} → {Value(run, "window_end_local")}\n{Value(run, "delivery_note")}")
-            });
-        }
+        _historyList = list;
+        _historySource = profile.Data.History;
+        FillHistoryList(list, _historySource, profile.SelectedHistoryId);
         list.SelectionChanged += (_, _) =>
         {
             if (list.SelectedItem is ListViewItem item && item.Tag is string id)
@@ -297,6 +335,22 @@ internal sealed partial class DigestPage : Grid
                     await _session.CallAsync("history-detail", "history_detail", p => new JsonObject { ["run_id"] = p.SelectedHistoryId },
                         (p, result) => p.HistoryDetail = Value(result["run"], "delivery_note") + "\n\n" + Value(result["run"], "digest_markdown"));
                 })), list, detail));
+    }
+
+    private static void FillHistoryList(ListView list, JsonArray history, string selectedId)
+    {
+        list.Items.Clear();
+        foreach (JsonNode? run in history)
+        {
+            string id = Value(run, "run_id");
+            var item = new ListViewItem
+            {
+                Tag = id, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                Content = Paragraph($"{Value(run, "created_at_utc")} · {Value(run, "state")}\n{Value(run, "window_start_local")} → {Value(run, "window_end_local")}\n{Value(run, "delivery_note")}")
+            };
+            list.Items.Add(item);
+            if (id == selectedId) list.SelectedItem = item;
+        }
     }
 
     private static T Identify<T>(T control, string id, string name) where T : DependencyObject
@@ -387,7 +441,8 @@ internal sealed partial class DigestPage : Grid
     private static CheckBox Check(string label, string id, bool value, Action<bool> changed)
     {
         var box = Identify(new CheckBox { Content = Label(label), IsChecked = value }, id, label);
-        box.Click += (_, _) => changed(box.IsChecked == true);
+        box.Checked += (_, _) => changed(true);
+        box.Unchecked += (_, _) => changed(false);
         return box;
     }
 

@@ -19,6 +19,10 @@ binding, process deadlines, cancellation, serialized callers, singleton exclusio
 reparse rejection, shutdown, descendant cleanup on host death, and recovery of a
 locally recorded uncertain send without replay. A known fixed setup message is
 preserved while arbitrary and partially matching child errors remain private.
+The Windows alias regression uses real `GetShortPathNameW`/`GetLongPathNameW`
+results for an existing profile, a missing descendant profile and package paths;
+it also rejects a handshake for a different directory. The acceptance volume
+must expose an actual 8.3 alias (as the Windows runner's temporary path does).
 The ordinary deadline test takes about 30 seconds and the collection test runs
 both `diagnose` and `save` for 31 seconds each; the whole suite normally takes
 a little under two minutes.

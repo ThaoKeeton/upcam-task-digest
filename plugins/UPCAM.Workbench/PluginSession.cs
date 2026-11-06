@@ -64,14 +64,14 @@ internal sealed class PluginSession : IAsyncDisposable
 
     internal Task<bool> PerformAsync(string operation,
         Func<PluginWorkerClient, ProfileDraft, CancellationToken, Task<string>> action,
-        CancellationToken token = default, bool requireActivation = true, bool wait = true) =>
+        CancellationToken token = default, bool requireActivation = true, bool wait = true, bool background = false) =>
         PerformCoreAsync(operation, (worker, profile, cancellation) => action(worker ??
             throw new InvalidOperationException("Open the backend before running this operation."), profile, cancellation),
-            token, requireActivation, wait);
+            token, requireActivation, wait, background);
 
     private async Task<bool> PerformCoreAsync(string operation,
         Func<PluginWorkerClient?, ProfileDraft, CancellationToken, Task<string>> action,
-        CancellationToken token, bool requireActivation, bool wait)
+        CancellationToken token, bool requireActivation, bool wait, bool background = false)
     {
         bool entered = false;
         bool succeeded = false;
@@ -87,7 +87,9 @@ internal sealed class PluginSession : IAsyncDisposable
             {
                 _activeOperation = operationCancellation;
                 _state.Busy = true;
-                _state.Status = "Working · " + operation;
+                _state.BackgroundActivity = background;
+                if (!background) _state.Status = "Working · " + operation;
+                else _state.ScheduleCheckResult = $"{_state.ScheduleCheckRevision} · 正在检查已保存的自动计划；可取消当前操作。";
             }
             _state.Notify(false);
             if (requireActivation) await EnsureStartedAsync(operationCancellation.Token);
@@ -126,11 +128,14 @@ internal sealed class PluginSession : IAsyncDisposable
                 {
                     _activeOperation = null;
                     _state.Busy = false;
+                    _state.BackgroundActivity = false;
                     _state.Status = _state.Ready ? ReadyStatus : _state.BindingError ?? "工作进程已停止；请重新连接，不会自动重放请求。";
                     _state.OperationResult = $"{++_state.OperationRevision} · {operation} · {(succeeded ? "succeeded" : "failed")} · {message}";
+                    if (background)
+                        _state.ScheduleCheckResult = $"{++_state.ScheduleCheckRevision} · {DateTime.Now:yyyy-MM-dd HH:mm:ss} · {(succeeded ? "succeeded" : "failed")} · {message}";
                 }
                 _gate.Release();
-                _state.Notify();
+                _state.Notify(rebuild: !background);
             }
         }
     }
@@ -252,10 +257,10 @@ internal sealed class PluginSession : IAsyncDisposable
                             profile.Data.Output = string.Join("\n", events.Select(x => JsonText(x, "message")));
                             profile.Data.History = history["runs"]?.DeepClone().AsArray() ?? new JsonArray();
                         }
-                        return "Saved schedule checked. Review the local run history for delivery state.";
+                        return "已检查保存的自动计划；请在本机运行记录中核对发送状态。";
                     }
-                    return "Saved authorized schedule checked; no due slot started.";
-                }, _stop.Token, requireActivation: false, wait: false);
+                    return "已检查保存的自动计划；本次没有启动到期任务。";
+                }, _stop.Token, requireActivation: false, wait: false, background: true);
             }
         }
         catch (OperationCanceledException) { }

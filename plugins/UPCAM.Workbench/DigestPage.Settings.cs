@@ -13,7 +13,7 @@ internal sealed partial class DigestPage
             PlaceholderText = @"C:\Users\user\...\UPCAMTaskDigest" }, "profile-folder", "Existing standalone profile folder");
         adoption.TextChanging += (_, _) =>
         {
-            lock (_state.Sync) if (!_state.Busy) _state.AdoptionPath = adoption.Text;
+            lock (_state.Sync) if (!_state.Busy || _state.BackgroundActivity) _state.AdoptionPath = adoption.Text;
         };
         return LocalScroll(Column(
             Paragraph(_state.BindingError is null ? "Active profile" : "候选默认目录（请明确选择后连接）", 18), Paragraph(profile.Directory),

@@ -118,7 +118,7 @@ class PluginWorkerTests(unittest.TestCase):
         self.assertFalse(directory.exists())
         response = plugin.dispatch({"op": "plugin_handshake", "payload": HANDSHAKE})
         self.assertEqual(response, {
-            **HANDSHAKE, "mode": "project-workbench", "data_directory": str(directory),
+            **HANDSHAKE, "mode": "project-workbench", "data_directory": str(directory.resolve()),
             "synthetic": True, "ruleset_revision": RULESET_REVISION,
         })
         self.assertFalse((directory / "delivery_ledger.sqlite3").exists())
@@ -258,7 +258,7 @@ class PluginWorkerTests(unittest.TestCase):
         responses = [json.loads(line) for line in result.stdout.decode("utf-8").splitlines()]
         self.assertEqual([response["id"] for response in responses], ["hello", "init", "stop"])
         self.assertTrue(all(response["ok"] for response in responses), responses)
-        self.assertEqual(responses[0]["result"]["data_directory"], str(directory))
+        self.assertEqual(responses[0]["result"]["data_directory"], str(directory.resolve()))
         self.assertFalse(responses[1]["result"]["settings"]["auto_send_enabled"])
 
     def test_secret_in_business_settings_is_rejected_before_any_save(self):
@@ -574,6 +574,32 @@ class PluginWorkerTests(unittest.TestCase):
         for path in (junction, junction / "profile"):
             with self.subTest(path=path), self.assertRaises(WorkerApiError):
                 self.plugin(path)
+
+    @unittest.skipUnless(os.name == "nt", "Windows short-path aliases require Windows")
+    def test_windows_short_profile_alias_reports_the_same_canonical_directory(self):
+        import ctypes
+        directory = self.root / "synthetic profile with long directory name"
+        directory.mkdir()
+        get_short_path = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+        get_short_path.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+        get_short_path.restype = ctypes.c_uint32
+        required = get_short_path(str(directory), None, 0)
+        if not required:
+            self.skipTest("This Windows volume does not provide short path aliases")
+        buffer = ctypes.create_unicode_buffer(required)
+        written = get_short_path(str(directory), buffer, required)
+        self.assertGreater(written, 0)
+        self.assertLess(written, required)
+        alias = Path(buffer.value)
+        canonical = directory.resolve()
+        if str(alias).casefold() == str(canonical).casefold():
+            self.skipTest("No distinct short alias is available for this profile")
+        plugin = self.plugin(alias, synthetic=True)
+        response = plugin.dispatch({"op": "plugin_handshake", "payload": HANDSHAKE})
+        self.assertEqual(response["data_directory"], str(canonical))
+        initialized = plugin.dispatch({"op": "initialize", "payload": {}})
+        self.assertEqual(initialized["data_directory"], str(canonical))
+        self.assertTrue((canonical / ".plugin-synthetic.json").is_file())
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI round trip requires Windows")
     def test_windows_dpapi_profile_adoption_preserves_ciphertext_and_identity(self):

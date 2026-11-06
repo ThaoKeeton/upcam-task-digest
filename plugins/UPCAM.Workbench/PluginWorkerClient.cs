@@ -110,8 +110,8 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
         if (cancellationToken.IsCancellationRequested)
             throw new OperationCanceledException(Cancelled, cancellationToken);
 
-        string package = ValidateLocalPath(packageDirectory, directory: true, mustExist: true);
-        string profile = ValidateLocalPath(dataDirectory, directory: true, mustExist: false);
+        string package = CanonicalizeDirectory(packageDirectory, mustExist: true);
+        string profile = CanonicalizeDirectory(dataDirectory);
         string executable = ValidateLocalPath(Path.Combine(package, "worker", "UPCAMPluginWorker.exe"),
             directory: false, mustExist: true);
         if (!executable.StartsWith(package + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
@@ -379,7 +379,11 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
         }
     }
 
-    private static string ValidateLocalPath(string value, bool directory, bool mustExist)
+    /// <summary>Shared with profile binding so Windows short aliases share draft and worker identity.</summary>
+    internal static string CanonicalizeDirectory(string path, bool mustExist = false) =>
+        ValidateLocalPath(path, directory: true, mustExist: mustExist);
+
+    private static string ValidateLocalPath(string value, bool directory, bool mustExist, bool expandAliases = true)
     {
         const string invalidPath = "The UPCAM package and profile must use contained, absolute local paths without links or reparse points.";
         try
@@ -401,18 +405,42 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
             string[] components = full[root.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
             for (int index = 0; index < components.Length; index++)
             {
+                string parent = current;
                 current = Path.Combine(current, components[index]);
                 FileAttributes attributes;
                 try { attributes = File.GetAttributes(current); }
-                catch (FileNotFoundException) when (!mustExist && directory) { return full; }
-                catch (DirectoryNotFoundException) when (!mustExist && directory) { return full; }
+                catch (Exception error) when (!mustExist && directory &&
+                    (error is FileNotFoundException or DirectoryNotFoundException))
+                {
+                    if (!expandAliases) return full;
+                    // GetLongPathName requires an existing path. Expand the last
+                    // verified regular ancestor, then retain each new component.
+                    string canonical = ExpandExistingPath(parent);
+                    for (int remaining = index; remaining < components.Length; remaining++)
+                        canonical = Path.Combine(canonical, components[remaining]);
+                    return ValidateLocalPath(canonical, directory, mustExist, expandAliases: false);
+                }
                 if ((attributes & FileAttributes.ReparsePoint) != 0) throw new IOException();
                 bool isDirectory = (attributes & FileAttributes.Directory) != 0;
                 if ((index < components.Length - 1 || directory) != isDirectory) throw new IOException();
             }
-            return full;
+            // Validate the expanded spelling too; resolving an alias never
+            // exempts a component from containment/local/reparse checks.
+            return expandAliases ? ValidateLocalPath(ExpandExistingPath(full), directory, mustExist, expandAliases: false) : full;
         }
         catch (Exception) { throw new InvalidOperationException(invalidPath); }
+    }
+
+    private static string ExpandExistingPath(string path)
+    {
+        var buffer = new StringBuilder(Math.Max(512, path.Length + 1));
+        while (true)
+        {
+            uint length = Native.GetLongPathNameW(path, buffer, (uint)buffer.Capacity);
+            if (length == 0 || length > 32768) throw new IOException();
+            if (length < buffer.Capacity) return Path.TrimEndingDirectorySeparator(buffer.ToString());
+            buffer = new StringBuilder(checked((int)length));
+        }
     }
 
     private static bool IsDeviceName(string segment)
@@ -731,5 +759,7 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
         [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CloseHandle(IntPtr handle);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)] internal static extern uint GetDriveTypeW(string root);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        internal static extern uint GetLongPathNameW(string path, StringBuilder buffer, uint length);
     }
 }
