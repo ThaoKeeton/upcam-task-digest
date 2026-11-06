@@ -13,6 +13,7 @@ from activity_adapter import (
     OBSERVED_ACTIONS, bounded_object, comment_input, executor_change, parse_activity,
     standard_commit_candidate, status_transition, stage_movement, standard_association_notification,
 )
+from attachment_activities import attachment_change
 from digest_pipeline import build_digest, timestamp
 from openai_summarizer import OpenAIResponsesClient, SummaryError
 from render_digest import TEMPLATE, render_digest, text as digest_text
@@ -88,7 +89,8 @@ def _base_failure_issues(report: dict) -> list[str]:
 _GLOBAL_SOURCE_ISSUES = {
     "项目范围尚未核验": "项目范围尚未核验：打开“项目映射与范围”，完成只读验证并确认当前 Project ID、归档选项和筛选条件，然后保存。",
     "API 字段及事件规则尚未核验": "Teambition 字段尚未核验：在“项目映射与范围”选择含真实任务动态的时间窗，完成只读验证并保存。",
-    "任务当前更新时间筛选口径尚未核验": "任务更新时间范围未核验：按任务当前 updated 字段选择采集范围，重新执行只读项目验证。",
+    "任务当前更新时间筛选口径尚未核验": "采集方式仍是旧版任务更新时间筛选；请用新版重新只读采集，不能直接发送旧数据。",
+    "项目动态时间窗采集口径尚未核验": "任务动态采集范围未核验：请用新版按当前项目完整翻页读取任务和动态，再执行只读诊断。",
 }
 
 _COLLECTION_ERROR_MESSAGES = {
@@ -102,12 +104,16 @@ _COLLECTION_ERROR_MESSAGES = {
     "Invalid or repeated pagination token": "Teambition 分页标记无效或重复，结果不完整；稍后重新只读检查。",
     "Collection source differs from configuration": "返回的企业或 Project ID 与本机配置不一致；检查 Tenant ID、Project ID 后重新验证。",
     "Unsupported activity schema override": "任务动态字段配置不受当前仓库规则支持；恢复仓库默认 createTime/action 字段并重新验证。",
-    "Selection contract differs from report window": "采集响应中的更新时间窗口与当前日报起止时间不一致；检查时区和窗口后重新只读查询。",
+    "Selection contract differs from report window": "采集响应中的动态时间窗口与当前日报起止时间不一致；检查时区和窗口后重新只读查询。",
     "Task belongs to another project": "查询结果包含其他项目任务；检查 Project ID 或停止运行并核对只读接口范围。",
-    "Task violates report selection contract": "任务当前更新时间不在所选半开时间窗内；核对本机起止时间和任务 updated 字段后重新查询。",
+    "Task violates report selection contract": "任务 updated 字段缺失、格式不合法或没有时区；无法核对任务版本，请重新只读诊断。任务更新时间无需落在日报窗口内。",
     "Returned candidate violates updated-time selection": "Teambition 返回任务的 updated 时间超出筛选窗口；来源校验失败，检查本机时区和采集起止时间。",
     "Task changed outside selection or has invalid updated timestamp": "采集中的任务 updated 字段变化或格式不合法；重新执行一次完整只读查询。",
     "Task changed during collection; retry a fresh bounded run": "任务在分页读取期间发生变化，当前结果不是稳定快照；重新执行一次只读查询。",
+    "Invalid task updated timestamp": "任务 updated 字段缺失、格式不合法或没有时区；无法核对采集期间的任务版本，已停止后续摘要和发送。",
+    "Invalid collection timestamp": "采集完成时间缺失时区或格式无效；无法核对事件时序，请检查本机时间后重新只读采集。",
+    "Activity timestamp exceeds collection time": "动态时间晚于本次采集完成时间，不能作为已经发生的证据；请检查电脑时间、时区及接口时间后重新只读采集。",
+    "Candidate identity or archive scope mismatch": "项目任务列表返回的项目身份或归档范围与配置不一致；请核对 Project ID、读取权限及归档选项后重新只读诊断。",
     "Missing archive scope": "任务缺少归档状态字段；确认 Teambition API 返回完整字段后再运行。",
     "Missing archive flag": "任务缺少归档状态字段；确认接口权限和字段返回后重新验证。",
     "Archive scope mismatch": "归档范围与本机设置不一致；检查“将已归档任务纳入采集范围”并重新验证。",
@@ -115,13 +121,13 @@ _COLLECTION_ERROR_MESSAGES = {
     "Unknown or unsupported view filter": "项目筛选条件不受支持；只使用界面列出的稳定字段并重新保存。",
     "Conflicting event identity": "同一动态 ID 返回了互相冲突的内容；来源证据不完整，检查接口查询结果后再试。",
     "Duplicate task in collection": "查询返回重复任务，无法确认完整范围；重新只读查询。",
-    "Task timestamps/status cannot substitute for event window": "项目筛选条件不能使用 created/updated/isDone 代替动态时间；恢复真实 updated 窗口并移除这类条件。",
+    "Task timestamps/status cannot substitute for event window": "项目筛选条件不能使用 created/updated/isDone 代替动态时间；移除这类条件，按动态 createTime 筛选日报窗口。",
     "Conflicting duplicate; collection is not a snapshot": "同一任务在分页期间返回了冲突版本，无法确认一致范围；重新执行只读查询。",
     "Detail identity or project mismatch": "任务详情 ID 或 Project ID 与查询结果不一致；停止发送并核对项目权限和接口响应。",
     "Invalid page size": "本机分页参数无效；恢复仓库默认设置后重新只读诊断。",
     "Collection record budget exhausted": "Teambition 返回的任务与动态总记录超过 50,000 条的硬上限；为保护本机资源，结果未完成，不能发送。",
-    "Task selection exceeds bounded collection budget": "符合条件的任务数超过“单次采集任务上限”。可在“自动运行计划”提高此值（最多 700），保存后重新只读诊断；任务详情/动态请求、总记录数、响应体大小和运行时长仍有硬上限，触及时会继续阻断。",
-    "Collection request budget exhausted": "Teambition 分页和详情请求达到本机请求预算，结果不完整，不能发送。检查活动量；仍超限时需降低时间范围或项目范围。",
+    "Task selection exceeds bounded collection budget": "当前项目可读任务数超过“单次采集任务上限”。可在“自动运行”提高此值（最多 700），保存后重新只读诊断；本版先扫描项目任务及其历史动态，仅缩短日报时间窗不会减少扫描任务数。超过硬上限时停止，不会部分发送。",
+    "Collection request budget exhausted": "Teambition 分页和详情请求达到本机请求预算，结果不完整，不能发送。本版扫描当前项目任务及其历史动态，仅缩短日报时间窗不能保证减少请求；需要减少实际项目范围或改进受支持的采集策略。",
     "Collection response byte budget exhausted": "本次 Teambition 响应数据总量超过 128 MiB 的硬上限；结果不完整，不能发送。",
     "Unexpected HTTP status": "Teambition API 返回了未预期的 HTTP 状态；检查凭据、读取权限或稍后重试。",
     "Missing or conflicting record identity": "任务或动态缺少唯一 ID 或同一对象的 ID 字段互相冲突；核对 API 字段后再运行。",
@@ -131,8 +137,8 @@ _COLLECTION_ERROR_MESSAGES = {
     "HTTP request rejected": "Teambition 只读请求失败；检查网络、App 凭据及项目读取权限。没有发送日报。",
     "API rejected request or malformed envelope": "Teambition API 拒绝请求或返回结构不完整；检查凭据、权限和接口状态。没有发送日报。",
     "GET retry budget exhausted": "Teambition 只读请求多次失败；检查网络和项目权限后再试。",
-    "Collection time budget exhausted": "Teambition 查询超过本机时间上限；缩小时间窗后重新只读检查。",
-    "Response size limit exceeded": "Teambition 响应超过本机读取上限；缩小时间窗后重新验证。",
+    "Collection time budget exhausted": "Teambition 查询超过本机时间上限，采集不完整；请检查网络及项目任务和历史动态量后重新只读诊断。",
+    "Response size limit exceeded": "Teambition 单页响应超过本机读取上限，采集不完整；请检查接口分页及历史动态量后重新只读诊断。",
 }
 
 
@@ -186,7 +192,7 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
     bad_executor_events, bad_commit_events, unrecognized_standard_events = set(), set(), set()
     status_conflicts, status_conflict_details = set(), {}
     executor_conflicts, no_window_events, position_conflicts, malformed_moves = set(), set(), set(), set()
-    generic_tasks = set()
+    generic_tasks, malformed_attachments, attachment_conflicts = set(), set(), set()
     owner_names = config.get("owner_names", {})
     status_names = config.get("status_names", {})
 
@@ -225,12 +231,16 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
         if audit.get("status_noop"):
             status_conflicts.add(task_id)
             status_conflict_details.setdefault(task_id, set()).add("事件中的旧状态 ID 与目标状态 ID 相同")
+        if audit.get("status_conflict"):
+            status_conflicts.add(task_id)
         if audit.get("executor_conflict"):
             executor_conflicts.add(task_id)
         if audit.get("position_conflict"):
             position_conflicts.add(task_id)
+        if audit.get("attachment_conflict"):
+            attachment_conflicts.add(task_id)
 
-        transitions = audit.get("status_transitions", [])
+        transitions = audit.get("status_validation_transitions", audit.get("status_transitions", []))
         if transitions:
             chain_bad = False
             if any(previous.get("target_id") != current.get("previous_id")
@@ -249,7 +259,7 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
                 status_conflict_details.setdefault(task_id, set()).add(
                     "当前任务未完成，不能依据已配置的“已解决”状态映射确认解决")
             event_times = {}
-            for activity in evidence:
+            for activity in evidence + audit.get("post_window_context", []):
                 try:
                     event_times[record_id(activity, task_fallback=False)] = timestamp(activity.get("createTime"))
                 except (CollectionError, ValueError, TypeError):
@@ -262,7 +272,7 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
             if chain_bad:
                 status_conflicts.add(task_id)
 
-        for activity in evidence:
+        for activity in evidence + audit.get("post_window_context", []):
             if not isinstance(activity, dict):
                 generic_tasks.add(task_id)
                 continue
@@ -328,6 +338,9 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
             elif action == "move.cross.from.stage.to.stage":
                 if stage_movement(activity) is None:
                     malformed_moves.add(task_id)
+            elif action in ("upload.customfield.work", "customfield.create.v2"):
+                if attachment_change(activity) is None:
+                    malformed_attachments.add(task_id)
             elif action == "standard":
                 if standard_association_notification(activity) is not None:
                     continue  # An observed display notice never proves code provenance.
@@ -376,6 +389,13 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
     if malformed_moves:
         reasons.append("位置变更动态不符合已核验的 from/to 分组与阶段结构：" + _display_ids(malformed_moves) +
                        "。请核对字段、ID 和名称类型；不按目标分组名称判断完成。")
+    if malformed_attachments:
+        reasons.append("自定义字段附件动态的文件身份、字段绑定或内容结构无法核验：" +
+                       _display_ids(malformed_attachments) +
+                       "。请导出安全结构核对；不读取文件，也不按文件名猜测进展。")
+    if attachment_conflicts:
+        reasons.append("同一文件 ID 的字段或名称证据互相冲突：" + _display_ids(attachment_conflicts) +
+                       "。已停止摘要和发送；请核对附件动态，不要删除冲突事件或手动跳过校验。")
     if position_conflicts:
         reasons.append("位置变更事件序列与当前任务分组/阶段不一致或存在同刻冲突：" +
                        _display_ids(position_conflicts) + "。请重新只读采集并核对任务位置历史。")
@@ -467,8 +487,11 @@ def diagnose_automatic_source(collection: dict, config: dict, day, window=None) 
     except (CollectionError, ValueError, TypeError, KeyError) as exc:
         return {"ok": False, "message": collection_validation_message(exc), "task_count": None}
     return {"ok": True,
-            "message": (f"只读校验通过：完整采集 {len(collection.get('records', []))} 个任务；"
-                        "本地字段、更新时间范围、成员/状态映射及动态规则通过。未调用 OpenAI，未发送钉钉。"),
+            "message": (f"只读校验通过：扫描当前项目范围内 {len(collection.get('records', []))} 个可读任务，"
+                        f"其中 {len(base.get('digest', {}).get('tasks', []))} 个任务有窗口内动态；"
+                        "本地字段、动态时间窗、成员/状态映射及动态规则通过。"
+                        "已完成接口分页；不代表已删除、已不可见任务或历史项目成员关系的完整快照。"
+                        "未调用 OpenAI，未发送钉钉。"),
             "task_count": len(base.get("digest", {}).get("tasks", []))}
 
 

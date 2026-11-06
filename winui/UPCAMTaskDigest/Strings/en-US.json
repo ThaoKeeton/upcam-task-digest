@@ -1,4 +1,8 @@
 {
+  "任务更新时间字段缺失或没有时区，未保存核验状态。": "The task update timestamp is missing or has no time zone. Verification was not saved.",
+  "读取当前项目任务动态，按发生时间筛选，并核验只读接口。": "Read current project task activity, select its event-time window, and verify the read-only API.",
+  "推荐范围：扫描指定 Project ID 下当前可读任务的动态，按动态发生时间筛选日报窗口；默认不含归档，不添加其他条件。任务在截止后再更新也会检查；已删除或不可见任务无法保证追溯。": "Recommended scope: scan activity for all currently readable tasks in the selected project and select events by their occurrence time. Archived tasks are excluded by default, with no extra filters. Tasks updated after the cutoff are still checked; deleted or inaccessible tasks cannot be guaranteed.",
+  "选择含任务动态的区间。保存时会校验完整翻页、来源与字段样本，并发现映射 ID。任务当前更新时间不必落在所选区间；成员姓名和状态名称仍需核对。": "Select a period containing task activity. Saving verifies pagination, source identity and sample fields, and discovers mapping IDs. A task's current update time need not fall within the period. Member and status names still need to be checked.",
   "UPCAM 站会日报": "UPCAM Daily Digest",
   "UPCAM 站会日报 · v": "UPCAM Daily Digest · v",
   "UPCAM 站会日报 · v{0}{1}": "UPCAM Daily Digest · v{0}{1}",

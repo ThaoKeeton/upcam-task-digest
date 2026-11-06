@@ -51,23 +51,35 @@ def report_window(day, start=None, end=None):
 
 
 def updated_selection(day, start=None, end=None):
-    """Build a bounded v3 q; membership means CURRENT latest updated is in range."""
+    """Describe activity-time selection over current readable project tasks.
+
+    The historical public name is retained for local callers. It no longer
+    constructs an updated-time query: task.updated is not an activity index.
+    Current project visibility is explicitly not a historical snapshot.
+    """
     report_day = strict_day(day)
     start, end = report_window(report_day.isoformat(), start, end)
     full_start, full_end = canonical_window(report_day.isoformat())
-    return {'mode': 'v3-project-updated-half-open', 'view_equivalent': True,
+    return {'mode': 'v3-project-activities-half-open', 'view_equivalent': False,
             'date': report_day.isoformat(), 'start': start.isoformat(), 'end_exclusive': end.isoformat(),
-            'q': f"updated >= '{start.isoformat()}' AND updated < '{end.isoformat()}'",
-            'basis': 'current-latest-updated', 'historical_event_coverage': False,
+            'q': None, 'basis': 'activity-createTime',
+            'candidate_scope': 'current-visible-project-tasks',
+            'historical_event_coverage': False, 'snapshot_guaranteed': False,
             'window_kind': 'calendar_day' if (start, end) == (full_start, full_end) else 'custom'}
 
 
-def updated_in_window(value, day, start=None, end=None):
+def task_updated_timestamp(value):
+    """Validate an aware task version timestamp without selecting its window."""
     if not isinstance(value, str):
         raise ValueError('Missing task updated timestamp')
     instant = datetime.fromisoformat(value.replace('Z', '+00:00'))
     if instant.tzinfo is None:
         raise ValueError('Task updated timestamp lacks timezone')
+    return instant
+
+
+def updated_in_window(value, day, start=None, end=None):
+    instant = task_updated_timestamp(value)
     start, end = report_window(day, start, end)
     if not start <= instant < end:
         raise ValueError('Task updated timestamp outside selection window')

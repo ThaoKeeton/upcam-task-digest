@@ -217,3 +217,55 @@ class ManualReviewTests(unittest.TestCase):
     def test_no_batch_cannot_review_legacy_fixture(self):
         del self.collection['batch_id']
         with self.assertRaises(ValueError): self.review()
+
+
+class ManualReviewResolutionTests(unittest.TestCase):
+    def reviewed(self, path):
+        active, resolved, closed = ('synthetic-review-active', 'synthetic-review-resolved',
+                                    'synthetic-review-closed')
+        names = {active: '虚构复核待处理', resolved: '虚构复核终态', closed: '虚构复核终态'}
+        config = {
+            'tenant_id': 'synthetic-review-tenant', 'project_id': 'synthetic-review-project',
+            'include_archived': False, 'api_contract_verified': True,
+            'view': {'verified': True, 'evidence': 'synthetic-review-scope', 'task_equals': {}},
+            'owner_names': {'synthetic-review-owner': '虚构复核成员'}, 'status_names': names,
+            'resolved_status_ids': [resolved, closed],
+        }
+        task_id = 'synthetic-review-task'
+        states = {'active': active, 'resolved': resolved, 'closed': closed}
+        events = [{
+            'id': f'synthetic-review-status-{index}', 'action': 'update.taskflowstatus',
+            'createTime': f'2026-05-04T0{index + 1}:00:00Z',
+            'boundToObjectId': task_id, 'boundToObjectType': 'task',
+            'content': json.dumps({'oldTfsId': states[previous], 'tfsId': states[target],
+                                   'oldTaskflowstatus': names[states[previous]],
+                                   'taskflowstatus': names[states[target]], 'isDone': False}),
+        } for index, (previous, target) in enumerate(path)]
+        collection = {
+            'tenant_id': config['tenant_id'], 'project_id': config['project_id'],
+            'include_archived': False, 'pagination_complete': True,
+            'selection': updated_selection('2026-05-04'),
+            'batch_id': '00000000-0000-4000-8000-000000000054',
+            'collected_at': '2026-05-05T01:00:00Z',
+            'records': [{'task': {'id': task_id, 'projectId': config['project_id'],
+                'isArchived': False, 'content': '虚构复核状态任务',
+                'executorId': 'synthetic-review-owner', 'tfsId': states[path[-1][1]],
+                'isDone': True, 'updated': '2026-05-04T03:00:00Z'}, 'activities': events}],
+        }
+        now = datetime(2026, 5, 5, 2, tzinfo=timezone.utc)
+        draft = make_draft(collection, config, '2026-05-04', now)
+        review = deepcopy(draft['review_template'])
+        review.update(reviewer='虚构独立复核者', reviewed_at=now.isoformat(), mappings_verified=True)
+        review['tasks'][0].update(summary='', covered_comment_ids=[], evidence_verified=True)
+        return apply_review(collection, config, '2026-05-04', review, now)
+
+    def test_internal_resolved_move_remains_other_after_review(self):
+        report = self.reviewed([('resolved', 'closed')])
+        self.assertTrue(report['ready_to_send'])
+        self.assertEqual(report['digest']['tasks'][0]['category'], 'other')
+
+    def test_entry_followed_by_internal_move_remains_resolved_after_review(self):
+        report = self.reviewed([('active', 'resolved'), ('resolved', 'closed')])
+        self.assertTrue(report['ready_to_send'])
+        self.assertEqual(report['digest']['tasks'][0]['category'], 'resolved')
+        self.assertEqual(len(report['digest']['tasks']), 1)

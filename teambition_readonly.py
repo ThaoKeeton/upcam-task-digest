@@ -13,7 +13,7 @@ from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
-from report_contract import updated_in_window, updated_selection
+from report_contract import task_updated_timestamp, updated_selection
 
 
 class CollectionError(RuntimeError):
@@ -192,7 +192,7 @@ class Client:
 
     def collect(self, project_id, *, include_archived=False, day=None, page_size=100, window=None):
         # Caller freezes the Shanghai report date and optional half-open window
-        # before any request; there is no fallback query.
+        # before any request. Task updated timestamps never select candidates.
         try:
             selection = updated_selection(day, *(window or (None, None)))
         except (ValueError, TypeError):
@@ -213,18 +213,19 @@ class Client:
         if type(include_archived) is not bool:
             raise CollectionError("include_archived must be boolean")
         params = {'pageSize': page_size, 'includeArchived': str(include_archived).lower()}
-        filtered = selection['mode'] == 'v3-project-updated-half-open'
-        if filtered:
-            params['q'] = selection['q']
+        full_project = selection['mode'] == 'v3-project-activities-half-open'
         tasks = list(self.pages(f"/api/v3/project/{project_id}/task/query", params, max_items=self.max_tasks))
         selected_updates = {}
-        if filtered:
+        if full_project:
             try:
                 for task in tasks:
-                    selected_updates[record_id(task)] = updated_in_window(
-                        task.get('updated'), selection['date'], selection['start'], selection['end_exclusive'])
+                    if task.get('projectId') != project_id or type(task.get('isArchived')) is not bool:
+                        raise CollectionError('Candidate identity or archive scope mismatch')
+                    if task['isArchived'] and not include_archived:
+                        raise CollectionError('Candidate identity or archive scope mismatch')
+                    selected_updates[record_id(task)] = task_updated_timestamp(task.get('updated'))
             except ValueError:
-                raise CollectionError('Returned candidate violates updated-time selection') from None
+                raise CollectionError('Invalid task updated timestamp') from None
         output = []
         for task in tasks:
             task_id = record_id(task)
@@ -233,23 +234,31 @@ class Client:
                 detail = detail[0]
             if record_id(detail) != task_id or detail.get("projectId") != project_id:
                 raise CollectionError("Detail identity or project mismatch")
-            if filtered:
+            if full_project:
                 try:
-                    current_update = updated_in_window(
-                        detail.get('updated'), selection['date'], selection['start'], selection['end_exclusive'])
+                    current_update = task_updated_timestamp(detail.get('updated'))
                 except ValueError:
-                    raise CollectionError('Task changed outside selection or has invalid updated timestamp') from None
-                if current_update != selected_updates[task_id]:
+                    raise CollectionError('Invalid task updated timestamp') from None
+                if (current_update != selected_updates[task_id]
+                        or detail.get('isArchived') is not task.get('isArchived')):
                     raise CollectionError('Task changed during collection; retry a fresh bounded run')
             if type(detail.get("isArchived")) is not bool:
                 raise CollectionError("Missing archive flag")
             if detail["isArchived"] and not include_archived:
                 continue
-            # The candidate query is bounded; activity ordering is still not assumed.
+            # Exhaust history without assuming updated/createTime ordering or
+            # stopping when a page happens to contain only out-of-window events.
             activities = list(self.pages(f"/api/v3/task/{task_id}/activity/list", {"pageSize": page_size}))
             for activity in activities:
                 validate_binding(activity, task_id)
             output.append({"task": detail, "activities": activities})
+        if full_project:
+            closing = list(self.pages(f"/api/v3/project/{project_id}/task/query", params,
+                                      max_items=self.max_tasks))
+            if {record_id(row): row for row in tasks} != {record_id(row): row for row in closing}:
+                # The API has no snapshot token. This detects observable drift,
+                # but cannot attest deleted/inaccessible tasks or an atomic read.
+                raise CollectionError('Task changed during collection; retry a fresh bounded run')
         return {"tenant_id": self.tenant_id, "project_id": project_id, "include_archived": include_archived,
                 "selection": selection,
                 "batch_id": str(uuid.uuid4()),

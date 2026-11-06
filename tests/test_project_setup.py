@@ -49,6 +49,21 @@ class ProjectSetupTests(unittest.TestCase):
         with self.assertRaises(ProjectSetupError):
             self.analyze(broken)
 
+    def test_task_updated_outside_activity_window_does_not_invalidate_real_field_sample(self):
+        for updated in ("2020-01-01T00:00:00Z", "2026-01-05T12:00:00+08:00"):
+            with self.subTest(updated=updated):
+                collection = copy.deepcopy(self.collection)
+                collection["records"][0]["task"]["updated"] = updated
+                self.assertTrue(self.analyze(collection).api_contract_verified)
+
+    def test_malformed_task_version_timestamp_still_blocks_field_verification(self):
+        for updated in (None, "invalid", "2026-01-02T10:00:00"):
+            with self.subTest(updated=updated):
+                collection = copy.deepcopy(self.collection)
+                collection["records"][0]["task"]["updated"] = updated
+                with self.assertRaises(ProjectSetupError):
+                    self.analyze(collection)
+
     def test_wrong_project_or_query_window_cannot_be_verified(self):
         wrong_project = copy.deepcopy(self.collection)
         wrong_project["project_id"] = "other-project"

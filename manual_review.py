@@ -12,6 +12,7 @@ from activity_adapter import unsafe_controls
 from digest_pipeline import build_digest, timestamp
 from render_digest import TEMPLATE, render_digest, summary_text, text
 from runtime_mappings import parse_config_json, validate_mappings
+from status_resolution import resolved_in_window
 from teambition_readonly import record_id
 
 TTL = timedelta(hours=24)
@@ -126,7 +127,7 @@ def apply_review(collection, config, day, review, now=None):
         if not audit['hard_review']:
             audit['needs_review'] = False
             report['issues'] = [issue for issue in report['issues'] if issue != f"任务 {audit['task_id']} 待复核"]
-            if audit['status_transitions'] and audit['status_transitions'][-1]['resolved']:
+            if resolved_in_window(audit['status_transitions']):
                 item['category'] = 'resolved'
             elif task['comments']:
                 item['category'] = 'progress'

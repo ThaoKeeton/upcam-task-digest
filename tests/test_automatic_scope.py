@@ -245,7 +245,7 @@ class AutomaticScopeTests(unittest.TestCase):
             "window": lambda data: data["selection"].update(start="2020-01-01T00:00:00+08:00"),
             "task_binding": lambda data: data["records"][0]["task"].update(projectId="wrong-project"),
             "event_binding": lambda data: data["records"][0]["activities"][0].update(boundToObjectId="wrong-task"),
-            "updated_outside_window": lambda data: data["records"][0]["task"].update(updated="2020-01-01T00:00:00Z"),
+            "updated_without_timezone": lambda data: data["records"][0]["task"].update(updated="2020-01-01T00:00:00"),
             "invalid_event_time": lambda data: data["records"][0]["activities"][0].update(createTime="invalid-time"),
             "duplicate_task": lambda data: data["records"].append(deepcopy(data["records"][0])),
             "no_tasks": lambda data: data.update(records=[]),

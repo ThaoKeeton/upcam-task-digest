@@ -50,7 +50,7 @@ _SCOPE_FIELDS = frozenset({
 })
 _SELECTION_FIELDS = frozenset({
     "mode", "view_equivalent", "date", "start", "end_exclusive", "q", "basis",
-    "historical_event_coverage", "window_kind",
+    "historical_event_coverage", "snapshot_guaranteed", "candidate_scope", "window_kind",
 })
 _DIAGNOSTIC_FIELDS = frozenset({
     "id", "created_at_utc", "application_version", "ruleset_revision", "capabilities",
@@ -66,6 +66,7 @@ _FILTER_FIELDS = frozenset({
 _OBSERVED_ACTIONS = frozenset({
     "create", "comment", "involve.add", "update.taskflowstatus", "standard", "update_content", "update_executor",
     "move.cross.from.stage.to.stage",
+    "upload.customfield.work", "customfield.create.v2",
 })
 _CREDENTIAL_NAMES = frozenset({
     "authorization", "proxyauthorization", "authentication", "auth", "cookie", "setcookie",

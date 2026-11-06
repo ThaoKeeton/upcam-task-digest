@@ -20,13 +20,17 @@ class FormalContentTests(unittest.TestCase):
 
     def test_resolution_takes_precedence_over_comment_and_creation(self):
         audit = self.audit(event_counts={"created": 1, "comment": 1, "status": 1},
-                           status_transitions=[{"resolved": True}])
+                           status_transitions=[{"resolved": True, "previous_resolved": False,
+                                                "entered_resolved": True}])
         self.assertEqual(formal_task_content(audit, None, "虚构：复查通过。", True),
                          {"category": "resolved", "summary": "虚构：复查通过。"})
 
     def test_last_transition_controls_resolution_after_reopening(self):
         audit = self.audit(event_counts={"status": 2},
-                           status_transitions=[{"resolved": True}, {"resolved": False}])
+                           status_transitions=[{"resolved": True, "previous_resolved": False,
+                                                "entered_resolved": True},
+                                               {"resolved": False, "previous_resolved": True,
+                                                "entered_resolved": False}])
         self.assertEqual(formal_task_content(audit, None, "", False),
                          {"category": "other", "summary": ""})
         self.assertEqual(formal_task_content(audit, None, "虚构：复查受阻。", True),

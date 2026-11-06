@@ -124,7 +124,7 @@ class ObservedContractTests(unittest.TestCase):
         self.data.pop('selection')
         report=self.report(event())
         self.assertFalse(report['ready_to_send'])
-        self.assertTrue(any('更新时间' in issue for issue in report['issues']))
+        self.assertTrue(any('动态时间窗' in issue for issue in report['issues']))
 
 
 class CollectionBudgetTests(unittest.TestCase):
