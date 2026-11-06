@@ -333,6 +333,8 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
 
     private async Task VerifyDraftNavigationAsync()
     {
+        string? rangeStart = null;
+        string? rangeEnd = null;
         await RequiredAsync("settings-draft-retention", async () =>
         {
             await host.SelectTabAsync(_settingsRoot, "settings-tabs", 2);
@@ -347,6 +349,10 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
             var end = DateTime.Now.AddMinutes(-1);
             await host.EditAsync(Find<TextBox>(_digestRoot, "window-start"), end.AddHours(-2).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture));
             await host.EditAsync(Find<TextBox>(_digestRoot, "window-end"), end.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture));
+            // Capture while the selected content is still attached and realized. Unloaded TabView templates
+            // may release their visual descendants; navigation retention must compare the new factory to values.
+            rangeStart = Find<TextBox>(_digestRoot, "window-start").Text;
+            rangeEnd = Find<TextBox>(_digestRoot, "window-end").Text;
             _settingsRoot = CreateNative(_settings, "settings-page");
             await host.AttachAsync(_settingsRoot);
             await host.WaitReadyAsync(_settingsRoot, synthetic: true);
@@ -360,14 +366,12 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
         await RequiredAsync("range-and-tab-retention", async () =>
         {
             var previous = _digestRoot;
-            // Detached controls retain their old visual children; the new factory must bind the shared document.
-            var start = Find<TextBox>(previous, "window-start").Text;
-            var end = Find<TextBox>(previous, "window-end").Text;
+            Require(rangeStart is not null && rangeEnd is not null, "The attached digest range was not captured before navigation.");
             _digestRoot = CreateNative(_digest, "digest-page");
             await host.AttachAsync(_digestRoot);
             await host.WaitReadyAsync(_digestRoot, synthetic: true);
             Require(!ReferenceEquals(previous, _digestRoot) && Find<TabView>(_digestRoot, "digest-tabs").SelectedIndex == 1 &&
-                Find<TextBox>(_digestRoot, "window-start").Text == start && Find<TextBox>(_digestRoot, "window-end").Text == end,
+                Find<TextBox>(_digestRoot, "window-start").Text == rangeStart && Find<TextBox>(_digestRoot, "window-end").Text == rangeEnd,
                 "Fresh digest factory lost the manual range draft or selected local tab.");
         });
     }

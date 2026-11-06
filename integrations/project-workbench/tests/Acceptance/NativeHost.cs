@@ -88,20 +88,130 @@ internal sealed class NativeHost
     internal async Task WaitReadyAsync(FrameworkElement root, bool synthetic)
     {
         var expected = synthetic ? "Ready · CI synthetic data" : "Ready · local profile";
-        await WaitUntilAsync(() => TryFind<TextBlock>(root, "plugin-status")?.Text == expected);
+        TabView? previousHost = null;
+        FrameworkElement? previousContent = null;
+        await WaitForUiAsync(root, () =>
+        {
+            root.UpdateLayout();
+            var tabs = CurrentTabHost(root, PrimaryTabId(root));
+            tabs?.ApplyTemplate();
+            root.UpdateLayout();
+            if (TryFind<TextBlock>(root, "plugin-status")?.Text != expected ||
+                !TryRealizedSelection(root, tabs, out var content) || !NestedSelectionRealized(root, content))
+            {
+                previousHost = null;
+                previousContent = null;
+                return false;
+            }
+            var stable = ReferenceEquals(tabs, previousHost) && ReferenceEquals(content, previousContent);
+            previousHost = tabs;
+            previousContent = content;
+            return stable;
+        }, "Backend ready status did not converge with the current realized native tab content.");
         Require(NativeProbes.VisibleWindowCount() == 1, "Plugin activation created an additional visible native window.");
     }
 
     internal async Task SelectTabAsync(FrameworkElement root, string id, int selected)
     {
         AssertUiThread();
-        var tabs = Find<TabView>(root, id);
-        Require(selected >= 0 && selected < tabs.TabItems.Count, "The requested native local tab is absent.");
-        tabs.SelectedIndex = selected;
-        root.UpdateLayout();
-        await Task.Yield();
-        root.UpdateLayout();
-        Require(tabs.SelectedIndex == selected, "The native tab did not retain the selected index.");
+        TabView? selectionTarget = null;
+        TabView? previousHost = null;
+        FrameworkElement? previousContent = null;
+        await WaitForUiAsync(root, () =>
+        {
+            root.UpdateLayout();
+            var tabs = CurrentTabHost(root, id);
+            if (tabs is null)
+            {
+                previousHost = null;
+                previousContent = null;
+                return false;
+            }
+            tabs.ApplyTemplate();
+            Require(selected >= 0 && selected < tabs.TabItems.Count, "The requested native local tab is absent.");
+            if (!ReferenceEquals(tabs, selectionTarget))
+            {
+                // A foreground state notification can replace the whole tab host. Apply this user selection
+                // to its current replacement once; never repeatedly force a reset on the same live host.
+                tabs.SelectedIndex = selected;
+                selectionTarget = tabs;
+                previousHost = null;
+                previousContent = null;
+            }
+            root.UpdateLayout();
+            if (!ReferenceEquals(CurrentTabHost(root, id), tabs) || tabs.SelectedIndex != selected ||
+                !TryRealizedSelection(root, tabs, out var content) || !NestedSelectionRealized(root, content))
+            {
+                previousHost = null;
+                previousContent = null;
+                return false;
+            }
+            var stable = ReferenceEquals(tabs, previousHost) && ReferenceEquals(content, previousContent);
+            previousHost = tabs;
+            previousContent = content;
+            return stable;
+        }, "The requested native tab selection did not produce stable realized content: " + id + ".");
+    }
+
+    private static string PrimaryTabId(FrameworkElement root) => AutomationProperties.GetAutomationId(root) switch
+    {
+        "settings-page" => "settings-tabs",
+        "digest-page" => "digest-tabs",
+        _ => throw new AcceptanceFailure("The attached native root has no known primary tab host.")
+    };
+
+    private static TabView? CurrentTabHost(FrameworkElement root, string id)
+    {
+        // Resolve the live ContentControl.Content object before consulting the visual tree. After Render,
+        // a visual predecessor can still exist briefly while the new logical body is not realized yet.
+        var primaryId = PrimaryTabId(root);
+        TabView? primary = null;
+        foreach (var owner in Descendants<ContentControl>(root))
+        {
+            if (owner.Content is not TabView candidate || AutomationProperties.GetAutomationId(candidate) != primaryId) continue;
+            if (primary is not null && !ReferenceEquals(primary, candidate)) return null;
+            primary = candidate;
+        }
+        for (var current = primary; current is not null; current = (current.SelectedItem as TabViewItem)?.Content as TabView)
+            if (AutomationProperties.GetAutomationId(current) == id) return current;
+        return null;
+    }
+
+    private static bool TryRealizedSelection(FrameworkElement root, TabView? tabs,
+        [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out FrameworkElement? content)
+    {
+        content = (tabs?.SelectedItem as TabViewItem)?.Content as FrameworkElement;
+        if (tabs is null || content is null || !root.IsLoaded || root.XamlRoot is null ||
+            !tabs.IsLoaded || !content.IsLoaded || tabs.ActualWidth <= 0 || tabs.ActualHeight <= 0 ||
+            content.ActualWidth <= 0 || content.ActualHeight <= 0 ||
+            !ReferenceEquals(tabs.XamlRoot, root.XamlRoot) || !ReferenceEquals(content.XamlRoot, root.XamlRoot)) return false;
+        var id = AutomationProperties.GetAutomationId(tabs);
+        var selectedContent = content;
+        return ReferenceEquals(CurrentTabHost(root, id), tabs) && ReferenceEquals(TryFind<TabView>(root, id), tabs) &&
+            Descendants<FrameworkElement>(tabs).Any(element => ReferenceEquals(element, selectedContent));
+    }
+
+    private static bool NestedSelectionRealized(FrameworkElement root, FrameworkElement content)
+    {
+        // Accounts is itself a native TabView selected as the settings page's content.
+        // Its selected service page must also finish realization before its controls can be used.
+        while (content is TabView nested)
+        {
+            nested.ApplyTemplate();
+            root.UpdateLayout();
+            if (!TryRealizedSelection(root, nested, out var selected)) return false;
+            content = selected;
+        }
+        return true;
+    }
+
+    private async Task WaitForUiAsync(FrameworkElement root, Func<bool> predicate, string failure)
+    {
+        try { await WaitUntilAsync(predicate); }
+        catch (AcceptanceFailure)
+        {
+            throw new AcceptanceFailure(failure + " " + ControlInventory(root));
+        }
     }
 
     internal async Task<string> InvokeAsync(FrameworkElement root, string buttonId, bool expectSuccess = true,
@@ -201,7 +311,33 @@ internal sealed class NativeHost
     }
 
     internal static T Find<T>(DependencyObject root, string id) where T : DependencyObject =>
-        TryFind<T>(root, id) ?? throw new AcceptanceFailure("An expected native control is absent or ambiguous: " + id + ".");
+        TryFind<T>(root, id) ?? throw new AcceptanceFailure("An expected native control is absent or ambiguous: " + id + ". " + ControlInventory(root));
+
+    private static string ControlInventory(DependencyObject root)
+    {
+        // No Text, Header, Name, Password, settings, paths or data values. IDs, types, counts and layout-presence flags only.
+        var elements = Descendants<DependencyObject>(root).ToArray();
+        var groups = elements
+            .Select(element => new { Id = AutomationProperties.GetAutomationId(element), Type = element.GetType().Name })
+            .GroupBy(element => (Id: SafeIdentifier(element.Id), element.Type))
+            .OrderBy(group => group.Key.Id, StringComparer.Ordinal).ThenBy(group => group.Key.Type, StringComparer.Ordinal)
+            .Take(80).Select(group => group.Key.Id + "/" + group.Key.Type + "=" + group.Count());
+        var logical = elements.OfType<ContentControl>().Select(owner => owner.Content).OfType<TabView>()
+            .Select(tabs =>
+            {
+                var selected = (tabs.SelectedItem as TabViewItem)?.Content as FrameworkElement;
+                return SafeIdentifier(AutomationProperties.GetAutomationId(tabs)) + "/TabView" +
+                    "[loaded=" + (tabs.IsLoaded ? 1 : 0) + ", selected-content-type=" + (selected?.GetType().Name ?? "none") +
+                    ", selected-loaded=" + (selected?.IsLoaded == true ? 1 : 0) +
+                    ", selected-measured=" + (selected is { ActualWidth: > 0, ActualHeight: > 0 } ? 1 : 0) + "]";
+            })
+            .Distinct(StringComparer.Ordinal).Take(12);
+        return "Native control inventory (id/type=count): " + string.Join(", ", groups) +
+            ". Logical tab contents: " + string.Join(", ", logical) + ".";
+    }
+
+    private static string SafeIdentifier(string value) => value.Length is > 0 and <= 80 &&
+        value.All(character => character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-' or '_') ? value : "<no-or-other-id>";
 
     internal static T? TryFind<T>(DependencyObject root, string id) where T : DependencyObject
     {

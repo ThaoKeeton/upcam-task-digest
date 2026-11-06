@@ -96,6 +96,12 @@ The required checks cover:
 
 The JSON file is updated after each check and contains `passed`, `failed` or
 `skipped`, a required flag, safe fixed details, elapsed times and evidence paths.
+Native readiness requires the current logical tab host and its selected content
+to be loaded, laid out and present in the visual tree; a ready status label alone
+does not complete the wait. Selection reacquires a replaced host and waits for
+the selected content, including nested account tabs. Missing-control/time-out
+details include bounded AutomationId/type/count/layout-presence inventories,
+without control text or business data. Draft values are captured before detach.
 Unexpected exception messages/stacks, worker protocol lines, stderr, secrets and
 report bodies are never included. Exit code `0` means all required checks passed;
 `1` means a failure or an unverified required check; `124` is the finite process

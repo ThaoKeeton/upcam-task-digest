@@ -98,6 +98,18 @@ class WorkbenchReferenceTests(unittest.TestCase):
         self.assertIn("(Join-Path $repo 'examples')", script)
         self.assertNotIn("'--add-data', 'templates;templates'", script)
 
+    def test_complete_host_driver_is_ci_only_sta_and_preserves_chinese_selectors(self):
+        driver = (INTEGRATION / "test-real-host.ps1").read_bytes()
+        self.assertTrue(driver.startswith(b"\xef\xbb\xbf"), "PowerShell 5.1 needs the UTF-8 BOM")
+        source = driver.decode("utf-8-sig")
+        self.assertIn("$env:RUNNER_ENVIRONMENT -ceq 'github-hosted'", source)
+        self.assertIn("$PSVersionTable.PSEdition -ne 'Desktop'", source)
+        self.assertIn("freshNormalUserRoot", source)
+        self.assertNotIn("Remove-Item", source)
+        workflow = (ROOT / ".github/workflows/workbench-plugin.yml").read_text()
+        self.assertIn("reference/src/Workbench.App/Workbench.App.csproj", workflow)
+        self.assertIn("'-NonInteractive', '-STA'", workflow)
+
 
 class WorkbenchDistributionTests(unittest.TestCase):
     def make_package(self, root):

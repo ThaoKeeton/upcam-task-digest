@@ -63,6 +63,13 @@ jobs:
         run: |
           dotnet publish integrations/project-workbench/tests/Acceptance/Workbench.Digest.Acceptance.csproj -c Release -r win-x64 --self-contained true -p:Platform=x64 -o dist/workbench-plugin/acceptance-host
           if ($LASTEXITCODE -ne 0) { throw 'Native acceptance host publish failed.' }
+      - name: Publish unmodified complete reference platform
+        id: platform_build
+        shell: pwsh
+        run: |
+          dotnet publish integrations/project-workbench/reference/src/Workbench.App/Workbench.App.csproj -c Release -r win-x64 --self-contained true -p:Platform=x64 -o dist/workbench-plugin/reference-platform
+          if ($LASTEXITCODE -ne 0) { throw 'Complete reference platform publish failed.' }
+          if (-not (Test-Path dist/workbench-plugin/reference-platform/Workbench.App.pri)) { throw 'Complete host XAML resources are missing.' }
       - name: Process handshake, timeout, cancellation, singleton and crash cleanup
         shell: pwsh
         run: |
@@ -74,6 +81,7 @@ jobs:
           Get-Content (Join-Path $evidence 'transport.txt')
           if ($result -ne 0) { throw "Process transport regression failed with exit code $result" }
       - name: Extract archives and validate actual installed package inventory
+        id: extract_packages
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -109,6 +117,48 @@ jobs:
             if (-not $result.succeeded) { throw 'Native acceptance reported failure.' }
           }
           finally { $process.Dispose() }
+      - name: Complete platform trust, native page and graceful shutdown
+        if: always() && !cancelled() && steps.platform_build.outcome == 'success' && steps.extract_packages.outcome == 'success'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path (Get-Location) 'dist/workbench-plugin'
+          $package = Join-Path $root 'extracted installation with spaces/com.upcam.task-digest'
+          $bundled = Join-Path $root 'reference-platform/Plugins'
+          New-Item -ItemType Directory -Path $bundled -Force | Out-Null
+          Copy-Item -LiteralPath $package -Destination (Join-Path $bundled 'com.upcam.task-digest') -Recurse
+          $hostExe = Join-Path $root 'reference-platform/Workbench.App.exe'
+          $report = Join-Path $root 'evidence/actual-platform-report.json'
+          $screenshot = Join-Path $root 'evidence/actual-platform.png'
+          $driver = Join-Path (Get-Location) 'integrations/project-workbench/test-real-host.ps1'
+          $powershell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+          $arguments = @('-NoProfile', '-NonInteractive', '-STA', '-File', ('"' + $driver + '"'),
+            '-HostExe', ('"' + $hostExe + '"'), '-ReportPath', ('"' + $report + '"'),
+            '-ScreenshotPath', ('"' + $screenshot + '"'))
+          $process = Start-Process -FilePath $powershell -ArgumentList $arguments -PassThru
+          try {
+            if (-not $process.WaitForExit(300000)) {
+              try { $process.Kill($true) } catch { }
+              throw 'Complete host UI Automation exceeded five minutes; only its owned process tree was stopped.'
+            }
+            if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report }
+            if ($process.ExitCode -ne 0) { throw "Complete host native smoke exited with $($process.ExitCode)." }
+            if (-not (Test-Path -LiteralPath $report)) { throw 'Complete host native report is missing.' }
+            $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+            if (-not $result.succeeded) { throw 'Complete host native smoke did not pass.' }
+          }
+          finally { $process.Dispose() }
+      - name: Expose only synthetic and unconfigured native window screenshots for review
+        if: always()
+        shell: pwsh
+        run: |
+          $evidence = Join-Path (Get-Location) 'dist/workbench-plugin/evidence'
+          if (Test-Path -LiteralPath $evidence) {
+            Get-ChildItem -LiteralPath $evidence -Filter '*.png' -File -Recurse | ForEach-Object {
+              $key = $_.BaseName.Replace('-', '_').ToUpperInvariant()
+              Write-Output ('UPCAM_WORKBENCH_PNG_' + $key + '=' + [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)))
+            }
+          }
       - name: Recheck immutable host source after native build
         run: python integrations/project-workbench/verify_reference.py
       - uses: actions/upload-artifact@v4
