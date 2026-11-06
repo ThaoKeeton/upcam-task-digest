@@ -58,6 +58,47 @@ class PluginWorkerTests(unittest.TestCase):
         self.assertEqual(result["mode"], "project-workbench")
         return plugin.dispatch({"op": "initialize", "payload": {}})
 
+    def authorized_fixture(self, name="authorized-profile"):
+        directory = self.root / name
+        service = make_smoke_service(directory)
+        initial = service.dispatch({"op": "initialize", "payload": {}})
+        service.dispatch({"op": "probe_project", "payload": WINDOW})
+        saved = service.dispatch({"op": "save", "payload": {
+            "settings": initial["settings"], "verification_window": WINDOW}})
+        service.dispatch({"op": "refresh_models", "payload": {}})
+        service.dispatch({"op": "save", "payload": {
+            "settings": dict(saved["settings"], auto_send_enabled=True)}})
+        plugin = self.plugin(directory, service_factory=lambda _directory: service)
+        self.ready(plugin)
+        return plugin, service, directory
+
+    def authorization(self, plugin):
+        try:
+            return plugin.dispatch({"op": "plugin_auto_authorization", "payload": {}})
+        except WorkerApiError:
+            self.fail("Saved valid automatic-send authorization must produce a local binding fingerprint")
+
+    def due_fixture(self, name="atomic-profile"):
+        plugin, service, directory = self.authorized_fixture(name)
+        settings = service.settings_store.load()
+        settings["auto_send_enabled_since_local"] = "2026-11-04T08:00:00"
+        SettingsStore(directory / "settings.json").save(settings)
+
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                value = cls(2026, 11, 4, 9, 0)
+                return value.astimezone(tz) if tz else value
+
+        return plugin, service, directory, FixedDatetime
+
+    def run_authorized(self, plugin, fingerprint):
+        try:
+            return plugin.dispatch({"op": "plugin_run_due_authorized", "payload": {
+                "authorization_fingerprint": fingerprint}})
+        except WorkerApiError:
+            self.fail("A matching saved authorization must execute the existing scheduler with its validated snapshot")
+
     def lines(self, requests, *, profile=None, factory=None, synthetic=True):
         source = io.BytesIO(b"".join(
             item if isinstance(item, bytes) else (json.dumps(item, ensure_ascii=False) + "\n").encode("utf-8")
@@ -790,6 +831,466 @@ class PluginWorkerTests(unittest.TestCase):
                 ], profile=directory, factory=lambda _directory: standalone, synthetic=False)
                 self.assertFalse(responses[-1]["ok"])
                 self.assertNotIn(embedded, json.dumps(responses[-1]))
+
+    def test_auto_authorization_requires_handshake_and_an_empty_payload(self):
+        plugin = self.plugin()
+        with self.assertRaises(WorkerApiError):
+            plugin.dispatch({"op": "plugin_auto_authorization", "payload": {}})
+        self.assertFalse((self.root / "profile").exists())
+        authorized, _service, _directory = self.authorized_fixture()
+        with self.assertRaisesRegex(WorkerApiError, "不接受附加参数"):
+            authorized.dispatch({"op": "plugin_auto_authorization", "payload": {"authorized": True}})
+
+    def test_auto_authorization_does_not_grant_saved_auto_off_permission(self):
+        plugin, service, directory = self.authorized_fixture()
+        settings = service.settings_store.load()
+        settings.update(auto_send_enabled=False, auto_send_enabled_since_local="")
+        SettingsStore(directory / "settings.json").save(settings)
+        before = (directory / "settings.json").read_bytes()
+        with self.assertRaisesRegex(WorkerApiError, "自动发送"):
+            plugin.dispatch({"op": "plugin_auto_authorization", "payload": {}})
+        self.assertEqual((directory / "settings.json").read_bytes(), before)
+        self.assertFalse(service.settings_store.load()["auto_send_enabled"])
+
+    def test_auto_authorization_returns_only_the_exact_local_proof_contract_without_service_calls(self):
+        plugin, service, directory = self.authorized_fixture()
+        files = ("settings.json", "history.sqlite3", "delivery_ledger.sqlite3", "openai_models.json")
+        before = {name: (directory / name).read_bytes() for name in files}
+        credentials = service.secret_store.load()
+
+        def forbidden_service_call(*_args, **_kwargs):
+            self.fail("A local authorization check must not construct clients, collect, refresh models, summarize, or send")
+
+        service.client_factory = forbidden_service_call
+        service.workflow_factory = forbidden_service_call
+        service.model_catalog.transport = forbidden_service_call
+        with patch.object(service.model_catalog, "refresh", side_effect=forbidden_service_call):
+            result = self.authorization(plugin)
+        self.assertEqual(set(result), {"authorized", "authorization_fingerprint", "data_directory",
+                                      "application_version", "ruleset_revision"})
+        self.assertIs(result["authorized"], True)
+        self.assertRegex(result["authorization_fingerprint"], r"^[0-9a-f]{64}$")
+        self.assertEqual(result["data_directory"], str(directory.resolve()))
+        self.assertEqual(result["application_version"], "0.4.3")
+        self.assertEqual(result["ruleset_revision"], RULESET_REVISION)
+        self.assertEqual({name: (directory / name).read_bytes() for name in files}, before)
+        self.assertEqual(service.secret_store.load(), credentials)
+        serialized = json.dumps(result, ensure_ascii=False)
+        for value in credentials.values():
+            self.assertNotIn(value, serialized)
+        self.assertNotIn("synthetic-only", serialized)
+
+    def test_auto_authorization_is_stable_across_checks_and_worker_restarts(self):
+        plugin, service, directory = self.authorized_fixture()
+        first = self.authorization(plugin)
+        self.assertEqual(self.authorization(plugin), first)
+        plugin.dispatch({"op": "shutdown", "payload": {}})
+        restored = WorkerService(directory, secret_store=service.secret_store, model_catalog=service.model_catalog)
+        restarted = self.plugin(directory, service_factory=lambda _directory: restored)
+        self.ready(restarted)
+        self.assertEqual(self.authorization(restarted), first)
+
+    def test_auto_authorization_can_restore_after_handshake_without_business_initialize(self):
+        plugin, service, directory = self.authorized_fixture()
+        original = self.authorization(plugin)
+        plugin.dispatch({"op": "shutdown", "payload": {}})
+        restored = WorkerService(directory, secret_store=service.secret_store, model_catalog=service.model_catalog)
+        restarted = self.plugin(directory, service_factory=lambda _directory: restored)
+        restarted.dispatch({"op": "plugin_handshake", "payload": HANDSHAKE})
+        self.assertEqual(self.authorization(restarted), original)
+
+    def test_auto_authorization_fingerprint_changes_with_business_settings(self):
+        plugin, service, directory = self.authorized_fixture()
+        original = service.settings_store.load()
+        original_proof = self.authorization(plugin)["authorization_fingerprint"]
+        changes = (
+            {"tenant_id": "synthetic-other-organization"},
+            {"project_id": "synthetic-other-project"},
+            {"openai_model": "ci-unknown-model", "openai_reasoning_effort": "default"},
+            {"openai_reasoning_effort": "high"},
+            {"openai_service_tier": "fast"},
+            {"morning_run_at": "09:15"},
+            {"morning_start_at": "17:00"},
+            {"afternoon_run_at": "17:15"},
+            {"afternoon_start_at": "01:00"},
+            {"dingtalk_mentions": "13800138000"},
+            {"dingtalk_mention_mode": "user_id"},
+            {"max_tasks_per_run": 456},
+            {"include_archived": True},
+            {"owner_names": dict(original["owner_names"], synthetic_new_person="Synthetic member")},
+            {"status_names": dict(original["status_names"], synthetic_new_status="Synthetic status")},
+            {"resolved_status_ids": ["demo-done", "demo-review"]},
+            {"synthetic_future_business_setting": "changed"},
+        )
+        for change in changes:
+            with self.subTest(changed_fields=tuple(change)):
+                SettingsStore(directory / "settings.json").save(dict(original, **change))
+                result = self.authorization(plugin)
+                self.assertNotEqual(result["authorization_fingerprint"], original_proof)
+        SettingsStore(directory / "settings.json").save(original)
+        self.assertEqual(self.authorization(plugin)["authorization_fingerprint"], original_proof)
+
+    def test_auto_authorization_fingerprint_changes_with_each_service_credential(self):
+        plugin, service, _directory = self.authorized_fixture()
+        original = service.secret_store.load()
+        original_proof = self.authorization(plugin)["authorization_fingerprint"]
+        replacements = {
+            "teambition_app_id": "synthetic-rotated-app-id",
+            "teambition_app_secret": "synthetic-rotated-app-secret",
+            "openai_api_key": "synthetic-rotated-openai-key",
+            "dingtalk_webhook": "https://oapi.dingtalk.com/robot/send?access_token=synthetic-rotated-token",
+            "dingtalk_signing_secret": "synthetic-rotated-signing-secret",
+        }
+        for key, replacement in replacements.items():
+            with self.subTest(credential_field=key):
+                service.secret_store.save(dict(original, **{key: replacement}))
+                if key == "openai_api_key":
+                    service.model_catalog.refresh(replacement)
+                result = self.authorization(plugin)
+                self.assertNotEqual(result["authorization_fingerprint"], original_proof)
+                self.assertNotIn(replacement, json.dumps(result))
+                service.secret_store.save(original)
+                if key == "openai_api_key":
+                    service.model_catalog.refresh(original[key])
+        self.assertEqual(self.authorization(plugin)["authorization_fingerprint"], original_proof)
+
+    def test_auto_authorization_fingerprint_binds_the_internal_ledger_identity(self):
+        plugin, service, directory = self.authorized_fixture()
+        original_proof = self.authorization(plugin)["authorization_fingerprint"]
+        credentials = service.secret_store.load()
+        credentials["delivery_ledger_id"] = "00000000-0000-4000-8000-000000000002"
+        with closing(sqlite3.connect(directory / "delivery_ledger.sqlite3")) as db, db:
+            db.execute("UPDATE metadata SET identity=?", (credentials["delivery_ledger_id"],))
+        service.secret_store.save(credentials)
+        changed = self.authorization(plugin)
+        self.assertNotEqual(changed["authorization_fingerprint"], original_proof)
+        self.assertNotIn(credentials["delivery_ledger_id"], json.dumps(changed))
+
+    def test_auto_authorization_fingerprint_ignores_only_standalone_ui_preferences_and_update_token(self):
+        plugin, service, directory = self.authorized_fixture()
+        original = service.settings_store.load()
+        proof = self.authorization(plugin)["authorization_fingerprint"]
+        changes = (
+            {"ui_language": "en-US"}, {"ui_theme": "light"},
+            {"tray_icon_enabled": False, "close_to_tray": False, "start_in_tray": False},
+            {"close_to_tray": False}, {"start_in_tray": True},
+            {"auto_check_updates": True}, {"start_with_windows": True},
+        )
+        for change in changes:
+            with self.subTest(preference_fields=tuple(change)):
+                SettingsStore(directory / "settings.json").save(dict(original, **change))
+                self.assertEqual(self.authorization(plugin)["authorization_fingerprint"], proof)
+        credentials = service.secret_store.load()
+        service.secret_store.save(dict(credentials, github_update_token="synthetic-unrelated-standalone-update-token"))
+        self.assertEqual(self.authorization(plugin)["authorization_fingerprint"], proof)
+
+    def test_auto_authorization_fingerprint_ignores_json_object_order(self):
+        plugin, service, directory = self.authorized_fixture()
+        proof = self.authorization(plugin)["authorization_fingerprint"]
+        settings = dict(reversed(tuple(service.settings_store.load().items())))
+        settings["owner_names"] = dict(reversed(tuple(settings["owner_names"].items())))
+        SettingsStore(directory / "settings.json").save(settings)
+        service.secret_store.save(dict(reversed(tuple(service.secret_store.load().items()))))
+        self.assertEqual(self.authorization(plugin)["authorization_fingerprint"], proof)
+
+    def test_auto_authorization_rejects_every_missing_required_credential(self):
+        for key in ("teambition_app_id", "teambition_app_secret", "openai_api_key", "dingtalk_webhook",
+                    "dingtalk_signing_secret", "delivery_ledger_id"):
+            with self.subTest(missing_field=key):
+                plugin, service, directory = self.authorized_fixture("missing-" + key)
+                credentials = service.secret_store.load()
+                credentials.pop(key)
+                service.secret_store.save(credentials)
+                before = (directory / "delivery_ledger.sqlite3").read_bytes()
+                with self.assertRaisesRegex(WorkerApiError, "启用自动运行前"):
+                    plugin.dispatch({"op": "plugin_auto_authorization", "payload": {}})
+                self.assertEqual(service.secret_store.load(), credentials)
+                self.assertEqual((directory / "delivery_ledger.sqlite3").read_bytes(), before)
+
+    def test_auto_authorization_rejects_a_missing_ledger_without_recreating_it(self):
+        plugin, service, directory = self.authorized_fixture()
+        (directory / "delivery_ledger.sqlite3").unlink()
+        credentials = service.secret_store.load()
+        with self.assertRaisesRegex(WorkerApiError, "防重账本"):
+            plugin.dispatch({"op": "plugin_auto_authorization", "payload": {}})
+        self.assertFalse((directory / "delivery_ledger.sqlite3").exists())
+        self.assertEqual(service.secret_store.load(), credentials)
+
+    def test_auto_authorization_reuses_core_scope_model_and_robot_readiness_checks(self):
+        cases = (
+            ({"api_contract_verified": False}, {}, "只读核验"),
+            ({"view": {"verified": False, "evidence": "", "task_equals": {}}}, {}, "只读核验"),
+            ({}, {"openai_api_key": "synthetic-key-without-matching-cache"}, "模型缓存未匹配"),
+            ({"openai_model": "synthetic-not-cached", "openai_reasoning_effort": "default"}, {}, "缓存列表"),
+            ({"openai_model": "ci-unknown-model", "openai_reasoning_effort": "max"}, {}, "reasoning effort"),
+            ({"openai_model": "ci-unknown-model", "openai_reasoning_effort": "default", "openai_service_tier": "fast"}, {}, "Fast"),
+            ({}, {"dingtalk_webhook": "https://example.invalid/not-a-robot"}, "Webhook"),
+            ({}, {"delivery_ledger_id": "synthetic-mismatched-ledger-identity"}, "防重账本"),
+        )
+        for index, (settings_change, secret_change, message) in enumerate(cases):
+            with self.subTest(case=index):
+                plugin, service, directory = self.authorized_fixture("unready-" + str(index))
+                SettingsStore(directory / "settings.json").save(dict(service.settings_store.load(), **settings_change))
+                service.secret_store.save(dict(service.secret_store.load(), **secret_change))
+                with self.assertRaisesRegex(WorkerApiError, message):
+                    plugin.dispatch({"op": "plugin_auto_authorization", "payload": {}})
+
+    def test_auto_authorization_does_not_accept_an_old_proof_after_scope_or_key_changes(self):
+        plugin, service, directory = self.authorized_fixture()
+        original = self.authorization(plugin)["authorization_fingerprint"]
+        settings = service.settings_store.load()
+        settings["project_id"] = "synthetic-new-scope"
+        SettingsStore(directory / "settings.json").save(settings)
+        changed_scope = self.authorization(plugin)["authorization_fingerprint"]
+        self.assertNotEqual(changed_scope, original)
+        credentials = service.secret_store.load()
+        credentials["teambition_app_secret"] = "synthetic-new-scope-app-secret"
+        service.secret_store.save(credentials)
+        changed_key = self.authorization(plugin)["authorization_fingerprint"]
+        self.assertNotIn(changed_key, (original, changed_scope))
+
+    def test_auto_authorization_fingerprint_changes_with_profile_and_rules_revision(self):
+        import uuid
+        # Provision two independent empty synthetic ledgers with the same fixed
+        # fixture UUID, so only the canonical profile differs in the hash input.
+        # No ledger file or delivery rows are copied between profiles.
+        with patch("delivery_guard.uuid.uuid4", return_value=uuid.UUID("00000000-0000-4000-8000-000000000001")):
+            plugin, service, directory = self.authorized_fixture("original-profile")
+            other_plugin, other, other_directory = self.authorized_fixture("other-profile")
+        SettingsStore(other_directory / "settings.json").save(service.settings_store.load())
+        self.assertEqual(other.secret_store.load(), service.secret_store.load())
+        self.assertFalse(os.path.samefile(directory / "delivery_ledger.sqlite3", other_directory / "delivery_ledger.sqlite3"))
+        original = self.authorization(plugin)["authorization_fingerprint"]
+        self.assertNotEqual(self.authorization(other_plugin)["authorization_fingerprint"], original)
+        with patch.object(self.adapter, "RULESET_REVISION", "synthetic-next-rules-revision"):
+            changed = self.authorization(plugin)
+        self.assertEqual(changed["ruleset_revision"], "synthetic-next-rules-revision")
+        self.assertNotEqual(changed["authorization_fingerprint"], original)
+
+    def test_authorized_due_rejects_bad_payloads_and_unmatched_proofs_before_services(self):
+        plugin, service, _directory, _clock = self.due_fixture()
+        original_settings_store, original_secret_store = service.settings_store, service.secret_store
+
+        def forbidden_call(*_args, **_kwargs):
+            self.fail("An invalid managed-run request must not collect, refresh models, summarize, or send")
+
+        service.workflow_factory = forbidden_call
+        service.client_factory = forbidden_call
+        service.model_catalog.transport = forbidden_call
+        for payload in ({}, {"authorization_fingerprint": None}, {"authorization_fingerprint": "a" * 63},
+                        {"authorization_fingerprint": "A" * 64}, {"authorization_fingerprint": "z" * 64},
+                        {"authorization_fingerprint": "a" * 64, "extra": "synthetic-private-payload"}):
+            with self.subTest(payload_shape=tuple(payload)), self.assertRaisesRegex(WorkerApiError, "授权请求格式无效"):
+                plugin.dispatch({"op": "plugin_run_due_authorized", "payload": payload})
+        with self.assertRaisesRegex(WorkerApiError, "授权已改变"):
+            plugin.dispatch({"op": "plugin_run_due_authorized", "payload": {"authorization_fingerprint": "0" * 64}})
+        self.assertIs(service.settings_store, original_settings_store)
+        self.assertIs(service.secret_store, original_secret_store)
+
+    def test_authorized_due_rejects_out_of_band_changes_after_proof_before_rpc_without_services(self):
+        for kind in ("scope", "credential", "model", "schedule", "mentions"):
+            with self.subTest(changed=kind):
+                plugin, service, directory, _clock = self.due_fixture("changed-before-rpc-" + kind)
+                proof = self.authorization(plugin)["authorization_fingerprint"]
+                settings = service.settings_store.load()
+                credentials = service.secret_store.load()
+                if kind == "scope":
+                    settings["project_id"] = "synthetic-profile-B"
+                elif kind == "credential":
+                    credentials["teambition_app_secret"] = "synthetic-profile-B-secret"
+                elif kind == "model":
+                    settings.update(openai_model="ci-unknown-model", openai_reasoning_effort="default")
+                elif kind == "schedule":
+                    settings["morning_run_at"] = "09:30"
+                else:
+                    settings["dingtalk_mentions"] = "13800138000"
+                SettingsStore(directory / "settings.json").save(settings)
+                service.secret_store.save(credentials)
+
+                def forbidden_call(*_args, **_kwargs):
+                    self.fail("A stale binding must fail before client/model/send work")
+
+                service.workflow_factory = forbidden_call
+                service.client_factory = forbidden_call
+                with patch.object(service.model_catalog, "refresh", side_effect=forbidden_call):
+                    with self.assertRaisesRegex(WorkerApiError, "授权已改变") as raised:
+                        plugin.dispatch({"op": "plugin_run_due_authorized", "payload": {"authorization_fingerprint": proof}})
+                self.assertNotIn(proof, str(raised.exception))
+                self.assertNotIn("synthetic-profile-B-secret", str(raised.exception))
+                self.assertEqual(service.history.list_runs(), [])
+
+    def test_authorized_due_keeps_validated_snapshot_through_slot_selection_and_workflow_reloads(self):
+        from upcam_app.smoke_data import SyntheticClient, SyntheticDingTalk, SyntheticSummarizer
+        for edit_point in ("after-validation", "after-slot-selection"):
+            with self.subTest(edit_point=edit_point):
+                plugin, service, directory, clock = self.due_fixture(edit_point)
+                proof = self.authorization(plugin)["authorization_fingerprint"]
+                settings_a = service.settings_store.load()
+                credentials_a = service.secret_store.load()
+                live_settings, live_secrets = service.settings_store, service.secret_store
+                settings_b = dict(settings_a, project_id="synthetic-project-B", morning_run_at="09:30",
+                                  morning_start_at="17:10", openai_model="ci-unknown-model", openai_reasoning_effort="default")
+                credentials_b = dict(credentials_a, teambition_app_secret="synthetic-secret-B",
+                                     dingtalk_webhook="https://oapi.dingtalk.com/robot/send?access_token=synthetic-destination-B")
+                seen = {"clients": [], "models": [], "destinations": [], "workflow": []}
+
+                def edit_live_profile():
+                    SettingsStore(directory / "settings.json").save(settings_b)
+                    live_secrets.save(credentials_b)
+
+                original_validate = service._validate_auto_ready
+                original_has_slot = service.history.has_schedule_key
+                if edit_point == "after-validation":
+                    def validate_then_edit(settings, credentials):
+                        original_validate(settings, credentials)
+                        edit_live_profile()
+                    service._validate_auto_ready = validate_then_edit
+                else:
+                    def edit_after_slot_selection(key):
+                        edit_live_profile()
+                        return original_has_slot(key)
+                    service.history.has_schedule_key = edit_after_slot_selection
+
+                class RecordingClient(SyntheticClient):
+                    def __init__(self, tenant_id, *, credentials):
+                        seen["clients"].append((tenant_id, credentials()))
+                        super().__init__(tenant_id, credentials=credentials)
+
+                class RecordingSummarizer(SyntheticSummarizer):
+                    def summarize(self, key, model, effort, *args, **kwargs):
+                        seen["models"].append((model, effort))
+                        return super().summarize(key, model, effort, *args, **kwargs)
+
+                class RecordingSender(SyntheticDingTalk):
+                    def send_markdown(self, webhook, secret, *args, **kwargs):
+                        seen["destinations"].append((webhook, secret))
+                        return super().send_markdown(webhook, secret, *args, **kwargs)
+
+                def workflow(settings, credentials, data_dir, **kwargs):
+                    seen["workflow"].append((deepcopy(settings), dict(credentials), Path(data_dir)))
+                    return DigestWorkflow(settings, credentials, data_dir, client_factory=RecordingClient,
+                        summarizer=RecordingSummarizer(), ding_sender=RecordingSender(settings), **kwargs)
+
+                service.workflow_factory = workflow
+                with patch("upcam_app.worker_api.datetime", clock):
+                    result = self.run_authorized(plugin, proof)
+                self.assertEqual(result["started"], 1)
+                self.assertEqual(result["events"][0]["schedule_key"], "2026-11-04:morning")
+                self.assertEqual(result["events"][0]["state"], "sent")
+                self.assertEqual(seen["workflow"], [(settings_a, credentials_a, directory)])
+                self.assertEqual(seen["clients"], [(settings_a["tenant_id"],
+                    (credentials_a["teambition_app_id"], credentials_a["teambition_app_secret"]))])
+                self.assertEqual(seen["models"], [("gpt-6-luna", "max")])
+                self.assertEqual(seen["destinations"], [(credentials_a["dingtalk_webhook"], credentials_a["dingtalk_signing_secret"])])
+                row = service.history.list_runs()[0]
+                self.assertEqual(row["window_start_local"], "2026-11-03T16:50")
+                self.assertEqual(row["window_end_local"], "2026-11-04T08:50")
+                self.assertIs(service.settings_store, live_settings)
+                self.assertIs(service.secret_store, live_secrets)
+                self.assertEqual(service.settings_store.load(), settings_b)
+                self.assertEqual(service.secret_store.load(), credentials_b)
+                serialized = json.dumps(result)
+                for credential in (*credentials_a.values(), *credentials_b.values()):
+                    self.assertNotIn(credential, serialized)
+
+    def test_authorized_due_snapshot_reloads_are_deep_copies_and_changed_writes_are_rejected(self):
+        for store_kind in ("settings", "secrets"):
+            with self.subTest(store_kind=store_kind):
+                plugin, service, directory, _clock = self.due_fixture("snapshot-write-" + store_kind)
+                proof = self.authorization(plugin)["authorization_fingerprint"]
+                original_settings, original_secrets = service.settings_store, service.secret_store
+                settings_before, secrets_before = original_settings.load(), original_secrets.load()
+                bytes_before = (directory / "settings.json").read_bytes()
+
+                def unsupported_write(_payload):
+                    first = service.settings_store.load()
+                    first["owner_names"]["demo-person"] = "Synthetic unsaved mutation"
+                    self.assertEqual(service.settings_store.load(), settings_before)
+                    target = service.settings_store if store_kind == "settings" else service.secret_store
+                    values = target.load()
+                    target.save(values)  # An identical save has no persistent side effect.
+                    values["max_tasks_per_run" if store_kind == "settings" else "openai_api_key"] = (
+                        456 if store_kind == "settings" else "synthetic-forbidden-snapshot-key")
+                    target.save(values)
+                    self.fail("A snapshot must not persist a changed value")
+
+                service._run_due = unsupported_write
+                with self.assertRaisesRegex(WorkerApiError, "不能修改已核验"):
+                    plugin.dispatch({"op": "plugin_run_due_authorized", "payload": {"authorization_fingerprint": proof}})
+                self.assertIs(service.settings_store, original_settings)
+                self.assertIs(service.secret_store, original_secrets)
+                self.assertEqual((directory / "settings.json").read_bytes(), bytes_before)
+                self.assertEqual(original_secrets.load(), secrets_before)
+
+    def test_authorized_due_restores_live_stores_after_core_failure_or_interruption(self):
+        for failure in (RuntimeError("synthetic failure"), KeyboardInterrupt("synthetic interruption")):
+            with self.subTest(failure_type=type(failure).__name__):
+                plugin, service, _directory, _clock = self.due_fixture(type(failure).__name__)
+                proof = self.authorization(plugin)["authorization_fingerprint"]
+                live_settings, live_secrets = service.settings_store, service.secret_store
+                entered = []
+
+                def fail_run(_payload):
+                    entered.append(type(failure).__name__)
+                    raise failure
+
+                service._run_due = fail_run
+                try:
+                    plugin.dispatch({"op": "plugin_run_due_authorized", "payload": {"authorization_fingerprint": proof}})
+                except (WorkerApiError, KeyboardInterrupt):
+                    pass
+                else:
+                    self.fail("Synthetic failure must propagate")
+                self.assertEqual(entered, [type(failure).__name__])
+                self.assertIs(service.settings_store, live_settings)
+                self.assertIs(service.secret_store, live_secrets)
+
+    def test_authorized_due_serializes_other_dispatch_until_snapshot_stores_are_restored(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        plugin, service, directory, _clock = self.due_fixture()
+        proof = self.authorization(plugin)["authorization_fingerprint"]
+        entered, release, foreground_started, foreground_entered = (threading.Event() for _ in range(4))
+        live_settings, live_secrets = service.settings_store, service.secret_store
+        changed = dict(live_settings.load(), max_tasks_per_run=456)
+        original_initialize = service._initialize
+
+        def blocked_run(_payload):
+            entered.set()
+            if not release.wait(5):
+                self.fail("The synthetic managed run was not released")
+            return {"started": 0, "events": []}
+
+        def initialize(payload):
+            foreground_entered.set()
+            return original_initialize(payload)
+
+        def foreground():
+            foreground_started.set()
+            return plugin.dispatch({"op": "initialize", "payload": {}})
+
+        service._run_due = blocked_run
+        service._initialize = initialize
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            managed = executor.submit(plugin.dispatch, {"op": "plugin_run_due_authorized", "payload": {"authorization_fingerprint": proof}})
+            try:
+                self.assertTrue(entered.wait(2), "Atomic managed operation did not start")
+                SettingsStore(directory / "settings.json").save(changed)
+                other = executor.submit(foreground)
+                self.assertTrue(foreground_started.wait(2))
+                self.assertFalse(foreground_entered.wait(0.1), "A concurrent dispatch observed temporary snapshot stores")
+            finally:
+                release.set()
+            self.assertEqual(managed.result(timeout=2), {"started": 0, "events": []})
+            self.assertEqual(other.result(timeout=2)["settings"], changed)
+        self.assertIs(service.settings_store, live_settings)
+        self.assertIs(service.secret_store, live_secrets)
+
+    def test_ordinary_run_due_keeps_its_existing_auto_off_semantics(self):
+        plugin, service, directory, _clock = self.due_fixture()
+        SettingsStore(directory / "settings.json").save(dict(service.settings_store.load(), auto_send_enabled=False))
+        self.assertEqual(service.dispatch({"op": "run_due", "payload": {}}), {"started": 0, "events": []})
+        self.assertEqual(plugin.dispatch({"op": "run_due", "payload": {}}), {"started": 0, "events": []})
 
 
 if __name__ == "__main__":

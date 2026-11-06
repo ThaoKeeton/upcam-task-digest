@@ -2,7 +2,7 @@ using Workbench.Sdk;
 
 namespace Workbench.Core;
 
-internal sealed class PluginRegistrationContext : IPluginContext, IDisposable
+internal sealed class PluginRegistrationContext : IPluginRuntimeContext, IDisposable
 {
     private readonly object _sync = new();
     private readonly CancellationTokenSource _lifetime = new();
@@ -11,19 +11,29 @@ internal sealed class PluginRegistrationContext : IPluginContext, IDisposable
     private readonly Dictionary<string, PluginSetting> _settings = new(StringComparer.Ordinal);
     private bool _open = true;
     private bool _active;
+    private int _stopReason;
 
-    public PluginRegistrationContext(string pluginId, string dataDirectory, IPluginSettings settings)
+    public PluginRegistrationContext(string pluginId, string dataDirectory, IPluginSettings settings,
+        PluginBackgroundTasks backgroundTasks, PluginSecretStore secrets)
     {
         PluginId = pluginId;
         DataDirectory = dataDirectory;
         Settings = settings;
         Lifetime = _lifetime.Token;
+        BackgroundTasks = backgroundTasks;
+        Secrets = secrets;
     }
 
+    internal bool IsCommitted { get; private set; }
     public string PluginId { get; }
     public string DataDirectory { get; }
     public CancellationToken Lifetime { get; }
     public IPluginSettings Settings { get; }
+    public PluginBackgroundTasks BackgroundTasks { get; }
+    public PluginSecretStore Secrets { get; }
+    IPluginBackgroundTasks IPluginRuntimeContext.BackgroundTasks => BackgroundTasks;
+    IPluginSecretStore IPluginRuntimeContext.Secrets => Secrets;
+    public PluginStopReason StopReason => (PluginStopReason)Volatile.Read(ref _stopReason);
 
     public void RegisterView(IPluginView view)
     {
@@ -63,7 +73,7 @@ internal sealed class PluginRegistrationContext : IPluginContext, IDisposable
         }
     }
 
-    private static void ValidateMetadata(string id, string title)
+    internal static void ValidateMetadata(string id, string title)
     {
         JsonPluginSettings.ValidateKey(id);
         if (string.IsNullOrWhiteSpace(title) || title.Length > 200)
@@ -83,6 +93,9 @@ internal sealed class PluginRegistrationContext : IPluginContext, IDisposable
             EnsureOpen();
             _open = false;
             _active = true;
+            IsCommitted = true;
+            Secrets.CloseRegistration();
+            BackgroundTasks.Commit();
         }
     }
 
@@ -103,20 +116,29 @@ internal sealed class PluginRegistrationContext : IPluginContext, IDisposable
             return _active ? _commands.GetValueOrDefault(id) : null;
     }
 
-    internal Exception? Close()
+    internal void Close(PluginStopReason reason)
     {
         lock (_sync)
         {
             _open = false;
             _active = false;
+            var current = StopReason;
+            if (current == PluginStopReason.None || current == PluginStopReason.HostShutdown && reason != PluginStopReason.HostShutdown)
+                Volatile.Write(ref _stopReason, (int)reason);
+            BackgroundTasks.Close(StopReason);
+            Secrets.CloseRegistration();
             _views.Clear();
             _commands.Clear();
             _settings.Clear();
         }
-        try { _lifetime.Cancel(); }
-        catch (Exception error) { return error; }
-        return null;
     }
 
-    public void Dispose() => _lifetime.Dispose();
+    internal Task CancelLifetimeAsync() => _lifetime.CancelAsync();
+
+    public void Dispose()
+    {
+        BackgroundTasks.Dispose();
+        Secrets.Dispose();
+        _lifetime.Dispose();
+    }
 }

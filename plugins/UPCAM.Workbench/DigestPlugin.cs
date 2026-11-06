@@ -20,6 +20,8 @@ public sealed class DigestPlugin : IWorkbenchPlugin
     public async Task InitializeAsync(IPluginContext context, CancellationToken cancellationToken)
     {
         if (_session is not null) throw new InvalidOperationException("The plugin is already initialized.");
+        if (context is not IPluginRuntimeContext runtime)
+            throw new InvalidOperationException("UPCAM requires Workbench 0.2 runtime services.");
         if (!string.Equals(context.PluginId, ExpectedId, StringComparison.Ordinal))
             throw new InvalidOperationException("The package identity does not match this plugin build.");
         string defaultProfile = ProfileBinding.Canonicalize(Path.Combine(context.DataDirectory, "profile"));
@@ -38,7 +40,8 @@ public sealed class DigestPlugin : IWorkbenchPlugin
         // Assembly.Location is the installed package; AppContext.BaseDirectory belongs to the host.
         string packageDirectory = Path.GetDirectoryName(typeof(DigestPlugin).Assembly.Location)
             ?? throw new InvalidOperationException("The installed plugin location is unavailable.");
-        var session = new PluginSession(context, packageDirectory, defaultProfile, state);
+        var session = new PluginSession(runtime, packageDirectory, defaultProfile, state);
+        session.Scheduler.Register();
         _state = state;
         _session = session;
         context.RegisterView(new WinUiView("digest", "UPCAM Task Digest", () => CreateView(context, false)));
@@ -57,7 +60,17 @@ public sealed class DigestPlugin : IWorkbenchPlugin
             return new PluginCommandResult(succeeded, succeeded
                 ? "Synthetic sample is available in Run & diagnostics. No tasks collected, model called or message sent."
                 : "Sample preview did not complete. Open the native page for local status.");
-        }, "Open the backend after enable and render the bundled fictional sample. An already authorized schedule may then resume."));
+        }, "Open the local backend and render the bundled fictional sample. This does not start the managed schedule."));
+        context.RegisterCommand(new PluginCommand("scheduler-start", "启动 UPCAM 自动日报", async token =>
+            new(await session.StartSchedulerAsync(token), "请在原生自动运行页查看本机授权和主机任务状态。")));
+        context.RegisterCommand(new PluginCommand("scheduler-stop", "停止 UPCAM 自动日报", async token =>
+            new(await session.StopSchedulerAsync(token), "请在原生自动运行页查看停止结果。")));
+        context.RegisterCommand(new PluginCommand("scheduler-status", "UPCAM 自动任务本机状态", token =>
+        {
+            token.ThrowIfCancellationRequested();
+            context.Lifetime.ThrowIfCancellationRequested();
+            return Task.FromResult(new PluginCommandResult(true, session.Scheduler.LocalStatus()));
+        }, "仅读取主机任务快照和本机检查计数；不连接工作进程，不读取密钥或业务内容。"));
     }
 
     private FrameworkElement CreateView(IPluginContext context, bool settings)

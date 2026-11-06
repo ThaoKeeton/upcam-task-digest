@@ -1,9 +1,9 @@
 {
   "repository": "ThaoKeeton/project-workbench",
   "branch": "feat/native-plugin-workbench",
-  "commit": "6565180b17130f6d494978291df4138de3fdb0b4",
-  "tree": "3402ab69645bef0ef0f81061222360ebd8d1c838",
-  "purpose": "Unmodified private, same-owner SDK and integration host reference; not distributed inside the plugin package.",
+  "commit": "d2005d469aef6a385c134b6914fb6dfa9cff20b2",
+  "tree": "46e072e9a97afcfaef89f1683b841e521801fb94",
+  "purpose": "Unmodified same-owner host 0.2 SDK/Core and complete host build/test input; never bundled in plugin package.",
   "files": [
     {
       "path": "Directory.Build.props",
@@ -14,8 +14,16 @@
       "gitBlob": "756da1af74d386e9ba450e0803d1cf459d1e2471"
     },
     {
+      "path": "docs/integrations/plugin-contract-v1.md",
+      "gitBlob": "da921cf9b0c1528336235c3260b75cfd809c094f"
+    },
+    {
       "path": "docs/plugin-sdk.md",
-      "gitBlob": "ed8fcb5abd93fa3d8d1b13e752d82bdf0dcb9fe0"
+      "gitBlob": "df9e427cbc6828932244a69b963868211fc9b283"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-11-06-business-plugin-platform-design.md",
+      "gitBlob": "b5a92562fc8bd933821403be82f36224a508b481"
     },
     {
       "path": "global.json",
@@ -102,20 +110,32 @@
       "gitBlob": "01420adb951761f0efd6ad417ae6ee0fc7fc7264"
     },
     {
+      "path": "src/Workbench.Core/PluginBackgroundTasks.cs",
+      "gitBlob": "e977908605624dc64143e98939d0e8883af57324"
+    },
+    {
       "path": "src/Workbench.Core/PluginLoadContext.cs",
       "gitBlob": "2cf7aac8b2f8e0a39cb62d13d93d3248fb07af70"
     },
     {
       "path": "src/Workbench.Core/PluginManager.cs",
-      "gitBlob": "f54ddecf43d8319e770f412f2d8a75e1e3956f51"
+      "gitBlob": "a2155d535cfdc57813665808586bc81457c7bb2d"
     },
     {
       "path": "src/Workbench.Core/PluginModels.cs",
-      "gitBlob": "3ba932ce923c01ba83a451df94e69589dd25c364"
+      "gitBlob": "a1fd95e6c3a34bdadcdc6a0b0e27a66915d990e0"
     },
     {
       "path": "src/Workbench.Core/PluginRegistrationContext.cs",
-      "gitBlob": "9b12a247cf7c436922a82e6a9133bcf93e391b91"
+      "gitBlob": "025bef765a0ad5b0a8a0a620049cfce70d0f1e4f"
+    },
+    {
+      "path": "src/Workbench.Core/PluginRuntimeState.cs",
+      "gitBlob": "be32ba7dbef668d117ef74d26713e45296d25dc5"
+    },
+    {
+      "path": "src/Workbench.Core/PluginSecretStore.cs",
+      "gitBlob": "4ca1dc74129ca04cc96e20358bc7692b6d6b8d7a"
     },
     {
       "path": "src/Workbench.Core/PluginStateStore.cs",
@@ -123,19 +143,27 @@
     },
     {
       "path": "src/Workbench.Core/README.md",
-      "gitBlob": "a66cb19faf545ebd774b81e594591a6bd61c876e"
+      "gitBlob": "ceec6dba080f049f95df74bd638a8b4471e6b5e1"
+    },
+    {
+      "path": "src/Workbench.Core/WindowsSecretProtector.cs",
+      "gitBlob": "a3fec56716d4d746b7a691793446ed72e0e9eb4d"
     },
     {
       "path": "src/Workbench.Core/Workbench.Core.csproj",
-      "gitBlob": "dcbc979dca74f53edc4c453d607a14467f96eda3"
+      "gitBlob": "161fa99217db7f6f2d56d3c9780e49821256ad32"
     },
     {
       "path": "src/Workbench.Sdk/PluginContracts.cs",
       "gitBlob": "acf86a1f39ae3bd0c95b4bc2cb82e236a6adea91"
     },
     {
+      "path": "src/Workbench.Sdk/RuntimeContracts.cs",
+      "gitBlob": "ee61641895fbe2d7a9a9167ebdda447bee337160"
+    },
+    {
       "path": "src/Workbench.Sdk/Workbench.Sdk.csproj",
-      "gitBlob": "6b512ec9245ec39fc1b7b533a704aa5d6434ca52"
+      "gitBlob": "2ce50e9e2102b696a5fe07a7b038e86764a9f93e"
     },
     {
       "path": "src/Workbench.WinUI.Sdk/WinUiView.cs",
@@ -143,7 +171,7 @@
     },
     {
       "path": "src/Workbench.WinUI.Sdk/Workbench.WinUI.Sdk.csproj",
-      "gitBlob": "d0cd262878d7a55c8e13c92458cf170240d38b18"
+      "gitBlob": "6d815f42244a305d81d39c8b39b27ac130e387e5"
     }
   ]
 }

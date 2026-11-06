@@ -20,16 +20,23 @@ public sealed class PluginManager : IAsyncDisposable
     private readonly Assembly[] _sharedAssemblies;
     private readonly string[] _sharedAssemblyNames;
     private readonly PluginStateStore _stateStore;
+    private readonly PluginRuntimeState _runtimeState;
+    private readonly ISecretProtector _secretProtector;
     private bool _disposed;
     private PluginContributions _contributions = new(
         Array.AsReadOnly(Array.Empty<PluginViewRegistration>()),
         Array.AsReadOnly(Array.Empty<PluginCommandRegistration>()),
         Array.AsReadOnly(Array.Empty<PluginSettingRegistration>()));
 
-    public PluginManager(PluginManagerOptions options)
+    public PluginManager(PluginManagerOptions options) : this(options, new WindowsSecretProtector()) { }
+
+    internal PluginManager(PluginManagerOptions options, ISecretProtector secretProtector)
     {
         ArgumentNullException.ThrowIfNull(options);
+        if (options.StopTimeout <= TimeSpan.Zero || options.StopTimeout == Timeout.InfiniteTimeSpan)
+            throw new ArgumentOutOfRangeException(nameof(options), "StopTimeout must be a positive finite duration.");
         _options = options;
+        _secretProtector = secretProtector;
         _sharedAssemblies = options.SharedAssemblies.Distinct().Where(a => a != typeof(IWorkbenchPlugin).Assembly).ToArray();
         _sharedAssemblyNames = options.SharedAssemblyNames.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         if (_sharedAssemblyNames.Any(n => string.IsNullOrWhiteSpace(n) || n.Contains('/') || n.Contains('\\') ||
@@ -38,6 +45,7 @@ public sealed class PluginManager : IAsyncDisposable
         _pluginsRoot = Path.GetFullPath(options.PluginsRoot);
         _userRoot = Path.GetFullPath(options.UserRoot);
         _stateStore = new(_userRoot);
+        _runtimeState = new(_userRoot);
         _discoveryRoots = new[] { _pluginsRoot }.Concat(options.AdditionalDiscoveryRoots.Select(Path.GetFullPath))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         FileSystemGuard.RejectLinks(_pluginsRoot);
@@ -48,6 +56,36 @@ public sealed class PluginManager : IAsyncDisposable
     public IReadOnlyList<PluginSnapshot> Plugins => Array.AsReadOnly(Volatile.Read(ref _entries).Select(e => e.Snapshot).ToArray());
     public PluginContributions Contributions => Volatile.Read(ref _contributions);
     public IReadOnlyList<PluginDiagnostic> Diagnostics => _stateStore.Diagnostics;
+
+    public bool HasPendingStops => Plugins.Any(p => p.HasPendingStop);
+
+    public IReadOnlyList<PluginBackgroundTaskSnapshot> GetBackgroundTaskSnapshots(string pluginId)
+        => FindEntry(pluginId)?.Context is { IsCommitted: true } context ? context.BackgroundTasks.GetSnapshots() : [];
+    public Task<PluginTaskOperationResult> StartBackgroundTaskAsync(string pluginId, string id, CancellationToken cancellationToken = default)
+        => ActiveContext(pluginId)?.BackgroundTasks.StartFromHostAsync(id, cancellationToken) ?? Task.FromResult(TaskUnavailable());
+    public Task<PluginTaskOperationResult> StopBackgroundTaskAsync(string pluginId, string id, CancellationToken cancellationToken = default)
+        => ActiveContext(pluginId)?.BackgroundTasks.StopAsync(id, cancellationToken) ?? Task.FromResult(TaskUnavailable());
+    public Task<PluginTaskOperationResult> SetBackgroundTaskResumeOnStartupAsync(string pluginId, string id, bool enabled, CancellationToken cancellationToken = default)
+        => ActiveContext(pluginId)?.BackgroundTasks.SetResumeOnStartupAsync(id, enabled, cancellationToken) ?? Task.FromResult(TaskUnavailable());
+    public IReadOnlyList<PluginSecretDefinition> GetSecretDefinitions(string pluginId)
+        => FindEntry(pluginId)?.Context is { IsCommitted: true } context ? context.Secrets.GetDefinitions() : [];
+    public bool IsSecretStorageSupported(string pluginId) => ActiveContext(pluginId)?.Secrets.IsSupported == true;
+    public Task<string?> ReadSecretAsync(string pluginId, string id, CancellationToken cancellationToken = default)
+        => SecretStore(pluginId).ReadAsync(id, cancellationToken);
+    public Task WriteSecretAsync(string pluginId, string id, string value, CancellationToken cancellationToken = default)
+        => SecretStore(pluginId).WriteAsync(id, value, cancellationToken);
+    public Task DeleteSecretAsync(string pluginId, string id, CancellationToken cancellationToken = default)
+        => SecretStore(pluginId).DeleteAsync(id, cancellationToken);
+
+    private PluginRegistrationContext? ActiveContext(string pluginId)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var entry = FindEntry(pluginId);
+        return entry?.Snapshot is { State: PluginState.Enabled, IsTrusted: true } ? entry.Context : null;
+    }
+    private PluginSecretStore SecretStore(string pluginId) => ActiveContext(pluginId)?.Secrets
+        ?? throw new PluginSecretStoreException("SecretStoreUnavailable");
+    private static PluginTaskOperationResult TaskUnavailable() => new(false, "The plugin is not enabled and trusted.");
 
     /// <summary>After discovery, restores only unchanged, trusted packages with saved enabled intent.</summary>
     public async Task<IReadOnlyList<PluginOperationResult>> RestoreEnabledAsync(CancellationToken cancellationToken = default)
@@ -61,8 +99,8 @@ public sealed class PluginManager : IAsyncDisposable
             foreach (var entry in Volatile.Read(ref _entries))
             {
                 var status = entry.Snapshot;
-                if (status.DesiredEnabled && status.IsTrusted && status.State is not PluginState.Enabled and not PluginState.Invalid)
-                    results.Add(await EnableCoreAsync(entry.Package.Manifest!.Id, confirmTrust: false, cancellationToken));
+                if (status.DesiredEnabled && status.IsTrusted && status.State is not PluginState.Enabled and not PluginState.Invalid and not PluginState.Stopping)
+                    results.Add(await EnableCoreAsync(entry.Package.Manifest!.Id, confirmTrust: false, cancellationToken, restoreTasks: true));
             }
             return Array.AsReadOnly(results.ToArray());
         }
@@ -78,7 +116,8 @@ public sealed class PluginManager : IAsyncDisposable
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             foreach (var entry in Volatile.Read(ref _entries))
-                await StopRuntimeAsync(entry, cancellationToken);
+                await StopRuntimeAsync(entry, PluginStopReason.HostShutdown, cancellationToken);
+            if (HasPendingStops) throw new PluginShutdownException();
         }
         finally { _gate.Release(); }
     }
@@ -133,6 +172,9 @@ public sealed class PluginManager : IAsyncDisposable
                     entry.AddDiagnostic(new(PluginDiagnosticCode.DuplicatePluginId, $"More than one package declares '{group.Key}'."));
                 }
             }
+            foreach (var changed in entries.Where(e => e.Package.Manifest is not null
+                && e.Snapshot.Diagnostics.Any(d => d.Code == PluginDiagnosticCode.PackageChanged)))
+                await ClearTaskIntentAsync(changed, removeConsent: true, cancellationToken);
             Volatile.Write(ref _entries, entries.ToArray());
             PublishContributions();
             return Plugins;
@@ -218,7 +260,8 @@ public sealed class PluginManager : IAsyncDisposable
             if (_disposed)
                 return;
             foreach (var entry in Volatile.Read(ref _entries))
-                await StopRuntimeAsync(entry, CancellationToken.None);
+                await StopRuntimeAsync(entry, PluginStopReason.HostShutdown, CancellationToken.None);
+            if (HasPendingStops) throw new PluginShutdownException();
             _disposed = true;
         }
         finally { _gate.Release(); }
@@ -237,7 +280,7 @@ public sealed class PluginManager : IAsyncDisposable
         finally { _gate.Release(); }
     }
 
-    private async Task<PluginOperationResult> EnableCoreAsync(string pluginId, bool confirmTrust, CancellationToken cancellationToken)
+    private async Task<PluginOperationResult> EnableCoreAsync(string pluginId, bool confirmTrust, CancellationToken cancellationToken, bool restoreTasks = false)
     {
         var entry = FindEntry(pluginId);
         if (entry is null || entry.Snapshot.State == PluginState.Invalid)
@@ -253,6 +296,7 @@ public sealed class PluginManager : IAsyncDisposable
         if (!current.IsValid || current.Fingerprint != entry.Package.Fingerprint)
         {
             MarkPackageChanged(entry);
+            await ClearTaskIntentAsync(entry, removeConsent: true, cancellationToken);
             await PersistStateAsync(entry, enabled: false, fingerprint: null, cancellationToken);
             return new(false, $"Package '{pluginId}' changed after discovery. Rediscover before trusting it; a loaded package requires exit and restart.");
         }
@@ -273,8 +317,15 @@ public sealed class PluginManager : IAsyncDisposable
             var dataDirectory = FileSystemGuard.ContainedPath(_userRoot, Path.Combine("data", pluginId));
             Directory.CreateDirectory(dataDirectory);
             FileSystemGuard.RejectLinks(dataDirectory);
-            var context = new PluginRegistrationContext(pluginId, dataDirectory, GetSettings(pluginId));
+            var savedTasks = await _runtimeState.LoadPluginAsync(pluginId, entry.Package.Fingerprint!, entry.AddDiagnostic, cancellationToken);
+            var background = new PluginBackgroundTasks(savedTasks,
+                (id, intent, token) => _runtimeState.SaveAsync(pluginId, entry.Package.Fingerprint!, id, intent, entry.AddDiagnostic, token),
+                entry.AddDiagnostic, _options.StopTimeout);
+            var context = new PluginRegistrationContext(pluginId, dataDirectory, GetSettings(pluginId), background,
+                new PluginSecretStore(_userRoot, pluginId, _secretProtector, entry.AddDiagnostic));
+            entry.FailedInitialization = false;
             entry.Context = context;
+            entry.Update(s => s with { HasRuntime = true });
             entry.LoadContext ??= new PluginLoadContext(entry.Package, _sharedAssemblies, _sharedAssemblyNames);
             entry.Assembly ??= entry.LoadContext.LoadFromAssemblyPath(FileSystemGuard.ContainedPath(entry.Package.Path, entry.Package.Manifest!.EntryAssembly));
             entry.Update(s => s with { IsLoaded = true });
@@ -286,21 +337,25 @@ public sealed class PluginManager : IAsyncDisposable
             initializing = true;
             await entry.Instance.InitializeAsync(context, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
+            if (!await background.PrepareCommitAsync(cancellationToken))
+                throw new IOException("Could not clear background task resume intent.");
             if (!await PersistStateAsync(entry, enabled: true, entry.Package.Fingerprint, cancellationToken))
                 throw new IOException("Could not save enabled state; activation was rolled back.");
             context.Commit();
             entry.Update(s => s with { State = PluginState.Enabled, DesiredEnabled = true });
             PublishContributions();
+            if (restoreTasks) await background.RestoreAsync(CancellationToken.None);
             return new(true, $"Enabled '{pluginId}'.");
         }
         catch (Exception error)
         {
-            await StopRuntimeAsync(entry, CancellationToken.None);
-            entry.Update(s => s with { State = PluginState.Failed, DesiredEnabled = false });
+            entry.FailedInitialization = true;
+            await StopRuntimeAsync(entry, PluginStopReason.InitializationFailed, CancellationToken.None);
+            entry.Update(s => s with { State = s.HasPendingStop ? PluginState.Stopping : PluginState.Failed, DesiredEnabled = false });
             await PersistStateAsync(entry, enabled: false, entry.Package.Fingerprint, CancellationToken.None);
-            var message = error.GetBaseException().Message;
-            entry.AddDiagnostic(new(initializing ? PluginDiagnosticCode.InitializationFailed : PluginDiagnosticCode.LoadFailed,
-                $"Plugin '{pluginId}' failed: {message}"));
+            var code = initializing ? PluginDiagnosticCode.InitializationFailed : PluginDiagnosticCode.LoadFailed;
+            var message = $"{code} ({FailureCategory(error)}).";
+            entry.AddDiagnostic(new(code, message));
             if (error is OperationCanceledException && cancellationToken.IsCancellationRequested)
                 throw;
             return new(false, message);
@@ -325,13 +380,15 @@ public sealed class PluginManager : IAsyncDisposable
             {
                 var invalid = entry.Snapshot.State == PluginState.Invalid;
                 entry.Update(s => s with { DesiredEnabled = false });
-                success &= (await StopRuntimeAsync(entry, cancellationToken)).Succeeded;
+                var stopping = StopRuntimeAsync(entry, PluginStopReason.PluginDisabled, cancellationToken);
                 success &= await PersistStateAsync(entry, enabled: false,
                     entry.Snapshot.IsTrusted ? entry.Package.Fingerprint : null, CancellationToken.None);
-                if (invalid)
+                success &= await ClearTaskIntentAsync(entry, removeConsent: false, CancellationToken.None);
+                success &= (await stopping).Succeeded;
+                if (invalid && !entry.Snapshot.HasPendingStop)
                     entry.Update(s => s with { State = PluginState.Invalid });
             }
-            return new(success, success ? $"Disabled '{pluginId}'. Assemblies remain loaded until exit." : $"Plugin '{pluginId}' stopped with errors; contributions were removed.");
+            return new(success, success ? $"Disabled '{pluginId}'. Assemblies remain loaded until exit." : $"Plugin '{pluginId}' has stop or persistence errors; inspect its state before retrying.");
         }
         finally { _gate.Release(); }
     }
@@ -365,48 +422,104 @@ public sealed class PluginManager : IAsyncDisposable
             }
             catch (Exception error)
             {
-                var message = error is OperationCanceledException ? "Command was canceled." : error.GetBaseException().Message;
+                var message = error is OperationCanceledException ? "Command was canceled." : $"CommandFailed ({FailureCategory(error)}).";
                 entry!.AddDiagnostic(new(PluginDiagnosticCode.CommandFailed, $"Command '{pluginId}/{commandId}' failed: {message}"));
                 return new(false, message);
             }
         }
     }
 
-    private async Task<PluginOperationResult> StopRuntimeAsync(Entry entry, CancellationToken cancellationToken)
+    private async Task<PluginOperationResult> StopRuntimeAsync(Entry entry, PluginStopReason reason, CancellationToken cancellationToken)
     {
+        // A later explicit disable can revoke business intent during a pending shutdown.
+        // Keep the original Stop Task, while the readable reason is upgraded before cancellation cleanup ends.
+        entry.Context?.Close(reason);
+        if (entry.StopTask is null)
+        {
+            if (entry.Context is null && entry.Instance is null) return new(true, "Stopped.");
+            entry.PreserveInvalid = entry.Snapshot.State == PluginState.Invalid;
+            entry.Update(s => s with { State = PluginState.Stopping, HasPendingStop = true });
+            PublishContributions();
+            // Plugin delegates and cancellation callbacks may have a synchronous prefix.
+            // Keep it off the caller/dispatcher, and retain this single Task until it really ends.
+            var stop = entry.StopTask = Task.Run(() => StopOwnedWorkAsync(entry));
+            _ = CleanupAfterStopAsync(entry, stop);
+        }
+        try { await entry.StopTask.WaitAsync(_options.StopTimeout, cancellationToken); }
+        catch (TimeoutException)
+        {
+            entry.AddDiagnostic(new(PluginDiagnosticCode.StopTimedOut, "PluginStopPending: known work is still stopping; ownership is retained."));
+            return new(false, "PluginStopPending: known work is still stopping.");
+        }
+        var result = entry.StopTask.Result;
+        CompleteStop(entry);
+        return result;
+    }
+
+    private static async Task<PluginOperationResult> StopOwnedWorkAsync(Entry entry)
+    {
+        async Task<bool> ObserveAsync(Func<Task> action, string code)
+        {
+            try { await action(); return true; }
+            catch (Exception)
+            {
+                entry.AddDiagnostic(new(PluginDiagnosticCode.StopFailed, code));
+                return false;
+            }
+        }
         var context = entry.Context;
         var instance = entry.Instance;
+        var cancellation = ObserveAsync(() => context?.CancelLifetimeAsync() ?? Task.CompletedTask, "LifetimeCancellationFailed");
+        var background = context?.BackgroundTasks.StopAllAsync() ?? Task.FromResult(true);
+        var plugin = ObserveAsync(() => Task.Run(async () =>
+        {
+            if (instance is not null) await instance.StopAsync(CancellationToken.None);
+        }), "PluginStopFailed");
+        var results = await Task.WhenAll(cancellation, background, plugin);
+        return results.All(success => success) ? new(true, "Stopped.") : new(false, "StopFailed: known work completed with errors.");
+    }
+
+    private async Task CleanupAfterStopAsync(Entry entry, Task<PluginOperationResult> stop)
+    {
+        await stop;
+        await _gate.WaitAsync();
+        try
+        {
+            if (ReferenceEquals(entry.StopTask, stop)) CompleteStop(entry);
+        }
+        finally { _gate.Release(); }
+    }
+
+    // Lifecycle gate is held, including by the asynchronous late-completion observer.
+    private void CompleteStop(Entry entry)
+    {
+        if (entry.StopTask is not { IsCompletedSuccessfully: true } stop) return;
+        var failed = !stop.Result.Succeeded || entry.FailedInitialization;
+        entry.Context?.Dispose();
         entry.Context = null;
         entry.Instance = null;
-        if (entry.Snapshot.State != PluginState.Invalid)
-            entry.Update(s => s with { State = PluginState.Disabled });
+        entry.StopTask = null;
+        entry.Update(s => s with
+        {
+            HasRuntime = false,
+            HasPendingStop = false,
+            State = entry.PreserveInvalid ? PluginState.Invalid : failed ? PluginState.Failed : PluginState.Disabled
+        });
         PublishContributions();
-        var success = true;
-        try
+    }
+
+    private static string FailureCategory(Exception error)
+    {
+        // Do not invoke virtual Exception.Message/GetBaseException/ToString on plugin-defined types.
+        while (error is TargetInvocationException or TypeInitializationException && error.InnerException is { } inner)
+            error = inner;
+        return error switch
         {
-            var cancellationError = context?.Close();
-            if (cancellationError is not null)
-                throw cancellationError;
-        }
-        catch (Exception error)
-        {
-            success = false;
-            entry.AddDiagnostic(new(PluginDiagnosticCode.StopFailed, $"Lifetime cancellation failed: {error.GetBaseException().Message}"));
-        }
-        try
-        {
-            if (instance is not null)
-                await instance.StopAsync(cancellationToken);
-        }
-        catch (Exception error)
-        {
-            success = false;
-            entry.AddDiagnostic(new(PluginDiagnosticCode.StopFailed, $"Plugin stop failed: {error.GetBaseException().Message}"));
-        }
-        finally { context?.Dispose(); }
-        if (!success)
-            entry.Update(s => s with { State = PluginState.Failed });
-        return new(success, success ? "Stopped." : "Stopped with errors; all contributions were removed.");
+            OperationCanceledException => "Canceled",
+            FileNotFoundException or FileLoadException => "DependencyLoadFailed",
+            IOException or UnauthorizedAccessException => "StorageFailed",
+            _ => "PluginException"
+        };
     }
 
     private Entry? FindEntry(string pluginId)
@@ -427,7 +540,7 @@ public sealed class PluginManager : IAsyncDisposable
 
     private static void MarkPackageChanged(Entry entry)
     {
-        entry.Update(s => s with { State = PluginState.Failed, IsTrusted = false, DesiredEnabled = false });
+        entry.Update(s => s with { State = s.HasPendingStop ? PluginState.Stopping : PluginState.Failed, IsTrusted = false, DesiredEnabled = false });
         entry.AddDiagnostic(new(PluginDiagnosticCode.PackageChanged,
             "Package contents changed or disappeared. Trust was revoked; loaded assemblies require exit and restart before replacement."));
     }
@@ -457,7 +570,21 @@ public sealed class PluginManager : IAsyncDisposable
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            entry.AddDiagnostic(new(PluginDiagnosticCode.StatePersistenceFailed, $"Could not persist plugin preference: {error.Message}"));
+            entry.AddDiagnostic(new(PluginDiagnosticCode.StatePersistenceFailed, "Could not persist plugin preference (StatePersistenceFailed)."));
+            return false;
+        }
+    }
+
+    private async Task<bool> ClearTaskIntentAsync(Entry entry, bool removeConsent, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _runtimeState.ClearAsync(entry.Package.Manifest!.Id, removeConsent, entry.AddDiagnostic, cancellationToken);
+            return true;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            entry.AddDiagnostic(new(PluginDiagnosticCode.RuntimeStatePersistenceFailed, "Background task intent could not be cleared."));
             return false;
         }
     }
@@ -490,6 +617,9 @@ public sealed class PluginManager : IAsyncDisposable
         public Assembly? Assembly { get; set; }
         public IWorkbenchPlugin? Instance { get; set; }
         public PluginRegistrationContext? Context { get; set; }
+        public Task<PluginOperationResult>? StopTask { get; set; }
+        public bool FailedInitialization { get; set; }
+        public bool PreserveInvalid { get; set; }
         public PluginSnapshot Snapshot { get { lock (_sync) return _snapshot; } }
         public void Update(Func<PluginSnapshot, PluginSnapshot> update) { lock (_sync) _snapshot = update(_snapshot); }
         public void AddDiagnostic(PluginDiagnostic diagnostic) => Update(s => s with

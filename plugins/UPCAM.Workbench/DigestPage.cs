@@ -15,6 +15,7 @@ internal sealed partial class DigestPage : Grid
     private readonly TextBlock _status;
     private readonly TextBlock _operation;
     private readonly TextBlock _scheduleCheck;
+    private readonly TextBlock _schedulerStatus;
     private readonly ContentControl _body;
     private readonly Button _save;
     private readonly Button _cancel;
@@ -23,6 +24,8 @@ internal sealed partial class DigestPage : Grid
     private TextBox? _runOutput;
     private ListView? _historyList;
     private JsonArray? _historySource;
+    private ToggleSwitch? _resumeToggle;
+    private bool _refreshingResume;
 
     internal DigestPage(PluginState state, PluginSession session, bool settings)
     {
@@ -40,9 +43,10 @@ internal sealed partial class DigestPage : Grid
         _status = Identify(Paragraph("Open the local profile to begin."), "plugin-status", "UPCAM backend status");
         _operation = Identify(Paragraph("0 · No operation yet.", 12), "operation-result", "UPCAM operation result");
         _scheduleCheck = Identify(Paragraph("0 · 尚未检查已保存的计划。", 12), "last-schedule-check", "Last saved schedule check");
+        _schedulerStatus = Identify(Paragraph("主机自动任务尚未启动。", 12), "scheduler-status", "Managed digest scheduler status");
         _save = ActionButton("Save business settings", "save-settings", async () => { await _session.SaveAsync(); });
         _save.Visibility = settings ? Visibility.Visible : Visibility.Collapsed;
-        _cancel = ActionButton("Cancel current operation", "cancel-operation", () => { _session.CancelCurrent(); return Task.CompletedTask; });
+        _cancel = ActionButton("Cancel current operation", "cancel-operation", async () => { await _session.CancelCurrentAsync(); });
         var reconnect = ActionButton("Open / reconnect backend", "open-backend", async () => { await _session.ActivateAsync(); });
         var heading = Column(Paragraph(settings ? "UPCAM settings" : "UPCAM Task Digest", 24),
             Paragraph(DigestPlugin.Synthetic ? "CI synthetic data · all service operations are simulated." :
@@ -50,7 +54,7 @@ internal sealed partial class DigestPage : Grid
         Children.Add(heading);
         var toolbar = Toolbar(_save, reconnect, _cancel);
         Children.Add(toolbar); SetRow(toolbar, 1);
-        var feedback = Column(_status, _operation, _scheduleCheck); feedback.Spacing = 2;
+        var feedback = Column(_status, _operation, _schedulerStatus, _scheduleCheck); feedback.Spacing = 2;
         Children.Add(feedback); SetRow(feedback, 2);
         _body = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
         Children.Add(_body); SetRow(_body, 3);
@@ -64,7 +68,7 @@ internal sealed partial class DigestPage : Grid
         if (_subscribed) return;
         _subscribed = true;
         _state.Changed += OnStateChanged;
-        try { await _session.ActivateAsync(); }
+        try { await _session.ActivateAsync(); _session.Scheduler.RefreshSnapshot(); }
         catch (OperationCanceledException) { }
         catch { ShowLocalFailure(); }
     }
@@ -92,6 +96,13 @@ internal sealed partial class DigestPage : Grid
             _status.Text = _state.Status;
             _operation.Text = _state.OperationResult;
             _scheduleCheck.Text = _state.ScheduleCheckResult;
+            _schedulerStatus.Text = _state.SchedulerStatus;
+            if (_resumeToggle is not null && _resumeToggle.IsOn != _state.ResumeOnStartup)
+            {
+                _refreshingResume = true;
+                try { _resumeToggle.IsOn = _state.ResumeOnStartup; }
+                finally { _refreshingResume = false; }
+            }
             _save.IsEnabled = _state.Ready && (!_state.Busy || _state.BackgroundActivity);
             _cancel.IsEnabled = _state.Busy;
             _body.IsEnabled = !_state.Busy || _state.BackgroundActivity;
@@ -122,7 +133,7 @@ internal sealed partial class DigestPage : Grid
                 }, _settings ? "settings-tabs" : "digest-tabs", _settings ? "UPCAM settings tabs" : "UPCAM digest tabs");
                 void Add(string title, UIElement content) => tabs.TabItems.Add(Identify(new TabViewItem
                 { Header = Label(title), Tag = title, IsClosable = false, Content = content,
-                    IsEnabled = _state.Ready || (_settings ? title == "Profile" : title == "Overview") },
+                    IsEnabled = _state.Ready || (_settings ? title is "Profile" or "Schedule" : title == "Overview") },
                     "tab-" + title.ToLowerInvariant().Replace(" & ", "-").Replace(' ', '-'), title));
                 if (_settings)
                 {

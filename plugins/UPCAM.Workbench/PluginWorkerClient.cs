@@ -46,6 +46,10 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
         "请先保存项目范围配置并完成自动只读核验；核验未通过时不会发送。可在项目范围页选择有动态的时间区间后重新保存。",
         "启用自动运行前，请保存项目配置并通过自动只读核验。",
         "启用自动运行前，请保存 Teambition、钉钉、OpenAI 凭据和防重复身份。",
+        "尚未保存启用自动发送；请先在设置中明确开启并保存。",
+        "自动运行授权请求格式无效；未采集或发送。",
+        "自动运行授权已改变；请重新保存设置并明确启动。",
+        "自动运行期间不能修改已核验的设置或凭据；未保存任何更改。",
         "模型缓存未匹配。若在更换 Key，请先在“自动运行”关闭并保存，再保存新 Key、刷新模型，最后重新开启自动运行。",
         "所选模型不在当前 API Key 的缓存列表中。",
         "当前模型没有已核验的所选 reasoning effort。",
@@ -244,7 +248,7 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
     }
 
     // Saving an unverified scope performs the same complete read-only collection.
-    private static bool IsCollection(string operation) => operation is "save" or "run_manual" or "run_due" or "probe_project" or
+    private static bool IsCollection(string operation) => operation is "save" or "run_manual" or "run_due" or "plugin_run_due_authorized" or "probe_project" or
         "diagnose" or "export_diagnostic" or "export_diagnostic_to_file" or "export_detailed_diagnostic_to_file" or "test_teambition";
 
     private static bool ValidHandshake(JsonObject response, string nonce, string profile, bool synthetic)

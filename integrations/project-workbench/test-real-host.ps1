@@ -26,6 +26,7 @@ $script:canWriteReport = $false
 $script:screenshotFile = $null
 $script:userRoot = $null
 $script:forcedCleanup = $false
+$script:selectorProbe = $null
 $script:checks = [ordered]@{
     ephemeralWindowsCi = $null
     freshNormalUserRoot = $null
@@ -64,10 +65,12 @@ $script:result = [ordered]@{
     failureCode = $null
     cleanup = 'not-started'
     screenshot = 'not-requested'
+    selectorDiagnostic = $null
     serviceOperationsInvoked = $false
     serviceCredentialEnvironmentInherited = $false
     checks = $script:checks
 }
+if ($ScreenshotPath) { $script:result.screenshot = 'pending' }
 
 function Set-Phase([string]$Name, [string]$Failure) {
     $script:phase = $Name
@@ -96,61 +99,103 @@ function Wait-For([scriptblock]$Probe, [int]$Seconds = 30) {
     throw 'The expected native UI state did not become available before its deadline.'
 }
 
-function Find-Exact([string]$Name, [string]$Id = '', [string]$Role = '') {
+function Set-SelectorIssue([ValidateSet('ambiguous', 'missing', 'pattern', 'disabled')][string]$Category) {
+    if ($null -ne $script:selectorProbe) { $script:selectorProbe.category = $Category }
+}
+
+function Find-Exact([string]$Name, [string]$Id = '', [string]$Role = '', [string]$Key = '') {
+    # Keys come from fixed call-site labels or the fixed phase/role, never the UI name.
+    $selectorKey = if ($Key) { $Key } elseif ($Role) { $script:phase + '-' + $Role } else { $script:phase + '-lookup' }
+    if ($selectorKey -cnotmatch '^[a-z][a-z0-9-]{0,79}$') { $selectorKey = 'selector' }
+    $script:selectorProbe = [ordered]@{
+        key = $selectorKey
+        category = 'missing'
+        matchCount = 0
+        idMatchCount = 0
+        eligibleCount = 0
+        candidates = @()
+    }
     $condition = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::NameProperty, $Name)
     $matches = $script:window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
     $found = $null
     foreach ($item in $matches) {
-        if ($Id -and $item.Current.AutomationId -cne $Id) { continue }
         if ($item.Current.ProcessId -ne $script:owned.HostId) { continue }
+        $script:selectorProbe.matchCount++
+        $automationId = $item.Current.AutomationId
+        if ($script:selectorProbe.candidates.Count -lt 8) {
+            # Only a bounded identifier alphabet is allowed; no names, text, paths, or values.
+            $safeId = if ($automationId -cmatch '^[A-Za-z0-9_.-]{0,80}$') { $automationId } else { 'redacted' }
+            $controlType = $item.Current.ControlType.ProgrammaticName
+            if ($controlType -cnotmatch '^ControlType\.[A-Za-z]+$') { $controlType = 'ControlType.Unknown' }
+            $script:selectorProbe.candidates += [ordered]@{ controlType = $controlType; automationId = $safeId }
+        }
+        if ($Id -and $automationId -cne $Id) { continue }
+        $script:selectorProbe.idMatchCount++
         $pattern = $null
         if ($Role -eq 'select') {
+            Set-SelectorIssue 'pattern'
             if (-not $item.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern) -and
                 -not $item.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) { continue }
         }
         elseif ($Role -eq 'invoke') {
+            Set-SelectorIssue 'pattern'
             if (-not $item.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) { continue }
         }
-        if ($null -ne $found) { throw 'The exact native UI selector was ambiguous.' }
+        $script:selectorProbe.eligibleCount++
         $found = $item
     }
+    if ($script:selectorProbe.eligibleCount -gt 1) {
+        Set-SelectorIssue 'ambiguous'
+        throw 'The exact native UI selector was ambiguous.'
+    }
+    if ($null -ne $found) { $script:selectorProbe.category = 'matched' }
+    elseif ($script:selectorProbe.idMatchCount -eq 0) { Set-SelectorIssue 'missing' }
     return $found
 }
 
-function Get-Exact([string]$Name, [string]$Id = '', [string]$Role = '') {
-    return Wait-For { Find-Exact $Name $Id $Role }
+function Get-Exact([string]$Name, [string]$Id = '', [string]$Role = '', [string]$Key = '') {
+    return Wait-For { Find-Exact $Name $Id $Role $Key }
 }
 
 function Select-Exact([string]$Name, [string]$Id = '') {
     $item = Get-Exact $Name $Id 'select'
-    if (-not $item.Current.IsEnabled) { throw 'The named navigation control was disabled.' }
+    if (-not $item.Current.IsEnabled) { Set-SelectorIssue 'disabled'; throw 'The named navigation control was disabled.' }
     $pattern = $null
     if ($item.Current.IsOffscreen -and $item.TryGetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern, [ref]$pattern)) {
         $pattern.ScrollIntoView()
     }
     $pattern = $null
-    if ($item.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
-        $pattern.Select()
+    try {
+        if ($item.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
+            $pattern.Select()
+        }
+        elseif ($item.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+            $pattern.Invoke()
+        }
+        else { Set-SelectorIssue 'pattern'; throw 'The native navigation control exposed no supported UIA pattern.' }
     }
-    elseif ($item.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
-        $pattern.Invoke()
-    }
-    else { throw 'The native navigation control exposed no supported UIA pattern.' }
+    catch [System.Windows.Automation.ElementNotEnabledException] { Set-SelectorIssue 'disabled'; throw }
+    catch [System.Windows.Automation.ElementNotAvailableException] { Set-SelectorIssue 'missing'; throw }
+    catch { Set-SelectorIssue 'pattern'; throw }
 }
 
-function Invoke-Exact([string]$Name) {
-    $item = Get-Exact $Name '' 'invoke'
-    if (-not $item.Current.IsEnabled) { throw 'The named host button was disabled.' }
+function Invoke-Exact([string]$Name, [string]$Key = '') {
+    $item = Get-Exact $Name '' 'invoke' $Key
+    if (-not $item.Current.IsEnabled) { Set-SelectorIssue 'disabled'; throw 'The named host button was disabled.' }
     $pattern = $null
     if ($item.Current.IsOffscreen -and $item.TryGetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern, [ref]$pattern)) {
         $pattern.ScrollIntoView()
     }
     $pattern = $null
     if (-not $item.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+        Set-SelectorIssue 'pattern'
         throw 'The named host button exposed no invoke pattern.'
     }
-    $pattern.Invoke()
+    try { $pattern.Invoke() }
+    catch [System.Windows.Automation.ElementNotEnabledException] { Set-SelectorIssue 'disabled'; throw }
+    catch [System.Windows.Automation.ElementNotAvailableException] { Set-SelectorIssue 'missing'; throw }
+    catch { Set-SelectorIssue 'pattern'; throw }
 }
 
 function Read-NamedText([string]$Name, [string]$Id) {
@@ -162,6 +207,7 @@ function Read-NamedText([string]$Name, [string]$Id) {
     if ($item.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
         return $pattern.Current.Value
     }
+    Set-SelectorIssue 'pattern'
     throw 'The named output exposed no readable UIA pattern.'
 }
 
@@ -169,6 +215,7 @@ function Get-ValuePattern([string]$Name, [string]$Id) {
     $item = Get-Exact $Name $Id
     $pattern = $null
     if (-not $item.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+        Set-SelectorIssue 'pattern'
         throw 'The named editor exposed no value pattern.'
     }
     return $pattern
@@ -529,12 +576,12 @@ public sealed class UpcamRealHostRun : IDisposable
     Assert-Check 'initialDisabledUntrusted' $true
 
     Set-Phase 'native-trust' 'explicit-native-trust-failed'
-    Invoke-Exact '启用 UPCAM Task Digest'
-    $null = Get-Exact '信任并启用 UPCAM Task Digest？'
-    $null = Get-Exact '信任并启用' '' 'invoke'
+    Invoke-Exact '启用 UPCAM Task Digest' 'enable-plugin'
+    $null = Get-Exact '信任并启用 UPCAM Task Digest？' '' '' 'trust-title'
+    $null = Get-Exact '信任并启用' '' 'invoke' 'trust-primary'
     Assert-Check 'explicitTrustDialog' $true
     # Authorization is limited to the controlled production fixture in this fresh CI account.
-    Invoke-Exact '信任并启用'
+    Invoke-Exact '信任并启用' 'trust-primary'
     $null = Get-Exact ("状态：Enabled · 已信任：True · 下次启动启用：True`n" + $packageDirectory)
     $null = Get-Exact '停用 UPCAM Task Digest' '' 'invoke'
     Assert-Check 'enabledByNativeUi' $true
@@ -625,10 +672,27 @@ catch {
     # Deliberately omit exception messages, UI strings, paths, stacks, and response values from evidence.
     $script:result.status = 'failed'
     $script:result.failureCode = $script:failureCode
+    if ($null -ne $script:selectorProbe -and $script:selectorProbe.category -ne 'matched') {
+        $script:result.selectorDiagnostic = $script:selectorProbe
+    }
 }
 finally {
     if ($null -ne $script:owned) {
         if (-not $script:result.succeeded) {
+            # Preserve the actual failing owned window before requesting close or terminating its job.
+            # The P2 permission gate also covers this optional evidence write.
+            if ($script:canWriteReport -and $script:screenshotFile -and $script:result.screenshot -ne 'captured') {
+                $script:result.screenshot = 'unavailable-on-failure'
+                try {
+                    if (-not $script:owned.HostExited) {
+                        $failureWindow = $script:owned.FindHostWindow()
+                        if ($failureWindow -ne [IntPtr]::Zero -and $script:owned.Capture($failureWindow, $script:screenshotFile)) {
+                            $script:result.screenshot = 'captured-on-failure'
+                        }
+                    }
+                }
+                catch { $script:result.screenshot = 'unavailable-on-failure' }
+            }
             try {
                 if (-not $script:owned.HostExited -and $null -ne $script:window) {
                     $close = $null

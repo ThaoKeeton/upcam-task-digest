@@ -15,8 +15,8 @@ class ReferenceError(ValueError):
     pass
 
 
-PINNED_COMMIT = "6565180b17130f6d494978291df4138de3fdb0b4"
-PINNED_TREE = "3402ab69645bef0ef0f81061222360ebd8d1c838"
+PINNED_COMMIT = "d2005d469aef6a385c134b6914fb6dfa9cff20b2"
+PINNED_TREE = "46e072e9a97afcfaef89f1683b841e521801fb94"
 
 
 def _reject_link(path):

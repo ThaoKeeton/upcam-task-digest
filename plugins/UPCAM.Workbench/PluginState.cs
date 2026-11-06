@@ -13,6 +13,7 @@ internal sealed class PluginState
     internal bool Ready { get; set; }
     internal bool Busy { get; set; }
     internal bool BackgroundActivity { get; set; }
+    internal string ActiveOperation { get; set; } = "";
     internal bool SavedAutoEnabled { get; set; }
     internal string? BindingError { get; set; }
     internal string Status { get; set; } = "Open a page or run a command to start the backend.";
@@ -22,7 +23,12 @@ internal sealed class PluginState
     internal long OperationRevision { get; set; }
     internal string OperationResult { get; set; } = "0 · No operation yet.";
     internal long ScheduleCheckRevision { get; set; }
+    internal bool LastScheduleCheckSucceeded { get; set; }
+    internal string LastScheduleOperation { get; set; } = "";
     internal string ScheduleCheckResult { get; set; } = "0 · 尚未检查已保存的计划。";
+    internal string SchedulerStatus { get; set; } = "主机自动任务尚未启动。";
+    internal bool ResumeOnStartup { get; set; }
+    internal string LastSchedulerError { get; set; } = "";
     internal event EventHandler<bool>? Changed;
 
     internal PluginState(string path) => Current = GetProfile(path);

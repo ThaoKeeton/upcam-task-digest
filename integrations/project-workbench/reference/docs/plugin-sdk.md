@@ -6,6 +6,8 @@
 
 `Workbench.Sdk` 目标为 `net10.0`，不引用 UI。API 版本为 `WorkbenchApi.Version == 1`。入口类型是实现 `IWorkbenchPlugin` 的具体类，具有公共无参数构造函数。
 
+两个 SDK 的包版本为 `0.2.0`，文件版本为 `0.2.0.0`，程序集版本保持 `1.0.0.0`。旧的 API 1 和 `IPluginContext` 不变。可选扩展 `WorkbenchRuntimeServices.Version == 1` 提供后台任务和声明式凭据存储；使用它的插件必须声明 `minimumHostVersion: "0.2.0"`。契约、恢复语义、停止所有权和凭据安全边界见 [运行时服务 v1](runtime-services.md)。
+
 ```csharp
 public interface IWorkbenchPlugin
 {

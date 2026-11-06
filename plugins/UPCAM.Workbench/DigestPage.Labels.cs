@@ -100,7 +100,6 @@ internal sealed partial class DigestPage
         "Completed task/activity pages can be saved as a short-lived DPAPI progress checkpoint. Cancellation retains incomplete progress for up to two hours; resumption re-lists tasks and refreshes changes. This is not a historic snapshot." => "完整读取任务及动态分页后可保存短期 DPAPI 进度。取消后保留未完成进度最多两小时；恢复时重新列举任务并刷新变化。这不是历史快照。",
         "Clearing progress retains settings, credentials, history, delivery ledger and automatic-send authorization. Global startup, tray and updates are managed by Workbench." => "清除进度会保留设置、凭据、历史、防重账本和自动发送授权。全局启动、托盘和更新由 Workbench 管理。",
         "Delivery states 'sending' and 'delivery_unknown' require checking the group and local record. Confirmed and uncertain scheduled deliveries are never replayed automatically." => "sending 或 delivery_unknown 状态需要先核对群消息和本机记录。已确认和结果不明的定时发送不会自动重放。",
-        PluginSession.ActivationNotice => "API 1 会在首次打开页面或运行业务命令后，才启动已保存且已授权的自动计划。Workbench 必须保持运行；语言、主题、托盘、启动和更新由主机管理。",
         _ => text
     };
 }

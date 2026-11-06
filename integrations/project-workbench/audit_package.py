@@ -57,6 +57,9 @@ def audit_package(root: Path) -> dict:
                 or metadata.get("pluginId") != expected_id or plugin.get("id") != expected_id
                 or plugin.get("version") != metadata.get("pluginVersion")
                 or plugin.get("apiVersion") != 1
+                or plugin.get("minimumHostVersion") != "0.2.0"
+                or metadata.get("runtimeServicesVersion") != 1
+                or metadata.get("hostReferenceCommit") != "d2005d469aef6a385c134b6914fb6dfa9cff20b2"
                 or plugin.get("entryAssembly") != "UPCAM.Workbench.dll"
                 or plugin.get("entryType") != "Upcam.Workbench.DigestPlugin"
                 or metadata.get("backendVersion") != "0.4.3"

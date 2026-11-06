@@ -8,18 +8,21 @@ only the selected profile and the existing WorkerService business rules.
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
 import re
 import stat
 import sys
+import threading
 from urllib.parse import parse_qsl, urlsplit
 
 from . import APP_VERSION, RULESET_REVISION
 from .config import DEFAULT_SETTINGS, SettingsError, SettingsStore, atomic_write, validate_settings
-from .preferences import preference_values
-from .secrets import MemorySecretStore
+from .preferences import PREFERENCE_DEFAULTS, preference_values
+from .secrets import INTERNAL_SECRET_FIELDS, SECRET_FIELDS, MemorySecretStore, SecretStoreError
 from .windows_integration import StartupIntegrationError
 from .worker_api import WorkerApiError, WorkerService, _reject_duplicate_json_keys
 
@@ -41,6 +44,10 @@ _PROFILE_ERROR = "Choose an explicit absolute local UPCAM profile without links.
 _HANDSHAKE_ERROR = "The plugin worker handshake is invalid or incompatible."
 _OPERATION_ERROR = "Operation failed; credentials and service responses were not logged."
 _SETTINGS_SIZE_ERROR = "设置内容超出本机配置大小限制；未保存任何更改。"
+_AUTO_AUTHORIZATION_ERROR = "尚未保存启用自动发送；请先在设置中明确开启并保存。"
+_AUTHORIZED_RUN_PAYLOAD_ERROR = "自动运行授权请求格式无效；未采集或发送。"
+_AUTHORIZATION_MISMATCH_ERROR = "自动运行授权已改变；请重新保存设置并明确启动。"
+_SNAPSHOT_WRITE_ERROR = "自动运行期间不能修改已核验的设置或凭据；未保存任何更改。"
 
 
 def _checked_stat(path: Path):
@@ -126,6 +133,22 @@ class _PreferencePreservingSettingsStore:
         return self._store.save(self.validate_for_save(settings))
 
 
+class _SnapshotStore:
+    """Private immutable session values; never overwrite the real profile."""
+
+    def __init__(self, values, error_type):
+        self._values = deepcopy(values)
+        self._error_type = error_type
+
+    def load(self):
+        return deepcopy(self._values)
+
+    def save(self, values):
+        if values != self._values:
+            raise self._error_type(_SNAPSHOT_WRITE_ERROR)
+        return self.load()
+
+
 class PluginWorkerService:
     """Require a versioned handshake before constructing the business service."""
 
@@ -139,8 +162,15 @@ class PluginWorkerService:
         self._handshake_attempted = False
         self._ready = False
         self._shutdown = False
+        self._dispatch_lock = threading.RLock()
 
     def dispatch(self, request):
+        # Stdio is sequential; also protect in-process callers from observing
+        # another operation's temporary immutable core-store facades.
+        with self._dispatch_lock:
+            return self._dispatch(request)
+
+    def _dispatch(self, request):
         if not isinstance(request, dict) or not isinstance(request.get("op"), str) or not isinstance(request.get("payload", {}), dict):
             raise WorkerApiError("Invalid plugin worker request.")
         operation = request["op"]
@@ -201,7 +231,12 @@ class PluginWorkerService:
                 # store repeats this validation on the final core settings.
                 self._service.settings_store.validate_for_save(payload["settings"])
                 request = dict(request, payload=payload)
-            result = self._service.dispatch(request)
+            if operation == "plugin_auto_authorization":
+                result = self._auto_authorization(payload)
+            elif operation == "plugin_run_due_authorized":
+                result = self._run_due_authorized(payload)
+            else:
+                result = self._service.dispatch(request)
             self._shutdown = bool(getattr(self._service, "_shutdown", False))
             secrets.extend(_credential_values(self._service.secret_store.load()))
             _require_secret_free(result, secrets)
@@ -214,6 +249,67 @@ class PluginWorkerService:
             raise WorkerApiError(str(exc)) from None
         except Exception:
             raise WorkerApiError(_OPERATION_ERROR) from None
+
+    def _auto_authorization(self, payload):
+        """Validate saved authorization using only the existing local profile."""
+        self._service._require_empty_payload(payload)
+        settings, credentials = self._validated_authorization_snapshot()
+        return self._authorization_result(settings, credentials)
+
+    def _validated_authorization_snapshot(self):
+        settings = deepcopy(self._service.settings_store.load())
+        if settings["auto_send_enabled"] is not True:
+            raise WorkerApiError(_AUTO_AUTHORIZATION_ERROR)
+        credentials = deepcopy(self._service.secret_store.load())
+        # This existing validator reads the scope proof, model cache, robot
+        # configuration and ledger. It never refreshes models or calls services.
+        self._service._validate_auto_ready(settings, credentials)
+        return settings, credentials
+
+    def _authorization_result(self, settings, credentials):
+        relevant_credentials = {key: credentials.get(key, "") for key in SECRET_FIELDS + INTERNAL_SECRET_FIELDS}
+        credential_fingerprint = hashlib.sha256(json.dumps(
+            relevant_credentials, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            allow_nan=False).encode("utf-8")).hexdigest()
+        authorization = {
+            "schema_version": 1,
+            "data_directory": str(self.data_directory),
+            "application_version": APP_VERSION,
+            "ruleset_revision": RULESET_REVISION,
+            "settings": {key: value for key, value in settings.items() if key not in PREFERENCE_DEFAULTS},
+            "credential_fingerprint": credential_fingerprint,
+        }
+        fingerprint = hashlib.sha256(json.dumps(
+            authorization, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            allow_nan=False).encode("utf-8")).hexdigest()
+        return {
+            "authorized": True,
+            "authorization_fingerprint": fingerprint,
+            "data_directory": str(self.data_directory),
+            "application_version": APP_VERSION,
+            "ruleset_revision": RULESET_REVISION,
+        }
+
+    def _run_due_authorized(self, payload):
+        expected = payload.get("authorization_fingerprint")
+        if (set(payload) != {"authorization_fingerprint"} or not isinstance(expected, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected)):
+            raise WorkerApiError(_AUTHORIZED_RUN_PAYLOAD_ERROR)
+        settings, credentials = self._validated_authorization_snapshot()
+        actual = self._authorization_result(settings, credentials)["authorization_fingerprint"]
+        if not hmac.compare_digest(expected, actual):
+            raise WorkerApiError(_AUTHORIZATION_MISMATCH_ERROR)
+        service = self._service
+        live_settings, live_secrets = service.settings_store, service.secret_store
+        try:
+            # Both _run_due's schedule selection and _run's workflow inputs
+            # must use the same values whose fingerprint was just validated.
+            # History, delivery ledger and collection caches remain canonical.
+            service.settings_store = _SnapshotStore(settings, SettingsError)
+            service.secret_store = _SnapshotStore(credentials, SecretStoreError)
+            return service.dispatch({"op": "run_due", "payload": {}})
+        finally:
+            service.settings_store, service.secret_store = live_settings, live_secrets
 
 
 def _credential_values(credentials):

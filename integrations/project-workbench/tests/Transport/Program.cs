@@ -57,7 +57,7 @@ internal static class Program
             ("a pre-cancelled request closes only its owned session", CancelBeforeRequest),
             ("request cancellation kills without replay and preserves uncertainty", CancelSend),
             ("ordinary requests time out after 30 seconds without replay", RequestDeadline),
-            ("diagnosis and collection-capable save may run longer than 30 seconds", CollectionDeadline),
+            ("diagnosis, save and authorized managed runs may exceed 30 seconds", CollectionDeadline),
             ("dispose interrupts an in-flight operation and never replays", DisposeBusy),
             ("shutdown completes before singleton release and is idempotent", Shutdown),
             ("unresponsive shutdown is bounded and releases after termination", ShutdownDeadline),
@@ -223,6 +223,16 @@ internal static class Program
         Check(client.IsUsable, "A business rejection broke the transport.");
         Exception known = await ExpectFailure(() => client.SendAsync("known_error", null, CancellationToken.None));
         Check(known.Message == "请先填写 Tenant ID 和 Project ID。", "An actionable safe setup message was lost.");
+        foreach (var (operation, expected) in new[]
+        {
+            ("invalid_authorization_error", "自动运行授权请求格式无效；未采集或发送。"),
+            ("changed_authorization_error", "自动运行授权已改变；请重新保存设置并明确启动。"),
+            ("mutated_authorization_error", "自动运行期间不能修改已核验的设置或凭据；未保存任何更改。")
+        })
+        {
+            Exception rejected = await ExpectFailure(() => client.SendAsync(operation, null, CancellationToken.None));
+            Check(rejected.Message == expected && client.IsUsable, "An actionable safe authorization message was lost.");
+        }
         Exception prefixed = await ExpectFailure(() => client.SendAsync("prefixed_error", null, CancellationToken.None));
         Check(!prefixed.ToString().Contains(PrivateMarker) && prefixed.Message != known.Message,
             "An unrecognized error was accepted by a partial allowlist match.");
@@ -354,9 +364,11 @@ internal static class Program
     {
         using var fixture = new Fixture("long_collection");
         await using var client = await fixture.Start();
-        foreach (string operation in new[] { "diagnose", "save" })
+        foreach (string operation in new[] { "diagnose", "save", "plugin_run_due_authorized" })
         {
-            await client.SendAsync(operation, null, CancellationToken.None);
+            JsonObject? payload = operation == "plugin_run_due_authorized"
+                ? new JsonObject { ["authorization_fingerprint"] = new string('a', 64) } : null;
+            await client.SendAsync(operation, payload, CancellationToken.None);
             Check(client.IsUsable, "A collection-capable operation used the ordinary deadline: " + operation);
         }
     }
@@ -483,10 +495,18 @@ internal static class Program
                 await WriteResponse(output, id, new JsonObject());
                 continue;
             }
-            if (operation is "backend_error" or "known_error" or "prefixed_error")
+            if (operation is "backend_error" or "known_error" or "prefixed_error" or
+                "invalid_authorization_error" or "changed_authorization_error" or "mutated_authorization_error")
             {
-                string message = operation == "known_error" ? "请先填写 Tenant ID 和 Project ID。" :
-                    operation == "prefixed_error" ? "请先填写 Tenant ID 和 Project ID。" + PrivateMarker : PrivateMarker;
+                string message = operation switch
+                {
+                    "known_error" => "请先填写 Tenant ID 和 Project ID。",
+                    "prefixed_error" => "请先填写 Tenant ID 和 Project ID。" + PrivateMarker,
+                    "invalid_authorization_error" => "自动运行授权请求格式无效；未采集或发送。",
+                    "changed_authorization_error" => "自动运行授权已改变；请重新保存设置并明确启动。",
+                    "mutated_authorization_error" => "自动运行期间不能修改已核验的设置或凭据；未保存任何更改。",
+                    _ => PrivateMarker
+                };
                 await output.WriteAsync(Encoding.UTF8.GetBytes(new JsonObject
                 { ["id"] = id, ["ok"] = false, ["error"] = message }.ToJsonString() + "\n"));
                 await output.FlushAsync();
@@ -532,7 +552,16 @@ internal static class Program
                         for (int count = 0; count < 4096; count++) await stderr.WriteAsync(block);
                     }
                     await WriteResponse(output, id, new JsonObject()); break;
-                case "long_collection": await Task.Delay(TimeSpan.FromSeconds(31)); await WriteResponse(output, id, new JsonObject()); break;
+                case "long_collection":
+                    if (operation == "plugin_run_due_authorized")
+                    {
+                        JsonObject authorization = request["payload"]!.AsObject();
+                        Check(authorization.Count == 1 && authorization["authorization_fingerprint"]?.GetValue<string>() == new string('a', 64),
+                            "Managed fixture requires its exact synthetic authorization fingerprint.");
+                    }
+                    await Task.Delay(TimeSpan.FromSeconds(31));
+                    await WriteResponse(output, id, new JsonObject());
+                    break;
                 default: await WriteResponse(output, id, request["payload"]!.DeepClone().AsObject()); break;
             }
             await output.FlushAsync();

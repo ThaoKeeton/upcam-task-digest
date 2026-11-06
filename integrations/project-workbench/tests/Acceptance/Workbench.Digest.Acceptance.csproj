@@ -30,5 +30,7 @@
     <!-- Fixture preparation only: seed a second explicit synthetic profile before plugin activation.
          No plugin entry point, page, session or replacement SDK contract is compiled into this host. -->
     <Compile Include="../../../../plugins/UPCAM.Workbench/PluginWorkerClient.cs" Link="FixtureSupport/PluginWorkerClient.cs" />
+    <!-- The actual BCL-only admission policy is exercised with deterministic barriers; no SDK service is replaced. -->
+    <Compile Include="../../../../plugins/UPCAM.Workbench/SchedulerAdmission.cs" Link="PolicySupport/SchedulerAdmission.cs" />
   </ItemGroup>
 </Project>

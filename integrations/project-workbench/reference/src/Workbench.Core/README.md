@@ -4,7 +4,12 @@ SDK and Core target .NET 10 and have no WinUI dependencies. Plugins run as trust
 in-process code. An AssemblyLoadContext controls dependency identity; it is not a
 security sandbox. Disabling removes contributions and cancels cooperative work,
 but does not unload assemblies. Update/remove packages only after process exit,
-then restart the application. Plugin settings are plain JSON, not a secret store.
+then restart the application. Host version defaults to 0.2.0. Plugin settings are
+plain JSON; optional runtime-services v1 supplies supervised tasks and a separate
+declared-key Windows DPAPI CurrentUser secret store. API 1 and SDK assembly
+identity 1.0.0.0 remain compatible; both SDK packages are version 0.2.0.
+See [runtime-services v1](../../docs/runtime-services.md) for the exact host APIs,
+safe diagnostics, resume consent and retained stop ownership.
 
 Create a manager with a writable `PluginsRoot`, a persistent `UserRoot`, the host
 version, and optional `AdditionalDiscoveryRoots` for bundled packages. Startup is

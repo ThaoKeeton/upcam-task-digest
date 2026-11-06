@@ -25,7 +25,13 @@ internal sealed class NativeHost
     {
         _window = window;
         _lifetime = lifetime;
-        _shell = new Grid { RowSpacing = 8, Padding = new Thickness(12) };
+        // Explicit real CI parent theme/backing: RenderTargetBitmap otherwise preserves transparent shell pixels.
+        // This styles the dedicated test host only; plugin production theme inheritance is unchanged.
+        _shell = new Grid
+        {
+            RowSpacing = 8, Padding = new Thickness(12), RequestedTheme = ElementTheme.Light,
+            Background = new SolidColorBrush(Microsoft.UI.Colors.White)
+        };
         _shell.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         _shell.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         _shell.Children.Add(new TextBlock { Text = "UPCAM native acceptance · isolated local fixtures", FontSize = 16 });
@@ -57,7 +63,7 @@ internal sealed class NativeHost
         Require(metadata.GetXamlType(typeof(TabView)) is not null &&
             metadata.GetXamlType("Microsoft.UI.Xaml.Controls.TabView") is not null,
             "Application resources did not resolve native TabView metadata.");
-        Require(NativeProbes.VisibleWindowCount() == 1, "The acceptance process must own exactly one visible native window.");
+        AssertSingleWindow("The acceptance process must own exactly one visible native window.");
     }
 
     internal async Task AttachAsync(FrameworkElement element)
@@ -76,7 +82,7 @@ internal sealed class NativeHost
             await WaitUntilAsync(() => element.XamlRoot is not null && element.ActualWidth > 0 && element.ActualHeight > 0);
         }
         finally { element.Loaded -= OnLoaded; }
-        Require(NativeProbes.VisibleWindowCount() == 1, "Attaching a plugin factory created an additional visible native window.");
+        AssertSingleWindow("Attaching a plugin factory created an additional visible native window.");
     }
 
     internal void Detach()
@@ -108,7 +114,13 @@ internal sealed class NativeHost
             previousContent = content;
             return stable;
         }, "Backend ready status did not converge with the current realized native tab content.");
-        Require(NativeProbes.VisibleWindowCount() == 1, "Plugin activation created an additional visible native window.");
+        AssertSingleWindow("Plugin activation created an additional visible native window.");
+    }
+
+    internal void AssertSingleWindow(string failure)
+    {
+        if (NativeProbes.VisibleWindowCount() != 1)
+            throw new AcceptanceFailure(failure + " " + NativeProbes.VisibleWindowInventory(WinRT.Interop.WindowNative.GetWindowHandle(_window)));
     }
 
     internal async Task SelectTabAsync(FrameworkElement root, string id, int selected)
@@ -305,6 +317,19 @@ internal sealed class NativeHost
         {
             _lifetime.ThrowIfCancellationRequested();
             if (clock.Elapsed >= deadline) throw new AcceptanceFailure("A native readiness, operation, or cleanup predicate timed out.");
+            await Task.Delay(25, _lifetime);
+        }
+        AssertUiThread();
+    }
+
+    internal async Task WaitUntilAsync(Func<Task<bool>> predicate, TimeSpan? timeout = null)
+    {
+        var clock = Stopwatch.StartNew();
+        var deadline = timeout ?? TimeSpan.FromSeconds(35);
+        while (!await predicate())
+        {
+            _lifetime.ThrowIfCancellationRequested();
+            if (clock.Elapsed >= deadline) throw new AcceptanceFailure("An actual runtime service readiness predicate timed out.");
             await Task.Delay(25, _lifetime);
         }
         AssertUiThread();

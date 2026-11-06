@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Workbench.Core;
+using Workbench.Sdk;
 using Workbench.WinUI.Sdk;
 using static Workbench.Digest.Acceptance.NativeHost;
 
@@ -58,6 +59,10 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
         }
 
         await RunAcceptanceAsync();
+        if (!NativeProbes.SingletonExists())
+            await new RuntimeAcceptanceRunner(host, options, report, lifetime).RunAsync();
+        else
+            foreach (var id in RuntimeAcceptanceRunner.ExpectedChecks) report.Skip(id, "The previous backend still owns the singleton.");
         // This independent phase still runs after a synthetic business assertion failed, once cleanup is observed.
         if (options.ProductionPackageDirectory is null)
             foreach (var id in ProductionChecks) report.Skip(id, "No --production-package-directory supplied.");
@@ -216,7 +221,7 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
                 await host.WaitUntilAsync(() => _digestRoot.ActualWidth > 0 && _digestRoot.ActualWidth < originalWidth - 20);
                 Require(Find<TabView>(_digestRoot, "digest-tabs").TabItems.Count == 3,
                     "The digest did not expose its three local native tabs.");
-                Require(NativeProbes.VisibleWindowCount() == 1, "Resizing opened another native window.");
+                host.AssertSingleWindow("Resizing opened another native window.");
                 host.Resize(1280, 940);
                 await host.WaitUntilAsync(() => Math.Abs(_digestRoot.ActualWidth - originalWidth) < 3);
             });
@@ -478,14 +483,18 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
             await host.EditAsync(Find<TextBox>(_settingsRoot, "profile-folder"), second);
             var binding = Path.Combine(store.Root, "settings", AcceptanceId, "settings.json");
             var original = await File.ReadAllTextAsync(binding, lifetime);
+            var oldWorkers = NativeProbes.OwnedWorkers(Path.Combine(store.PluginsRoot, AcceptanceId)).Order().ToArray();
+            Require(oldWorkers.Length > 0, "The binding persistence fixture has no current owned worker to preserve.");
             using (var blocked = new FileStream(binding, FileMode.Open, FileAccess.Read, FileShare.None))
                 await host.InvokeAsync(_settingsRoot, "adopt-profile", expectSuccess: false, operationId: "bind-profile", expectReady: false);
             Require(await File.ReadAllTextAsync(binding, lifetime) == original, "The failed native profile bind changed the saved host binding.");
             AssertProfileBinding(store, defaultProfile);
-            await WaitNoBackendAsync(Path.Combine(store.PluginsRoot, AcceptanceId));
-            Require(Find<TextBlock>(_settingsRoot, "plugin-status").Text != "Ready · CI synthetic data",
-                "A failed binding commit left the newly selected worker ready.");
-            await host.InvokeAsync(_settingsRoot, "open-backend");
+            Require(NativeProbes.OwnedWorkers(Path.Combine(store.PluginsRoot, AcceptanceId)).Order().SequenceEqual(oldWorkers) &&
+                NativeProbes.SingletonExists(), "Failed precommit revocation closed/replaced the old worker or opened a target worker.");
+            var task = store.Manager.GetBackgroundTaskSnapshots(AcceptanceId).Single();
+            Require(task.State == PluginBackgroundTaskState.Stopped && !task.DesiredRunning && !task.ResumeOnStartup,
+                "The failed binding precommit retained running intent or automatic restore.");
+            await AssertLocalStatusAsync(store.Manager, AcceptanceId, started: true);
             await host.SelectTabAsync(_settingsRoot, "settings-tabs", 2);
             Require(Find<TextBox>(_settingsRoot, "tenant-id").Text == defaultDraft,
                 "Failed binding did not restore the previous profile and unsaved document.");
@@ -649,6 +658,10 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
             await host.EditAsync(Find<TextBox>(_settingsRoot, "afternoon-run-at"), future);
             Find<ToggleSwitch>(_settingsRoot, "auto-run").IsOn = true;
             await host.InvokeAsync(_settingsRoot, "save-settings");
+            await host.WaitUntilAsync(() => store.Manager.GetBackgroundTaskSnapshots(AcceptanceId).Single().State == PluginBackgroundTaskState.Running);
+            var managed = store.Manager.GetBackgroundTaskSnapshots(AcceptanceId).Single();
+            Require(managed.Id == "digest-scheduler" && managed.DesiredRunning && !managed.ResumeOnStartup && !managed.RequiresPluginStart,
+                "Explicit synthetic business Save did not start the actual managed task with default-off host resume.");
             using (var document = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(profile, "settings.json"), lifetime)))
             {
                 var settings = document.RootElement;
@@ -698,6 +711,10 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
             await host.SelectTabAsync(_settingsRoot, "settings-tabs", 5);
             Find<ToggleSwitch>(_settingsRoot, "auto-run").IsOn = false;
             await host.InvokeAsync(_settingsRoot, "save-settings");
+            await host.WaitUntilAsync(() => store.Manager.GetBackgroundTaskSnapshots(AcceptanceId).Single().State == PluginBackgroundTaskState.Stopped);
+            Require(!store.Manager.GetBackgroundTaskSnapshots(AcceptanceId).Single().DesiredRunning &&
+                !store.Manager.GetBackgroundTaskSnapshots(AcceptanceId).Single().ResumeOnStartup,
+                "Disabling the fixture automatic grant did not stop/revoke actual managed task intent.");
             using var document = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(profile, "settings.json"), lifetime));
             Require(!document.RootElement.GetProperty("auto_send_enabled").GetBoolean() &&
                 document.RootElement.GetProperty("auto_send_enabled_since_local").GetString() == "",
@@ -841,7 +858,8 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
         using var document = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(package, "plugin.json")));
         var manifest = document.RootElement;
         Require(manifest.GetProperty("id").GetString() == expectedId && manifest.GetProperty("version").GetString() == "0.1.0" &&
-            manifest.GetProperty("apiVersion").GetInt32() == 1 && manifest.GetProperty("entryType").GetString() == "Upcam.Workbench.DigestPlugin",
+            manifest.GetProperty("apiVersion").GetInt32() == 1 && manifest.GetProperty("minimumHostVersion").GetString() == "0.2.0" &&
+            manifest.GetProperty("entryType").GetString() == "Upcam.Workbench.DigestPlugin",
             "The supplied package does not match the expected independent build ID/version/API/entry point.");
         Require(File.Exists(Path.Combine(package, "worker", "UPCAMPluginWorker.exe")), "The package lacks its private plugin worker.");
         var forbidden = new[] { "Workbench.Sdk.dll", "Workbench.Core.dll", "Workbench.WinUI.Sdk.dll", "Microsoft.WinUI.dll",
@@ -918,11 +936,18 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
         if (!File.Exists(file)) return;
         using var document = JsonDocument.Parse(File.ReadAllText(file));
         Require(document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.EnumerateObject().All(property =>
+            property.Name == "schedule-binding-v1" && (property.Value.ValueKind == JsonValueKind.Null || RuntimeBindingMetadata(property.Value)) ||
             property.Name == "profile-directory" && property.Value.ValueKind == JsonValueKind.String &&
             string.Equals(Upcam.Workbench.PluginWorkerClient.CanonicalizeDirectory(property.Value.GetString()!, mustExist: true),
                 Upcam.Workbench.PluginWorkerClient.CanonicalizeDirectory(store.Profile(id), mustExist: true), StringComparison.OrdinalIgnoreCase)),
-            "The host JSON settings contain data beyond the non-secret canonical profile binding.");
+            "The host JSON settings contain data beyond non-secret profile/runtime binding metadata.");
     }
+
+    private static bool RuntimeBindingMetadata(JsonElement binding) => binding.ValueKind == JsonValueKind.Object &&
+        binding.EnumerateObject().Count() == 3 && binding.TryGetProperty("schema", out var schema) && schema.GetInt32() == 1 &&
+        binding.TryGetProperty("profileDirectory", out var path) && path.ValueKind == JsonValueKind.String &&
+        binding.TryGetProperty("proof", out var proof) && proof.ValueKind == JsonValueKind.String && proof.GetString() is { Length: 64 } hash &&
+        hash.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static void AssertCanonicalContinuity(string profile, long expectedHistory, long expectedClaims)
     {
@@ -933,7 +958,7 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
 
     private void SkipRemaining(string reason)
     {
-        foreach (var id in AcceptanceChecks.Concat(ProductionChecks)) report.Skip(id, reason);
+        foreach (var id in AcceptanceChecks.Concat(ProductionChecks).Concat(RuntimeAcceptanceRunner.ExpectedChecks)) report.Skip(id, reason);
     }
 
     private sealed class StoppedPhase : Exception { }

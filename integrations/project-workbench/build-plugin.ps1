@@ -34,7 +34,9 @@ function Write-PackageInventory {
         sourceCommit = $sourceCommit
         backendVersion = '0.4.3'
         protocolVersion = 1
-        hostReferenceCommit = '6565180b17130f6d494978291df4138de3fdb0b4'
+        hostReferenceCommit = 'd2005d469aef6a385c134b6914fb6dfa9cff20b2'
+        minimumHostVersion = '0.2.0'
+        runtimeServicesVersion = 1
         assemblyTargetFramework = 'net10.0-windows10.0.19041.0'
         windowsAppSdk = '1.8.260921001'
         workerExecutable = 'worker/UPCAMPluginWorker.exe'

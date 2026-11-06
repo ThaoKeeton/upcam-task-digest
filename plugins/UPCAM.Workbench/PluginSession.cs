@@ -6,31 +6,33 @@ namespace Upcam.Workbench;
 /// <summary>One profile, one owned backend and one serialized business operation at a time.</summary>
 internal sealed class PluginSession : IAsyncDisposable
 {
-    private readonly IPluginContext _context;
+    private readonly IPluginRuntimeContext _context;
     private readonly string _packageDirectory;
     internal string DefaultProfile { get; }
     private readonly PluginState _state;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly SemaphoreSlim _configurationGate = new(1, 1);
     private readonly CancellationTokenSource _stop;
     private CancellationTokenSource? _sessionLifetime;
     private CancellationTokenSource? _activeOperation;
     private PluginWorkerClient? _worker;
-    private Task? _scheduler;
+    internal ManagedDigestScheduler Scheduler { get; }
     private int _stopping;
 
-    internal PluginSession(IPluginContext context, string packageDirectory, string defaultProfile, PluginState state)
+    internal PluginSession(IPluginRuntimeContext context, string packageDirectory, string defaultProfile, PluginState state)
     {
         _context = context;
         _packageDirectory = packageDirectory;
         DefaultProfile = defaultProfile;
         _state = state;
         _stop = CancellationTokenSource.CreateLinkedTokenSource(context.Lifetime);
+        Scheduler = new ManagedDigestScheduler(context, this, state);
     }
 
     internal Task<bool> ActivateAsync(CancellationToken token = default) => PerformAsync("open-backend", (_, _, _) =>
         Task.FromResult("The local profile is open. " + ActivationNotice), token);
 
-    internal const string ActivationNotice = "API 1 starts saved authorized schedules when the first page or business command opens. The host must remain running; language, theme, tray, startup and updates are controlled by Workbench.";
+    internal const string ActivationNotice = "打开页面只连接本机数据，不启动自动任务。自动任务由 Workbench 0.2 管理；须通过已保存的业务授权，启动恢复须单独明确选择。";
     internal static string ReadyStatus => DigestPlugin.Synthetic ? "Ready · CI synthetic data" : "Ready · local profile";
 
     private async Task EnsureStartedAsync(CancellationToken operationToken)
@@ -41,8 +43,9 @@ internal sealed class PluginSession : IAsyncDisposable
         await CloseWorkerAsync();
         string path;
         lock (_state.Sync) { path = _state.Current.Directory; _state.Ready = false; _state.SavedAutoEnabled = false; }
-        // Retain this linked source until the backend exits; the client owns its lifetime registration.
-        _sessionLifetime = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token, operationToken);
+        // The shared worker belongs only to plugin lifetime. A completed task/user token must never kill a later manual RPC.
+        _sessionLifetime = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
+        using var startupCancellation = operationToken.Register(static value => ((CancellationTokenSource)value!).Cancel(), _sessionLifetime);
         try
         {
             _worker = await PluginWorkerClient.StartAsync(_packageDirectory, path, DigestPlugin.Synthetic, _sessionLifetime.Token);
@@ -59,7 +62,6 @@ internal sealed class PluginSession : IAsyncDisposable
             await CloseWorkerAsync();
             throw;
         }
-        _scheduler ??= SchedulerLoopAsync();
     }
 
     internal Task<bool> PerformAsync(string operation,
@@ -88,6 +90,7 @@ internal sealed class PluginSession : IAsyncDisposable
                 _activeOperation = operationCancellation;
                 _state.Busy = true;
                 _state.BackgroundActivity = background;
+                _state.ActiveOperation = operation;
                 if (!background) _state.Status = "Working · " + operation;
                 else _state.ScheduleCheckResult = $"{_state.ScheduleCheckRevision} · 正在检查已保存的自动计划；可取消当前操作。";
             }
@@ -129,11 +132,16 @@ internal sealed class PluginSession : IAsyncDisposable
                     _activeOperation = null;
                     _state.Busy = false;
                     _state.BackgroundActivity = false;
+                    _state.ActiveOperation = "";
                     _state.Status = _state.Ready ? ReadyStatus : _state.BindingError ?? "工作进程已停止；请重新连接，不会自动重放请求。";
                     if (!background)
                         _state.OperationResult = $"{++_state.OperationRevision} · {operation} · {(succeeded ? "succeeded" : "failed")} · {message}";
                     if (background)
+                    {
+                        _state.LastScheduleCheckSucceeded = succeeded;
+                        _state.LastScheduleOperation = operation;
                         _state.ScheduleCheckResult = $"{++_state.ScheduleCheckRevision} · {DateTime.Now:yyyy-MM-dd HH:mm:ss} · {(succeeded ? "succeeded" : "failed")} · {message}";
+                    }
                 }
                 _gate.Release();
                 _state.Notify(rebuild: !background);
@@ -146,18 +154,115 @@ internal sealed class PluginSession : IAsyncDisposable
         lock (_state.Sync) _activeOperation?.Cancel();
     }
 
-    internal Task<bool> SaveAsync(CancellationToken token = default) => PerformAsync("save-settings", async (worker, profile, cancellation) =>
+    internal async Task CancelCurrentAsync(CancellationToken token = default)
     {
-        JsonObject payload;
-        lock (_state.Sync) payload = profile.Data.SavePayload();
-        JsonObject result = await worker.SendAsync("save", payload, cancellation);
-        lock (_state.Sync)
+        bool managed;
+        lock (_state.Sync) managed = _state.BackgroundActivity && (_state.ActiveOperation is "scheduled-run" or "authorize-scheduler");
+        if (managed)
         {
-            profile.Data.Apply(result);
-            _state.SavedAutoEnabled = profile.Data.Flag("auto_send_enabled");
+            var result = await Scheduler.StopUserAsync(token);
+            RecordForeground("cancel-operation", result.Succeeded, result.Message);
         }
-        return JsonText(result, "status", "Business settings saved; credentials remain protected by current-user DPAPI.");
-    }, token);
+        else
+        {
+            CancelCurrent();
+            var result = await Scheduler.StopUserAsync(token);
+            RecordForeground("cancel-operation", result.Succeeded, result.Message);
+        }
+    }
+
+    internal Task<bool> StartSchedulerAsync(CancellationToken token = default) =>
+        RunRuntimeControlAsync("scheduler-start", Scheduler.StartUserAsync, token);
+    internal Task<bool> StopSchedulerAsync(CancellationToken token = default) =>
+        RunRuntimeControlAsync("scheduler-stop", Scheduler.StopUserAsync, token);
+    internal Task<bool> SetSchedulerResumeAsync(bool enabled, CancellationToken token = default) =>
+        RunRuntimeControlAsync("scheduler-resume", cancellation => Scheduler.SetResumeAsync(enabled, cancellation), token);
+
+    private async Task<bool> RunRuntimeControlAsync(string operation,
+        Func<CancellationToken, Task<PluginTaskOperationResult>> action, CancellationToken token)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token, token);
+        bool entered = false;
+        try
+        {
+            await _configurationGate.WaitAsync(linked.Token); entered = true;
+            var result = await action(linked.Token);
+            RecordForeground(operation, result.Succeeded, result.Message);
+            return result.Succeeded;
+        }
+        catch (OperationCanceledException) { RecordForeground(operation, false, "主机任务操作已取消；请刷新状态核对已保存的运行意图。" ); return false; }
+        catch (Exception error) { RecordForeground(operation, false, SafeControlError(error)); return false; }
+        finally { if (entered) _configurationGate.Release(); }
+    }
+
+    private void RecordForeground(string operation, bool succeeded, string message)
+    {
+        lock (_state.Sync) _state.OperationResult = $"{++_state.OperationRevision} · {operation} · {(succeeded ? "succeeded" : "failed")} · {message}";
+        _state.Notify(false);
+    }
+
+    private static string SafeControlError(Exception error) => error is InvalidOperationException ? error.Message :
+        "主机任务 / 安全绑定操作未完成；请检查本机状态目录和安全凭据存储，再刷新任务状态。业务数据没有迁移。";
+
+    private async Task<bool> MutateBusinessAsync(bool revokeResume, Func<Task<bool>> action, CancellationToken token)
+    {
+        using var mutation = Scheduler.BeginConfigurationChange();
+        try
+        {
+            await Scheduler.PrepareProfileOrSettingsChangeAsync(revokeResume, token);
+            return await action();
+        }
+        finally { await Scheduler.FinishConfigurationChangeAsync(revokeResume, _stop.Token); }
+    }
+
+    internal async Task<bool> SaveAsync(CancellationToken token = default)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token, token);
+        token = linked.Token;
+        await _configurationGate.WaitAsync(token);
+        try
+        {
+            bool requestedAuto;
+            lock (_state.Sync) requestedAuto = _state.Current.Data.Flag("auto_send_enabled");
+            bool saved = await MutateBusinessAsync(!requestedAuto, () => PerformAsync("save-settings", async (worker, profile, cancellation) =>
+            {
+                JsonObject payload;
+                lock (_state.Sync) payload = profile.Data.SavePayload();
+                JsonObject result = await worker.SendAsync("save", payload, cancellation);
+                lock (_state.Sync)
+                {
+                    profile.Data.Apply(result);
+                    _state.SavedAutoEnabled = profile.Data.Flag("auto_send_enabled");
+                }
+                return JsonText(result, "status", "Business settings saved; credentials remain protected by current-user DPAPI.");
+            }, token), token);
+            if (!saved) return false;
+            bool auto;
+            lock (_state.Sync) auto = _state.SavedAutoEnabled;
+            PluginTaskOperationResult task = auto ? await Scheduler.StartUserAsync(token) : await Scheduler.SetResumeAsync(false, token);
+            if (!task.Succeeded) { RecordForeground("save-settings", false, "业务设置已保存，但主机自动任务 / 恢复偏好未完成。" + task.Message); return false; }
+            return true;
+        }
+        catch (OperationCanceledException) { RecordForeground("save-settings", false, "保存操作已取消；请核对本机设置和主机停止意图，未自动重试。" ); return false; }
+        catch (Exception error) { RecordForeground("save-settings", false, SafeControlError(error)); return false; }
+        finally { _configurationGate.Release(); }
+    }
+
+    internal async Task<bool> ClearCredentialsAsync(Func<ProfileDraft, JsonObject?> payload,
+        Action<ProfileDraft, JsonObject> apply, CancellationToken token = default)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token, token);
+        token = linked.Token;
+        await _configurationGate.WaitAsync(token);
+        try
+        {
+            return await MutateBusinessAsync(true,
+                () => CallAsync("clear-credentials", "clear_credentials", payload, apply, token: token), token);
+        }
+        catch (OperationCanceledException) { RecordForeground("clear-credentials", false, "清除操作已取消；请核对当前凭据和自动任务状态。" ); return false; }
+        catch (Exception error) { RecordForeground("clear-credentials", false, SafeControlError(error)); return false; }
+        finally { _configurationGate.Release(); }
+    }
 
     internal Task<bool> PreviewSampleAsync(CancellationToken token = default) => PerformAsync("preview-sample", async (worker, profile, cancellation) =>
     {
@@ -191,6 +296,8 @@ internal sealed class PluginSession : IAsyncDisposable
 
     internal async Task<bool> SwitchProfileAsync(string requestedPath, bool adopt, CancellationToken token = default)
     {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token, token);
+        token = linked.Token;
         // Validation and consent are local; no secret/profile data is copied or converted.
         string canonical;
         try { canonical = ProfileBinding.Canonicalize(requestedPath, requireExistingProfile: adopt); }
@@ -201,7 +308,10 @@ internal sealed class PluginSession : IAsyncDisposable
             _state.Notify(false);
             return false;
         }
-        return await PerformCoreAsync("bind-profile", async (_, _, cancellation) =>
+        await _configurationGate.WaitAsync(token);
+        try
+        {
+        return await MutateBusinessAsync(true, () => PerformCoreAsync("bind-profile", async (_, _, cancellation) =>
         {
             string previous;
             string? previousError;
@@ -216,7 +326,7 @@ internal sealed class PluginSession : IAsyncDisposable
             }
             try
             {
-                // Initialize locally, commit only the binding, then allow the scheduler to observe it.
+                // Initialize locally and commit only the path. A profile change never starts the host task.
                 await EnsureStartedAsync(cancellation);
                 await _context.Settings.SetAsync(ProfileBinding.SettingsKey, canonical, cancellation);
                 lock (_state.Sync) _state.AdoptionPath = canonical;
@@ -234,37 +344,11 @@ internal sealed class PluginSession : IAsyncDisposable
                 throw;
             }
             return "Bound to the same original profile and delivery ledger. Per-profile unsaved edits are retained for this session.";
-        }, token, requireActivation: false, wait: true);
-    }
-
-    private async Task SchedulerLoopAsync()
-    {
-        try
-        {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
-            while (await timer.WaitForNextTickAsync(_stop.Token))
-            {
-                bool check;
-                lock (_state.Sync) check = _state.Ready && _state.SavedAutoEnabled && !_state.Busy;
-                if (!check) continue;
-                await PerformAsync("scheduled-run", async (worker, profile, cancellation) =>
-                {
-                    JsonObject result = await worker.SendAsync("run_due", null, cancellation);
-                    if (result["events"] is JsonArray events && events.Count > 0)
-                    {
-                        var history = await worker.SendAsync("history", null, cancellation);
-                        lock (_state.Sync)
-                        {
-                            profile.Data.Output = string.Join("\n", events.Select(x => JsonText(x, "message")));
-                            profile.Data.History = history["runs"]?.DeepClone().AsArray() ?? new JsonArray();
-                        }
-                        return "已检查保存的自动计划；请在本机运行记录中核对发送状态。";
-                    }
-                    return "已检查保存的自动计划；本次没有启动到期任务。";
-                }, _stop.Token, requireActivation: false, wait: false, background: true);
-            }
+        }, token, requireActivation: false, wait: true), token);
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) { RecordForeground("bind-profile", false, "目录切换已取消；请核对原目录和主机任务状态。" ); return false; }
+        catch (Exception error) { RecordForeground("bind-profile", false, SafeControlError(error)); return false; }
+        finally { _configurationGate.Release(); }
     }
 
     private async Task CloseWorkerAsync()
@@ -291,7 +375,8 @@ internal sealed class PluginSession : IAsyncDisposable
             lock (_state.Sync) { _state.Ready = false; _state.SavedAutoEnabled = false; }
         }
         finally { _gate.Release(); }
-        if (_scheduler is not null) await _scheduler;
+        if (_context.StopReason is not PluginStopReason.HostShutdown)
+            await Scheduler.ClearBindingAsync(CancellationToken.None);
         _state.Notify(false);
     }
 

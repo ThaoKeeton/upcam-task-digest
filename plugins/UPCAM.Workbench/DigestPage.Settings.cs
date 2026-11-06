@@ -145,7 +145,7 @@ internal sealed partial class DigestPage
                 value => _state.EditDraft(profile, p => p.ClearCredentialsConfirmed = value)),
             ActionButton("Clear saved service credentials", "clear-credentials", async () =>
             {
-                await _session.CallAsync("clear-credentials", "clear_credentials", p =>
+                await _session.ClearCredentialsAsync(p =>
                 {
                     if (!p.ClearCredentialsConfirmed) throw new InvalidOperationException("Confirm clearing saved service credentials first.");
                     return null;
@@ -302,20 +302,43 @@ internal sealed partial class DigestPage
     private FrameworkElement BuildSchedule(ProfileDraft profile)
     {
         var toggle = Identify(new ToggleSwitch { Header = "自动采集、校验、摘要并发送", IsOn = profile.Data.Flag("auto_send_enabled"),
-            OnContent = "保存后开启", OffContent = "已关闭" }, "auto-run", "Automatic digest sending");
+            OnContent = "保存后开启", OffContent = "已关闭", IsEnabled = _state.Ready }, "auto-run", "Automatic digest sending");
         toggle.Toggled += (_, _) => _state.Edit(profile, data => data.Set("auto_send_enabled", toggle.IsOn));
         var limit = Identify(new NumberBox { Header = "每批采集任务数（1–700）", Minimum = 1, Maximum = 700,
-            Value = profile.Data.Number("max_tasks_per_run", 300), SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact }, "task-limit", "Tasks per collection batch");
+            Value = profile.Data.Number("max_tasks_per_run", 300), IsEnabled = _state.Ready,
+            SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact }, "task-limit", "Tasks per collection batch");
         limit.ValueChanged += (_, _) =>
         {
             if (!double.IsNaN(limit.Value)) _state.Edit(profile, data => data.Set("max_tasks_per_run", (int)limit.Value));
         };
-        FrameworkElement Slot(string name, string prefix) => Column(Paragraph(name, 18),
+        FrameworkElement Slot(string name, string prefix)
+        {
+            var panel = Column(Paragraph(name, 18),
             SettingText(profile, "Run at (HH:MM local)", prefix + "_run_at", prefix + "-run-at"),
             SettingText(profile, prefix == "morning" ? "Range starts on previous day (HH:MM)" : "Range starts (HH:MM)", prefix + "_start_at", prefix + "-start-at"),
             SettingText(profile, prefix == "morning" ? "Range ends on current day (HH:MM)" : "Range ends (HH:MM)", prefix + "_end_at", prefix + "-end-at"));
+            panel.IsEnabled = _state.Ready;
+            return panel;
+        }
+        var resume = Identify(new ToggleSwitch { Header = "在 Workbench 启动时恢复此自动任务", IsOn = _state.ResumeOnStartup,
+            OnContent = "已明确选择恢复", OffContent = "默认不恢复" }, "scheduler-resume", "Resume managed digest scheduler on host startup");
+        _resumeToggle = resume;
+        resume.Toggled += async (_, _) =>
+        {
+            if (_refreshingResume) return;
+            try { await _session.SetSchedulerResumeAsync(resume.IsOn); }
+            catch (OperationCanceledException) { }
+            catch { ShowLocalFailure(); }
+        };
         return LocalScroll(Column(toggle,
-            Paragraph("Saving explicitly authorizes the selected automatic schedule only after credentials, scope and mappings validate. Merely opening or binding a profile never turns authorization on. Existing saved authorization may resume after first activation. The computer and Workbench must remain running, signed in, connected and awake."),
+            Paragraph("保存业务自动发送授权后可启动主机自动任务；只打开页面或选择目录不会启动。启动恢复是独立偏好，默认关闭，只有在此明确选择后才会启用。电脑和 Workbench 需保持运行、已登录、联网且未休眠。"),
+            Toolbar(
+                ActionButton("启动主机自动任务", "scheduler-start", async () => { await _session.StartSchedulerAsync(); }),
+                ActionButton("停止主机自动任务", "scheduler-stop", async () => { await _session.StopSchedulerAsync(); }),
+                ActionButton("刷新主机任务状态", "scheduler-refresh", () => { _session.Scheduler.RefreshSnapshot(); return Task.CompletedTask; })),
+            resume,
+            Paragraph("恢复还要求已有运行意图、原目录和业务设置 / 凭据指纹一致。明确停止会清除运行意图；保存关闭自动发送、清除凭据或切换目录还会撤销恢复偏好及旧绑定。"),
+            Paragraph("主机安全凭据服务只保存插件生成的 32 字节恢复校验密钥。Teambition、OpenAI 和钉钉密钥仍只使用原数据目录的 Windows 用户 DPAPI，不复制、迁移或双写，独立版回退继续使用原数据。"),
             Paragraph("Only existing core recovery rules apply: at most the last 24 hours, during the saved authorization period, with no existing local run record. An uncertain or confirmed delivery is not automatically retried."),
             Slot("Morning digest", "morning"), Slot("Afternoon digest", "afternoon"), limit,
             Paragraph("A batch defaults to 300 tasks; this is not a project limit. A complete run supports up to 10,000 currently readable tasks, 50,000 requests, 1,000,000 returned records, 512 MiB responses, 128 MiB retained data and two hours including checkpoint age. Up to three source verification rounds run within these budgets. Exceeding a budget blocks summary and sending rather than truncating."),

@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Keep standalone APP_VERSION 0.4.3, existing worker entry and project behavior.
-- Do not modify platform or DingTalk repositories; reference commit `6565180b17130f6d494978291df4138de3fdb0b4` is immutable and source-hash verified.
+- Do not modify platform or DingTalk repositories; the initial API 1 reference is retained in history. Task 5 uses immutable, source-hash-verified runtime commit `d2005d469aef6a385c134b6914fb6dfa9cff20b2`.
 - No real service calls, keys or sends; synthetic profiles only in development/CI.
 - Manifest `com.upcam.task-digest`, plugin 0.1.0, protocol 1, API 1, .NET 10, Windows App SDK 1.8.260921001.
 - No automatic authorization expansion, copied delivery ledger, nested window, copied host framework or secret in host settings/logs.
@@ -34,10 +34,10 @@
 
 **Interfaces:** the exact CLI/JSON handshake in the spec; business operations delegate to `WorkerService` with an explicit profile and no startup mutation.
 
-- [ ] Write and run failing tests for missing/relative/link profiles, required handshake, version mismatch, secret-safe responses, forbidden standalone operations and preference-preserving saves.
-- [ ] Implement bounded adapter and explicit synthetic service injection; retain unchanged existing entry.
-- [ ] Verify parity with standalone-core sample, no-dynamic OpenAI zero calls, schedule/history continuity, interrupted send recovery and no permission expansion.
-- [ ] Run focused tests and submit scoped review report.
+- [x] Write and run failing tests for missing/relative/link profiles, required handshake, version mismatch, secret-safe responses, forbidden standalone operations and preference-preserving saves.
+- [x] Implement bounded adapter and explicit synthetic service injection; retain unchanged existing entry.
+- [x] Verify parity with standalone-core sample, no-dynamic OpenAI zero calls, schedule/history continuity, interrupted send recovery and no permission expansion.
+- [x] Run focused tests and submit scoped review report.
 
 ### Task 2: Supervised process transport
 
@@ -45,10 +45,10 @@
 
 **Interfaces:** exact `StartAsync`, `SendAsync`, `DisposeAsync` in the spec; package relative worker `worker/UPCAMPluginWorker.exe`.
 
-- [ ] Write failing tests for bad handshake, UTF-8/size/correlation, occupied standalone singleton and path containment.
-- [ ] Implement serialized stdio, fixed safe errors, deadlines, cancel-to-kill, owned Job Object and singleton.
-- [ ] Verify timeout/cancel/no replay, descendant cleanup on host death, space paths, release after shutdown and send-result uncertainty recovery.
-- [ ] Submit scoped review report; do not change standalone transport.
+- [x] Write failing tests for bad handshake, UTF-8/size/correlation, occupied standalone singleton and path containment.
+- [x] Implement serialized stdio, fixed safe errors, deadlines, cancel-to-kill, owned Job Object and singleton.
+- [x] Verify timeout/cancel/no replay, descendant cleanup on host death, space paths, release after shutdown and send-result uncertainty recovery.
+- [x] Submit scoped review report; do not change standalone transport. Runtime-operation deadline/error extensions require the new Windows rerun.
 
 ### Task 3: Native plugin and business pages
 
@@ -70,3 +70,13 @@
 - [ ] Run actual SDK/Core install/trust/enable/view/command/disable/restart and native UI acceptance on Windows with synthetic profiles; collect report/screenshots.
 - [ ] Run full Python suite; review all changes independently, fix material findings, rerun affected validation.
 - [ ] Recheck platform branch/API drift and remote UPCAM main; publish only tested source via authorized PR and provide plugin artifact, rollback instructions and exact remaining platform gaps.
+
+### Task 5: Implemented host 0.2 runtime alignment
+
+**Spec:** `docs/superpowers/specs/2026-11-06-workbench-runtime.md` supersedes the earlier first-page scheduler design.
+
+- [x] Verify/materialize actual SDK/Core at d2005d469aef6a385c134b6914fb6dfa9cff20b2 with exact source Git blobs; preserve the tested API 1 checkpoint in history.
+- [x] Add local-only `plugin_auto_authorization` proof and atomic `plugin_run_due_authorized` snapshot operations, synthetic rejection/mutation/fingerprint/no-network tests and scoped review.
+- [x] Register the real managed background task, implement explicit native start/stop/resume controls, generated SDK-secret HMAC binding and restore checks; remove independent scheduling from page activation. Scoped source re-review closed all R1–R4; Windows evidence remains the next item.
+- [x] Preserve the canonical service-key DPAPI store and all standalone 0.4.3 behavior; no silent service-key migration/dual write.
+- [ ] Extend real native install/lifecycle tests for managed background registration/restoration/revocation with no page required; rerun Windows package, actual complete-host smoke and review.

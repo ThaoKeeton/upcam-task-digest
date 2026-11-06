@@ -25,8 +25,8 @@ class WorkbenchReferenceTests(unittest.TestCase):
     def test_exact_platform_source_blobs_and_sdk_versions(self):
         verifier = load_script("verify_reference")
         result = verifier.verify_reference(INTEGRATION / "reference")
-        self.assertEqual(result["commit"], "6565180b17130f6d494978291df4138de3fdb0b4")
-        self.assertEqual(result["verified_files"], 35)
+        self.assertEqual(result["commit"], "d2005d469aef6a385c134b6914fb6dfa9cff20b2")
+        self.assertEqual(result["verified_files"], 42)
 
     def test_source_tampering_is_rejected(self):
         verifier = load_script("verify_reference")
@@ -48,7 +48,7 @@ class WorkbenchReferenceTests(unittest.TestCase):
             generated = reference / "src/Workbench.Sdk/obj/Release/Generated.cs"
             generated.parent.mkdir(parents=True)
             generated.write_text("// normal generated build output")
-            self.assertEqual(verifier.verify_reference(reference)["verified_files"], 35)
+            self.assertEqual(verifier.verify_reference(reference)["verified_files"], 42)
             added = reference / "src/Workbench.Sdk/Unlisted.cs"
             added.write_text("// not part of the pinned upstream tree")
             with self.assertRaises(verifier.ReferenceError):
@@ -119,6 +119,7 @@ class WorkbenchDistributionTests(unittest.TestCase):
             "worker/UPCAMPluginWorker.exe": b"synthetic worker placeholder, not executable",
             "plugin.json": json.dumps({
                 "id": "com.upcam.task-digest", "version": "0.1.0", "apiVersion": 1,
+                "minimumHostVersion": "0.2.0",
                 "entryAssembly": "UPCAM.Workbench.dll", "entryType": "Upcam.Workbench.DigestPlugin",
             }).encode(),
         }
@@ -129,7 +130,8 @@ class WorkbenchDistributionTests(unittest.TestCase):
         metadata = {"schemaVersion": 1, "pluginId": "com.upcam.task-digest",
                     "pluginVersion": "0.1.0", "backendVersion": "0.4.3",
                     "protocolVersion": 1, "syntheticAcceptance": False,
-                    "hostReferenceCommit": "6565180b17130f6d494978291df4138de3fdb0b4",
+                    "hostReferenceCommit": "d2005d469aef6a385c134b6914fb6dfa9cff20b2",
+                    "runtimeServicesVersion": 1,
                     "windowsAppSdk": "1.8.260921001",
                     "files": [{"path": name, "bytes": len(data),
                                "sha256": hashlib.sha256(data).hexdigest()}

@@ -38,7 +38,7 @@ internal sealed class OwnedStore : IAsyncDisposable
             {
                 PluginsRoot = PluginsRoot,
                 UserRoot = Root,
-                HostVersion = new Version(0, 1, 0),
+                HostVersion = new Version(0, 2, 0),
                 // Same additional shared identities as the unmodified platform native host.
                 SharedAssemblies = [typeof(WinUiView).Assembly, typeof(FrameworkElement).Assembly,
                     typeof(WinRT.ComWrappersSupport).Assembly, typeof(Windows.Foundation.IAsyncAction).Assembly],
@@ -60,8 +60,10 @@ internal sealed class OwnedStore : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        try { await Manager.DisposeAsync(); }
-        finally { _lease?.Dispose(); _lease = null; }
+        // Runtime 0.2 retains known pending work. Keep the store lease if shutdown reports that it is still owned.
+        await Manager.DisposeAsync();
+        _lease?.Dispose();
+        _lease = null;
         // Preserve only this run's synthetic artifacts for diagnosis. Never enumerate normal AppData.
     }
 

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace Workbench.Digest.Acceptance;
 
@@ -57,6 +58,24 @@ internal static class NativeProbes
         return count;
     }
 
+    internal static string VisibleWindowInventory(nint mainWindow)
+    {
+        var windows = new List<string>();
+        EnumWindows((window, _) =>
+        {
+            GetWindowThreadProcessId(window, out var processId);
+            if (processId != Environment.ProcessId || !IsWindowVisible(window)) return true;
+            if (windows.Count >= 16) return true;
+            var name = new StringBuilder(128);
+            GetClassName(window, name, name.Capacity);
+            var safeClass = new string(name.ToString().Where(character => !char.IsControl(character)).Take(127).ToArray());
+            var owner = GetWindow(window, 4); // GW_OWNER. No window title or UI content is read.
+            windows.Add($"hwnd=0x{window:X};class={safeClass};owner=0x{owner:X};main={(window == mainWindow ? 1 : 0)};ownerIsMain={(owner == mainWindow ? 1 : 0)};style=0x{GetWindowLongPtr(window, -16):X};exstyle=0x{GetWindowLongPtr(window, -20):X};pid={processId}");
+            return true;
+        }, nint.Zero);
+        return "Visible native window inventory (bounded, no titles/text): " + string.Join(" | ", windows);
+    }
+
     /// <summary>Only fixed aggregate queries against this run's own databases; never report row bodies or identities.</summary>
     internal static long SqlCount(string path, string sql)
     {
@@ -96,6 +115,12 @@ internal static class NativeProbes
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsWindowVisible(nint window);
+    [DllImport("user32.dll", EntryPoint = "GetClassNameW", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(nint window, StringBuilder className, int count);
+    [DllImport("user32.dll")]
+    private static extern nint GetWindow(nint window, uint command);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    private static extern nint GetWindowLongPtr(nint window, int index);
 
     [DllImport("winsqlite3.dll", EntryPoint = "sqlite3_open_v2", CallingConvention = CallingConvention.Cdecl)]
     private static extern int SqliteOpen([MarshalAs(UnmanagedType.LPUTF8Str)] string path, out nint database, int flags, nint vfs);

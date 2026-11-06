@@ -24,10 +24,13 @@ results for an existing profile, a missing descendant profile and package paths;
 it also rejects a handshake for a different directory. The acceptance volume
 must expose an actual 8.3 alias (as the Windows runner's temporary path does).
 The ordinary deadline test takes about 30 seconds and the collection test runs
-both `diagnose` and `save` for 31 seconds each; the whole suite normally takes
-a little under two minutes.
+`diagnose`, `save` and `plugin_run_due_authorized` for 31 seconds each; the whole
+suite normally takes roughly two to three minutes. The managed-run fixture
+requires its exact synthetic authorization fingerprint and never invokes a
+service or the real sending adapter.
 
 The worker fixture exercises the transport boundary. It does not replace the
 separate bundled Python worker tests or actual SDK/Core and WinUI acceptance.
-The collection test proves that `diagnose` and collection-capable `save` survive the ordinary 30 second limit;
+The collection test proves that `diagnose`, collection-capable `save` and the
+authorized managed run survive the ordinary 30 second limit;
 the 125 minute ceiling is deliberately not waited out during CI.
