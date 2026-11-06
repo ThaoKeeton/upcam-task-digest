@@ -161,6 +161,49 @@ jobs:
           }
       - name: Recheck immutable host source after native build
         run: python integrations/project-workbench/verify_reference.py
+      - name: Record verified synthetic package handoff
+        shell: pwsh
+        env:
+          SOURCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path (Get-Location) 'dist/workbench-plugin'
+          $fileName = 'UPCAMTaskDigest-workbench-acceptance-0.1.0-win-x64.zip'
+          $archive = Join-Path $root $fileName
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $declaredHash = ((Get-Content -LiteralPath ($archive + '.sha256') -Raw).Trim() -split '\s+')[0]
+          if ($declaredHash -cne $hash) { throw 'Acceptance archive checksum does not match.' }
+          $metadata = Get-Content -LiteralPath (Join-Path $root 'packages/com.upcam.task-digest.acceptance/plugin-package.json') -Raw | ConvertFrom-Json
+          if ($metadata.pluginId -cne 'com.upcam.task-digest.acceptance' -or $metadata.syntheticAcceptance -ne $true) {
+            throw 'Acceptance artifact identity or synthetic build marker does not match.'
+          }
+          $buildCommit = (& git rev-parse HEAD).Trim()
+          $sourceTree = (& git rev-parse 'HEAD^{tree}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $metadata.sourceCommit -cne $buildCommit -or
+              $buildCommit -cnotmatch '^[0-9a-f]{40}$' -or $sourceTree -cnotmatch '^[0-9a-f]{40}$' -or
+              $env:SOURCE_HEAD_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'Cannot bind the artifact to the tested source.' }
+          $handoff = [ordered]@{
+            schemaVersion = 1
+            pluginId = $metadata.pluginId
+            pluginVersion = $metadata.pluginVersion
+            syntheticAcceptance = $true
+            fileName = $fileName
+            fileBytes = (Get-Item -LiteralPath $archive).Length
+            sha256 = $hash
+            buildCommit = $buildCommit
+            sourceHeadCommit = $env:SOURCE_HEAD_SHA
+            sourceTree = $sourceTree
+            backendVersion = $metadata.backendVersion
+            hostReferenceCommit = $metadata.hostReferenceCommit
+            minimumHostVersion = $metadata.minimumHostVersion
+            apiVersion = 1
+            runtimeServicesVersion = $metadata.runtimeServicesVersion
+            windowsAppSdk = $metadata.windowsAppSdk
+            publisherSignatureVerified = $false
+          }
+          $json = $handoff | ConvertTo-Json
+          $json | Set-Content -LiteralPath (Join-Path $root 'acceptance-handoff.json') -Encoding utf8NoBOM
+          Write-Output $json
       - uses: actions/upload-artifact@v4
         if: success()
         with:
@@ -168,6 +211,17 @@ jobs:
           path: |
             dist/workbench-plugin/UPCAMTaskDigest-workbench-production-0.1.0-win-x64.zip
             dist/workbench-plugin/UPCAMTaskDigest-workbench-production-0.1.0-win-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: UPCAMTaskDigest-workbench-acceptance-0.1.0-windows
+          path: |
+            dist/workbench-plugin/UPCAMTaskDigest-workbench-acceptance-0.1.0-win-x64.zip
+            dist/workbench-plugin/UPCAMTaskDigest-workbench-acceptance-0.1.0-win-x64.zip.sha256
+            dist/workbench-plugin/acceptance-handoff.json
+            dist/workbench-plugin/ACCEPTANCE.zh-CN.md
           if-no-files-found: error
           retention-days: 14
       - uses: actions/upload-artifact@v4

@@ -100,6 +100,9 @@ try {
         '--workpath', (Join-Path $repo 'build/workbench-worker'),
         '--specpath', (Join-Path $repo 'build'), (Join-Path $repo 'plugin_worker_entry.py'))
     Build-Package -Id 'com.upcam.task-digest' -Synthetic $false
-    if ($BuildAcceptance) { Build-Package -Id 'com.upcam.task-digest.acceptance' -Synthetic $true }
+    if ($BuildAcceptance) {
+        Build-Package -Id 'com.upcam.task-digest.acceptance' -Synthetic $true
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'ACCEPTANCE.zh-CN.md') -Destination $outputRoot
+    }
 }
 finally { Pop-Location }
