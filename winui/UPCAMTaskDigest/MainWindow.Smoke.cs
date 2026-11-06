@@ -517,12 +517,17 @@ public sealed partial class MainWindow
             "Private update source without token is not mislabeled as current");
         await WaitForAsync(() => Find<PasswordBox>("update-token") is not null);
         Find<PasswordBox>("update-token")!.Password = "github_pat_ci_synthetic-not-real";
+        Assert(_state.UpdateTokenDraft == "github_pat_ci_synthetic-not-real",
+            "Update token edits reach the current draft synchronously before save");
         Invoke(SaveButton);
         await WaitForAsync(() => !_busy);
+        Assert(_state.SecretPresence["github_update_token"]?.GetValue<bool>() == true && _state.UpdateTokenDraft.Length == 0,
+            "Immediate native save persists the update credential and clears only its input draft");
         await WaitForAsync(() => Find<Button>("update-check") is not null);
         Invoke(Find<Button>("update-check")!);
         await WaitForAsync(() => !_busy);
-        Assert(Value(_state.UpdateState, "status") == "available", "Native update check uses only the synthetic fixed release");
+        Assert(Value(_state.UpdateState, "status") == "available",
+            "Native update check uses only the synthetic fixed release; observed status: " + Value(_state.UpdateState, "status"));
         await WaitForAsync(() => Find<Button>("update-download")?.IsEnabled == true);
         Invoke(Find<Button>("update-download")!);
         await WaitForAsync(() => !_busy);

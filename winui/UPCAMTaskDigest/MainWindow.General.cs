@@ -74,10 +74,12 @@ public sealed partial class MainWindow
             PlaceholderText = UiStrings.T(_state.ClearUpdateToken ? "保存后清除" :
                 _state.SecretPresence["github_update_token"]?.GetValue<bool>() == true ? "本机已加密保存；留空保留" : "仅需本仓库 Contents: Read 权限")
         }, "update-token");
-        token.PasswordChanged += (_, _) =>
+        // The routed PasswordChanged event may be deferred past a save/rebuild.
+        // Track the effective dependency-property value before a save can run.
+        token.RegisterPropertyChangedCallback(PasswordBox.PasswordProperty, (_, _) =>
         {
             if (ReferenceEquals(snapshot, _state.GeneralPreferences)) _state.UpdateTokenDraft = token.Password;
-        };
+        });
         string state = Value(_state.UpdateState, "status", "not_checked");
         string message = Value(_state.UpdateState, "message", "尚未检查更新。当前仅使用本仓库正式稳定发布。");
         var download = ActionButton("下载并校验更新", "update-download", async () =>
