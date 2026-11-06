@@ -453,7 +453,7 @@ public sealed partial class MainWindow
         await WaitForAsync(() => RootGrid.ActualTheme == ElementTheme.Light);
         Assert(AppWindow.TitleBar.ButtonForegroundColor == Microsoft.UI.Colors.Black,
             "Light theme gives caption buttons a visible foreground");
-        var navigationPane = FindIn<SplitView>(Navigation, view => view.Name == "RootSplitView");
+        var navigationPane = FindIn<SplitView>(Navigation, view => view is FrameworkElement { Name: "RootSplitView" });
         Assert(RootGrid.Background is SolidColorBrush lightCanvas && lightCanvas.Color.R > 180 &&
             navigationPane?.PaneBackground is SolidColorBrush { Color.A: 0 },
             "Light theme provides opaque readable navigation and page backgrounds");
@@ -620,15 +620,9 @@ public sealed partial class MainWindow
     private async Task CaptureAsync(string path)
     {
         var bitmap = new RenderTargetBitmap();
-        // System Mica is outside the XAML visual tree. Use a neutral dark base
-        // for the exported XAML snapshot so translucent brushes remain readable.
-        Brush? background = RootGrid.Background;
-        try
-        {
-            RootGrid.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 32, 32, 32));
-            await bitmap.RenderAsync(RootGrid);
-        }
-        finally { RootGrid.Background = background; }
+        // RootGrid has an opaque theme brush. Capture the actual selected theme
+        // without substituting a dark canvas beneath light interface controls.
+        await bitmap.RenderAsync(RootGrid);
         var pixels = await bitmap.GetPixelsAsync();
         using var reader = DataReader.FromBuffer(pixels);
         byte[] bytes = new byte[pixels.Length];
