@@ -18,12 +18,13 @@ from automated_digest import collection_validation_message, diagnose_automatic_s
 from upcam_app.diagnostic_export import safe_structure_export
 from render_digest import render_digest
 from runtime_mappings import validate_mappings
-from teambition_readonly import Client, CollectionError
+from teambition_readonly import CollectionError
 from upcam_app import APP_NAME, APP_VERSION, OPENAI_MODEL, OPENAI_REASONING_EFFORT, RULESET_REVISION
 from upcam_app.config import (
-    DEFAULT_SETTINGS, SCHEDULE_RECOVERY_WINDOW, SettingsError, SettingsStore, collection_client_limits, parse_manual_window,
+    DEFAULT_SETTINGS, SCHEDULE_RECOVERY_WINDOW, SettingsError, SettingsStore, parse_manual_window,
     recoverable_schedule_occurrences, runtime_config, scheduled_window, user_data_dir, validate_settings,
 )
+from upcam_app.collection_runtime import make_collection_client
 from upcam_app.history import HistoryError, HistoryStore
 from upcam_app.project_setup import (
     ProjectSetupError, analyze_project_probe, merge_owner_mappings, parse_owner_mapping_tsv,
@@ -116,9 +117,7 @@ def verify_desktop_smoke(app, sample_path=SAMPLE, *, assert_hidden=False,
 
 
 def _new_teambition_client(settings, secrets):
-    return Client(settings["tenant_id"],
-                  credentials=lambda: (secrets["teambition_app_id"], secrets["teambition_app_secret"]),
-                  **collection_client_limits(settings))
+    return make_collection_client(settings, secrets, user_data_dir())
 
 
 def _exercise_mapping_controls(app, *, assert_hidden=False):
@@ -554,9 +553,9 @@ class DigestDesktopApp:
         ttk.Label(form, text="默认上午：前一日 16:50 到当日 08:50；默认下午：当日 00:00 到 16:50。",
                   foreground="#536174").grid(row=row, column=0, columnspan=4, sticky="w", pady=(5, 0))
         row += 1
-        self._text_field(form, row, 0, "单次采集任务上限（1–700）", "max_tasks_per_run", width=9)
+        self._text_field(form, row, 0, "每批采集任务数（1–700）", "max_tasks_per_run", width=9)
         ttk.Label(form,
-                  text="默认 300。每个任务会读取详情和动态；分页请求、总记录 50,000 条、响应 128 MiB、最多 600 秒仍是硬限制。",
+                  text="默认每批 300，非项目总数限制；全项目最多 10,000 个任务。整次最多 50,000 次请求、1,000,000 条返回记录、512 MiB 响应、128 MiB 保留数据及两小时，最多 3 轮来源重核；单批预算仍有效。超限阻断，不截断；缩短时间窗不减少基础扫描。",
                   foreground="#536174", wraplength=550).grid(row=row, column=2, columnspan=2,
                                                               sticky="w", pady=4)
         row += 1
@@ -888,7 +887,7 @@ class DigestDesktopApp:
         try:
             settings["max_tasks_per_run"] = int(self.values["max_tasks_per_run"].get())
         except (ValueError, TypeError):
-            messagebox.showerror("任务上限无效", "请输入 1 到 700 之间的整数。", parent=self.root)
+            messagebox.showerror("每批任务数无效", "每批采集任务数请输入 1 到 700 之间的整数。", parent=self.root)
             return
         secrets = dict(self.saved_secrets)
         secrets.update({key: self.values[key].get() for key in
@@ -1130,7 +1129,7 @@ class DigestDesktopApp:
                     try:
                         value = int(value)
                     except (TypeError, ValueError):
-                        raise SettingsError("单次采集任务上限请输入 1 到 700 之间的整数") from None
+                        raise SettingsError("每批采集任务数请输入 1 到 700 之间的整数") from None
                 proposed[key] = value
         try:
             if bool(proposed["auto_send_enabled"]) != previous_auto_send:

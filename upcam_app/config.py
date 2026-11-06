@@ -95,7 +95,7 @@ def validate_settings(settings: dict) -> dict:
         raise SettingsError("Teambition scope verification flags must be true or false")
     max_tasks = merged.get("max_tasks_per_run")
     if type(max_tasks) is not int or not 1 <= max_tasks <= 700:
-        raise SettingsError("Single-run task limit must be an integer from 1 to 700")
+        raise SettingsError("Collection batch size must be an integer from 1 to 700")
     if not isinstance(merged.get("auto_send_enabled"), bool):
         raise SettingsError("Automatic run and send setting must be true or false")
     if not isinstance(merged.get("start_with_windows"), bool):
@@ -136,7 +136,7 @@ def validate_settings(settings: dict) -> dict:
 
 
 def collection_client_limits(settings: dict) -> dict:
-    """Derive bounded, fail-closed request budgets from the user's task ceiling."""
+    """Preserve per-batch budgets while enabling bounded project collection."""
     maximum = validate_settings(settings)["max_tasks_per_run"]
     max_requests = min(1800, max(1000, maximum * 2 + 400))
     max_seconds = min(600, max(300, (max_requests + 3) // 4 + 60))
@@ -147,6 +147,8 @@ def collection_client_limits(settings: dict) -> dict:
         "max_records": 50000,
         "max_seconds": max_seconds,
         "max_response_bytes": 128 * 1024 * 1024,
+        "batch_mode": True,
+        "max_project_tasks": 10000,
     }
 
 

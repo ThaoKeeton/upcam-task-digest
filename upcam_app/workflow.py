@@ -20,7 +20,8 @@ from .dingtalk_mentions import MentionConfigError, mention_options, reject_crede
 from .history import HistoryError, HistoryStore
 from .openai_models import ModelCatalogError, OpenAIModelCatalog, cache_matches_key
 from .secrets import SECRET_FIELDS, INTERNAL_SECRET_FIELDS
-from .config import collection_client_limits, runtime_config, user_data_dir
+from .config import runtime_config, user_data_dir
+from .collection_runtime import make_collection_client
 
 
 class WorkflowBlocked(RuntimeError):
@@ -30,7 +31,8 @@ class WorkflowBlocked(RuntimeError):
 class DigestWorkflow:
     def __init__(self, settings: dict, secrets: dict[str, str], data_dir: Path | None = None,
                  *, client_factory=Client, summarizer=None, ding_sender=None,
-                 history=None, model_catalog=None, guard_factory=DeliveryGuard):
+                 history=None, model_catalog=None, guard_factory=DeliveryGuard,
+                 checkpoint_factory=None):
         self.settings = settings
         self.secrets = dict(secrets)
         self.data_dir = Path(data_dir or user_data_dir())
@@ -40,6 +42,7 @@ class DigestWorkflow:
         self.history = history or HistoryStore(self.data_dir / "history.sqlite3")
         self.model_catalog = model_catalog or OpenAIModelCatalog(self.data_dir / "openai_models.json")
         self.guard_factory = guard_factory
+        self.checkpoint_factory = checkpoint_factory
 
     def run(self, start_local: datetime, end_local: datetime, *, schedule_key: str | None = None,
             allow_confirmed_repeat: bool = False, manual_request_id: str | None = None) -> dict:
@@ -87,13 +90,11 @@ class DigestWorkflow:
         if schedule_key and any(run.get("schedule_key") == schedule_key for run in self.history.list_runs(1000)):
             raise WorkflowBlocked("This scheduled run slot already has a local history record")
 
-        client_kwargs = {
-            "credentials": lambda: (self.secrets["teambition_app_id"], self.secrets["teambition_app_secret"]),
-        }
-        if self.client_factory is Client:
-            client_kwargs.update(collection_client_limits(self.settings))
-        client = self.client_factory(config["tenant_id"], **client_kwargs)
         try:
+            client = make_collection_client(
+                self.settings, self.secrets, self.data_dir,
+                client_factory=self.client_factory, checkpoint_factory=self.checkpoint_factory,
+            )
             collection = client.collect(
                 config["project_id"], include_archived=config["include_archived"],
                 day=report_day, window=window,

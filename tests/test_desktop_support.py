@@ -15,17 +15,39 @@ from upcam_app.openai_models import ModelCatalogError, OpenAIModelCatalog, cache
 
 
 class ConfigTests(unittest.TestCase):
-    def test_large_window_task_ceiling_is_configurable_and_bounded(self):
+    def test_legacy_task_setting_enables_bounded_batches_without_limiting_project_to_one_batch(self):
         self.assertEqual(DEFAULT_SETTINGS["max_tasks_per_run"], 300)
-        self.assertEqual(collection_client_limits(DEFAULT_SETTINGS)["max_tasks"], 300)
-        large = validate_settings(dict(DEFAULT_SETTINGS, max_tasks_per_run=700))
-        limits = collection_client_limits(large)
-        self.assertEqual(limits["max_tasks"], 700)
-        self.assertEqual(limits["max_requests"], 1800)
-        self.assertEqual(limits["max_seconds"], 510)
-        for value in (0, 701, True, "500"):
+        for batch_size, requests, seconds in ((1, 1000, 310), (300, 1000, 310), (700, 1800, 510)):
+            with self.subTest(batch_size=batch_size):
+                settings = validate_settings(dict(DEFAULT_SETTINGS, max_tasks_per_run=batch_size))
+                self.assertEqual(collection_client_limits(settings), {
+                    "max_tasks": batch_size,
+                    "max_requests": requests,
+                    "max_pages": 50,
+                    "max_records": 50000,
+                    "max_seconds": seconds,
+                    "max_response_bytes": 128 * 1024 * 1024,
+                    "batch_mode": True,
+                    "max_project_tasks": 10000,
+                })
+        for value in (0, 701, True, "500", 1.5):
             with self.subTest(value=value), self.assertRaises(SettingsError):
                 validate_settings(dict(DEFAULT_SETTINGS, max_tasks_per_run=value))
+
+    def test_schema_one_batch_setting_round_trips_without_new_persisted_budget_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            legacy = {"schema_version": 1, "max_tasks_per_run": 700}
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            store = SettingsStore(path)
+            settings = store.load()
+            store.save(settings)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["schema_version"], 1)
+            self.assertEqual(saved["max_tasks_per_run"], 700)
+            self.assertNotIn("batch_mode", saved)
+            self.assertNotIn("max_project_tasks", saved)
+            self.assertEqual(collection_client_limits(store.load()).get("max_project_tasks"), 10000)
 
     def test_default_windows_preserve_the_documented_morning_and_afternoon_periods(self):
         morning = scheduled_window(DEFAULT_SETTINGS, "morning", date(2026, 11, 3))

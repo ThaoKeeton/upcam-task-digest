@@ -51,6 +51,7 @@ public sealed partial class MainWindow
                 "Compatible synthetic worker restores native operation state");
             ApplyGeneralAppearance();
             await VerifyGeneralSettingsAsync(output);
+            await VerifyCollectionProgressControlsAsync();
             var titleBar = Find<TitleBar>("app-titlebar");
             Assert(titleBar is not null && ExtendsContentIntoTitleBar, "Native custom TitleBar replaces colored system title bar");
             Assert(titleBar!.IconSource is BitmapIconSource { ShowAsMonochrome: false }, "TitleBar keeps original icon colors");
@@ -317,6 +318,15 @@ public sealed partial class MainWindow
                         Assert(morningStart.Text == "16:50" && morningEnd.Text == "08:50" &&
                             afternoonStart.Text == "00:00" && afternoonEnd.Text == "16:50",
                             "Label correction preserves original scheduled window values at " + size.Width);
+                        var batchSize = Find<NumberBox>("task-limit")!;
+                        Assert(batchSize.Header.ToString() == "每批采集任务数（1–700）" &&
+                            batchSize.Minimum == 1 && batchSize.Maximum == 700,
+                            "Schedule keeps the bounded batch size separate from the project total at " + size.Width);
+                        var clearProgress = Find<Button>("clear-collection-progress")!;
+                        clearProgress.StartBringIntoView();
+                        await Task.Delay(50);
+                        RootGrid.UpdateLayout();
+                        AssertInside(clearProgress, "Collection progress control at " + size.Width);
                     }
                     if (route == "statuses")
                     {
@@ -384,6 +394,55 @@ public sealed partial class MainWindow
     {
         if (!condition) throw new InvalidOperationException(description);
         _smokeSteps.Add(description);
+    }
+
+    private async Task VerifyCollectionProgressControlsAsync()
+    {
+        var savedBefore = await Worker.SendAsync("initialize");
+        Navigate("schedule");
+        var batchSize = Find<NumberBox>("task-limit")!;
+        Assert(batchSize.Header.ToString() == "每批采集任务数（1–700）" && batchSize.Value == 300 &&
+            batchSize.Minimum == 1 && batchSize.Maximum == 700,
+            "Native schedule exposes the legacy default as a bounded collection batch size");
+        batchSize.Value = 700;
+        await WaitForAsync(() => _state.Number("max_tasks_per_run", 0) == 700);
+        _state.SetSecretDraft("openai_api_key", "ci-unsaved-cache-clear-draft");
+        string draftSettings = _state.Settings.ToJsonString();
+        string draftPresence = _state.SecretPresence.ToJsonString();
+        string draftHistory = _state.History.ToJsonString();
+        bool savedAuto = _savedAuto;
+        var clearProgress = Find<Button>("clear-collection-progress")!;
+        bool conflictingActionRan = false;
+        await RunOperationAsync("Synthetic collection progress busy check", async () =>
+        {
+            Assert(!PageHost.IsEnabled && !clearProgress.IsEnabled,
+                "Collection progress clearing is disabled while another native operation is busy");
+            bool accepted = await RunOperationAsync("Synthetic conflicting progress operation", () =>
+            {
+                conflictingActionRan = true;
+                return Task.CompletedTask;
+            });
+            Assert(!accepted && !conflictingActionRan,
+                "A busy native operation cannot start a conflicting progress action");
+        });
+        await InvokeWhenReadyAsync("clear-collection-progress");
+        await WaitForAsync(() => !_busy);
+        Assert(StatusText.Text == "未完成的采集进度已清除；配置、凭据、模型缓存、运行记录和发送账本保持不变。",
+            "Native progress button clears an empty synthetic cache and displays the worker status without confirmation");
+        Assert(_state.Settings.ToJsonString() == draftSettings && _state.Dirty &&
+            _state.SecretDrafts.GetValueOrDefault("openai_api_key") == "ci-unsaved-cache-clear-draft" &&
+            _state.SecretPresence.ToJsonString() == draftPresence && _state.History.ToJsonString() == draftHistory &&
+            _savedAuto == savedAuto,
+            "Clearing collection progress preserves native drafts, credentials, history, and automatic run authorization");
+        var savedAfter = await Worker.SendAsync("initialize");
+        Assert(JsonNode.DeepEquals(savedBefore["settings"], savedAfter["settings"]) &&
+            JsonNode.DeepEquals(savedBefore["secret_presence"], savedAfter["secret_presence"]) &&
+            JsonNode.DeepEquals(savedBefore["models"], savedAfter["models"]) &&
+            JsonNode.DeepEquals(savedBefore["history"], savedAfter["history"]) &&
+            JsonNode.DeepEquals(savedBefore["ledger_ready"], savedAfter["ledger_ready"]),
+            "Clearing empty synthetic progress leaves saved settings, credential presence, model cache, history, and ledger unchanged");
+        _state.Apply(savedAfter);
+        Navigate("home");
     }
 
     private async Task VerifyGeneralSettingsAsync(string output)
@@ -473,6 +532,17 @@ public sealed partial class MainWindow
                 Navigate(route); await Task.Delay(40); RootGrid.UpdateLayout();
                 Assert(PageHost.ActualWidth > 300 && PageHost.ActualHeight > 150,
                     $"English light interface layout {route} {size.Width}x{size.Height}");
+                if (route == "schedule")
+                {
+                    var clearProgress = Find<Button>("clear-collection-progress")!;
+                    Assert(Find<NumberBox>("task-limit")!.Header.ToString() == "Tasks per collection batch (1–700)" &&
+                        clearProgress.Content.ToString() == "Clear unfinished collection progress",
+                        "English schedule translates batch and progress controls at " + size.Width);
+                    clearProgress.StartBringIntoView();
+                    await Task.Delay(50);
+                    RootGrid.UpdateLayout();
+                    AssertInside(clearProgress, "English collection progress control at " + size.Width);
+                }
             }
         }
         AppWindow.Resize(new SizeInt32(1180, 800));
