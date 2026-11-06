@@ -90,7 +90,18 @@ def archive_bytes(*, version="0.4.0", commit=COMMIT, rules="2026-11-06.1",
             if name not in omit:
                 archive.writestr(name, value)
         for name, value in extra:
-            archive.writestr(name, value)
+            if isinstance(name, str):
+                # ZipInfo normalizes platform separators and truncates NULs in
+                # its constructor. Assign afterward so malicious ZIP fixtures
+                # retain the exact local and central header names on Windows.
+                info = zipfile.ZipInfo()
+                info.filename = info.orig_filename = name
+                info.compress_type = compression
+                if name.endswith("/"):
+                    info.external_attr = (0o40775 << 16) | 0x10
+                archive.writestr(info, value)
+            else:
+                archive.writestr(name, value)
     return payload.getvalue()
 
 
@@ -390,6 +401,20 @@ class AppUpdateTests(unittest.TestCase):
                 self.assert_rejected(lambda: self.updater(make_transport(payload)).download(TOKEN),
                                      code="unsafe_archive")
         self.assertFalse((self.root / "escape.exe").exists())
+
+    def test_archive_fixture_preserves_raw_unsafe_names_with_windows_separator(self):
+        for name in ("folder\\escape.exe", "worker\\..\\escape.exe", "null\x00.exe"):
+            with self.subTest(name=repr(name)):
+                with patch.object(zipfile.os, "sep", "\\"), patch.object(zipfile.os, "altsep", "/"):
+                    payload = archive_bytes(extra=[(name, b"malicious")])
+                    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                        info = archive.infolist()[-1]
+                        self.assertEqual(info.orig_filename, name)
+                        name_length = struct.unpack_from("<H", payload, info.header_offset + 26)[0]
+                        start = info.header_offset + 30
+                        self.assertEqual(payload[start:start + name_length], name.encode("ascii"))
+                    self.assert_rejected(lambda: self.updater(make_transport(payload)).download(TOKEN),
+                                         code="unsafe_archive")
 
     def test_case_aliases_file_directory_collisions_and_symlinks_are_rejected(self):
         symlink = zipfile.ZipInfo("worker/link")

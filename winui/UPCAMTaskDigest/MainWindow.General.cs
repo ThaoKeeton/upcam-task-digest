@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml.Controls;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json.Nodes;
+using CommunityToolkit.WinUI.Controls;
 
 namespace Upcam.Desktop;
 
@@ -11,6 +12,7 @@ public sealed partial class MainWindow
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _updateTimer;
     private DateTimeOffset _lastAutomaticUpdateCheck = DateTimeOffset.MinValue;
     private bool _syntheticUpdateLaunch;
+    private bool _syntheticRestart;
     private int _generalTabIndex;
     private bool HasUnsavedGeneral => _state.GeneralDirty || _state.ClearUpdateToken || _state.UpdateTokenDraft.Length > 0;
 
@@ -114,17 +116,37 @@ public sealed partial class MainWindow
         var theme = GeneralChoice("应用主题", "ui_theme", "ui-theme",
             new[] { ("system", "Windows 默认"), ("light", "浅色"), ("dark", "深色") });
         return LocalScroll(Column(
-            Card(Column(language, Paragraph(UiStrings.T("支持简体中文和 English；其他 Windows 语言使用 English。项目名称、评论、诊断原文和仓库日报不会被自动翻译。"), true))),
-            Card(Column(theme, Paragraph(UiStrings.T("主题立即预览，保存后在下次启动时保留；标题栏、对话框和页面随主题变化。"), true)))));
+            PreferenceCard("界面语言", "支持简体中文和 English；其他 Windows 语言使用 English。项目名称、评论、诊断原文和仓库日报不会被自动翻译。", language),
+            PreferenceCard("应用主题", "主题立即预览，保存后在下次启动时保留；标题栏、对话框和页面随主题变化。", theme),
+            Card(Column(Paragraph(UiStrings.T("界面会立即切换；部分原生模板在保存并重新启动后应用所选语言。"), true),
+                ActionButton("重新启动应用", "restart-app", RestartApplicationAsync)))));
     }
 
-    private FrameworkElement BuildStartupPreferences() => LocalScroll(Column(
-        Card(Column(GeneralToggle("当前 Windows 用户登录后启动，并以系统托盘运行", "start_with_windows", "startup"),
-            Paragraph(UiStrings.T("使用已有的当前用户启动项，不需要管理员权限；关机、休眠、未登录或离线时不会执行日报。"), true))),
-        Card(Column(GeneralToggle("显示系统托盘图标", "tray_icon_enabled", "tray-enabled"),
-            GeneralToggle("关闭主窗口时隐藏到托盘", "close_to_tray", "close-to-tray"),
-            GeneralToggle("手动启动时隐藏到托盘", "start_in_tray", "start-in-tray"),
-            Paragraph(UiStrings.T("托盘菜单提供显示主窗口和退出应用。关闭托盘时会关闭隐藏选项；托盘不可用时保留可见窗口。"), true)))));
+    private FrameworkElement BuildStartupPreferences()
+    {
+        var behavior = new SettingsExpander
+        {
+            Header = UiStrings.T("启动与托盘"), IsExpanded = true,
+            Description = UiStrings.T("托盘菜单提供显示主窗口和退出应用。关闭托盘时会关闭隐藏选项；托盘不可用时保留可见窗口。")
+        };
+        behavior.Items.Add(PreferenceCard("显示系统托盘图标", "", GeneralToggle("显示系统托盘图标", "tray_icon_enabled", "tray-enabled")));
+        behavior.Items.Add(PreferenceCard("关闭主窗口时隐藏到托盘", "", GeneralToggle("关闭主窗口时隐藏到托盘", "close_to_tray", "close-to-tray")));
+        behavior.Items.Add(PreferenceCard("手动启动时隐藏到托盘", "", GeneralToggle("手动启动时隐藏到托盘", "start_in_tray", "start-in-tray")));
+        return LocalScroll(Column(
+            PreferenceCard("当前 Windows 用户登录后启动，并以系统托盘运行",
+                "使用已有的当前用户启动项，不需要管理员权限；关机、休眠、未登录或离线时不会执行日报。",
+                GeneralToggle("当前 Windows 用户登录后启动，并以系统托盘运行", "start_with_windows", "startup")), behavior));
+    }
+
+    // PowerToys GeneralPage uses these MIT-licensed CommunityToolkit controls.
+    // Source/versions and adaptation attribution: THIRD_PARTY_NOTICES.md.
+    private static SettingsCard PreferenceCard(string label, string description, FrameworkElement input)
+    {
+        if (input is ComboBox combo) combo.Header = null;
+        if (input is ToggleSwitch toggle) toggle.Header = null;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(input, UiStrings.T(label));
+        return new SettingsCard { Header = UiStrings.T(label), Description = UiStrings.T(description), Content = input };
+    }
 
     private ComboBox GeneralChoice(string label, string key, string id, (string Value, string Label)[] choices)
     {
@@ -206,7 +228,7 @@ public sealed partial class MainWindow
         {
             _state.UpdateState = await Worker.SendAsync("check_updates");
             if (_page == "general") Navigate("general");
-            if (Value(_state.UpdateState, "status") == "available") SetStatus(Value(_state.UpdateState, "message"));
+            SetStatus(Value(_state.UpdateState, "message"));
         }, showErrorDialog: false);
     }
 
@@ -221,17 +243,30 @@ public sealed partial class MainWindow
         if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(Path.GetFileName(path), "UPCAMTaskDigest.exe", StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
             throw new InvalidOperationException(UiStrings.T("更新启动路径未通过本机校验。"));
+        // Adapt PowerToys' shared-read execution lock, without claiming code signing.
+        using var executableLock = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var lockedProof = await Worker.SendAsync("prepare_update");
+        if (Value(lockedProof, "status") != "ready" || Path.GetFullPath(Value(lockedProof, "executable")) != path)
+            throw new InvalidOperationException(UiStrings.T("锁定后的更新校验未通过；当前版本已保留。"));
         if (_smoke)
         {
             _syntheticUpdateLaunch = true;
             SetStatus(UiStrings.T("合成更新校验完成；未启动其他应用或修改启动项。"));
             return;
         }
-        var start = new ProcessStartInfo(path) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(path)! };
-        start.ArgumentList.Add("--wait-for-parent");
-        start.ArgumentList.Add(Environment.ProcessId.ToString(CultureInfo.InvariantCulture));
-        start.ArgumentList.Add("--after-update");
-        using var process = Process.Start(start) ?? throw new InvalidOperationException(UiStrings.T("无法启动已校验更新，当前版本已保留。"));
+        using var process = await ProcessHandoff.StartAsync(path, afterUpdate: true);
+        _scheduler?.Stop();
+        _updateTimer?.Stop();
+        _exitRequested = true;
+        Close();
+    }
+
+    private async Task RestartApplicationAsync()
+    {
+        if (_state.Dirty || HasUnsavedGeneral || _state.SecretDrafts.Any(x => x.Value.Length > 0))
+            throw new InvalidOperationException(UiStrings.T("请先保存尚未保存的设置和凭据，再重新启动应用。"));
+        if (_smoke) { _syntheticRestart = true; return; }
+        using var process = await ProcessHandoff.StartAsync(Path.Combine(AppContext.BaseDirectory, "UPCAMTaskDigest.exe"), afterUpdate: false);
         _scheduler?.Stop();
         _updateTimer?.Stop();
         _exitRequested = true;

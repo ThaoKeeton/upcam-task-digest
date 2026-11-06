@@ -388,6 +388,23 @@ public sealed partial class MainWindow
 
     private async Task VerifyGeneralSettingsAsync(string output)
     {
+        string bootstrap = Path.Combine(output, "synthetic-language.json");
+        File.WriteAllText(bootstrap, "{\"language\":\"en-US\"}");
+        Assert(InterfaceLanguageBootstrap.Read(bootstrap) == "en-US", "Early interface language bootstrap reads only a bounded language snapshot");
+        File.WriteAllText(bootstrap, "{\"language\":\"unimplemented\"}");
+        Assert(InterfaceLanguageBootstrap.Read(bootstrap) == "system", "Invalid bootstrap language falls back to the Windows default");
+        File.Delete(bootstrap);
+        string handoffToken = Guid.NewGuid().ToString("N");
+        using (var handoffReady = new EventWaitHandle(false, EventResetMode.ManualReset, @"Local\UPCAMTaskDigest.Handoff." + handoffToken))
+        {
+            var dummyStart = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                "WindowsPowerShell", "v1.0", "powershell.exe")) { UseShellExecute = false, CreateNoWindow = true };
+            foreach (string arg in new[] { "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Milliseconds 500" }) dummyStart.ArgumentList.Add(arg);
+            using var dummyParent = System.Diagnostics.Process.Start(dummyStart)!;
+            var exitWait = ProcessHandoff.WaitForParentAsync(dummyParent.Id, handoffToken);
+            Assert(handoffReady.WaitOne(TimeSpan.FromSeconds(2)), "Native handoff acknowledges a held SYNCHRONIZE parent handle before exit");
+            Assert(await exitWait.WaitAsync(TimeSpan.FromSeconds(10)), "Native handoff waits for a real synthetic parent process to exit");
+        }
         var recoveryWindow = new Window { Content = new Grid() };
         recoveryWindow.Activate();
         var recoveryAppWindow = Microsoft.UI.Windowing.AppWindow.GetFromWindowId(
@@ -403,7 +420,8 @@ public sealed partial class MainWindow
                 "Injected tray re-registration failure restores a visible native window");
         }
         recoveryWindow.Close();
-        var launch = AppLaunchOptions.Parse(new[] { "--background", "--wait-for-parent", "12345", "--after-update" }, 54321);
+        ShowMainWindow();
+        var launch = AppLaunchOptions.Parse(new[] { "--background", "--wait-for-parent", "12345", "--after-update", "--handoff-event", new string('a', 32) }, 54321);
         Assert(launch.Background && launch.AfterUpdate && launch.ParentPid == 12345,
             "Update launch arguments carry an explicit parent handoff without elevation");
         foreach (var invalid in new[] { new[] { "--after-update" }, new[] { "--background", "--background" },
@@ -433,6 +451,8 @@ public sealed partial class MainWindow
             _state.SecretDrafts.GetValueOrDefault("openai_api_key") == "ci-unsaved-secret-draft",
             "General save preserves unsaved project and credential drafts");
         await CaptureAsync(Path.Combine(output, "general-english-light.png"));
+        Assert(FindIn<CommunityToolkit.WinUI.Controls.SettingsCard>(PageHost, _ => true) is not null,
+            "General page uses actual PowerToys-matched CommunityToolkit SettingsCard controls");
         foreach (var size in new[] { new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540) })
         {
             AppWindow.Resize(size);
@@ -473,6 +493,9 @@ public sealed partial class MainWindow
         await WaitForAsync(() => !_busy);
         Assert(PageTitle.Text == "常规" && AppWindow.TitleBar.ButtonForegroundColor == Microsoft.UI.Colors.White,
             "Chinese dark preferences restore caption and localized settings");
+        Invoke(Find<Button>("restart-app")!);
+        await WaitForAsync(() => !_busy);
+        Assert(_syntheticRestart && AppWindow.IsVisible, "Explicit restart checks saved state without discarding edits or exiting the synthetic test");
         _generalTabIndex = 0;
         Navigate("general");
         Invoke(Find<Button>("update-check")!);

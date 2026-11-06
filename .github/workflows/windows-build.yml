@@ -126,6 +126,8 @@ jobs:
         run: |
           Expand-Archive dist/UPCAMTaskDigest-WinUI3-win-x64.zip -DestinationPath dist/install-check
           foreach ($file in @('UPCAMTaskDigest.exe', 'UPCAMTaskDigest.dll', 'UPCAMTaskDigest.pri', 'coreclr.dll', 'hostfxr.dll',
+                               'CommunityToolkit.WinUI.Controls.SettingsControls.dll', 'THIRD_PARTY_NOTICES.md',
+                               'LICENSES/PowerToys-MIT.txt', 'LICENSES/CommunityToolkit-MIT.txt',
                                'Assets/Teambition.ico', 'Assets/Teambition.png',
                                'worker/UPCAMWorker.exe', 'worker/_internal/templates/daily_digest.json', 'worker/_internal/examples/digest.json')) {
             if (-not (Test-Path "dist/install-check/$file")) { throw "Package missing $file" }

@@ -534,5 +534,11 @@
   "JSON 格式无效或成员 ID 重复；请粘贴“成员 ID”对应“姓名”的 JSON 对象。 支持 JSON 对象或每行“成员 ID<TAB>姓名”；未导入任何行。": "Invalid JSON or duplicate member IDs. Paste a JSON object mapping member IDs to names. Use a JSON object or one “MEMBER_ID<TAB>NAME” per line. No rows were imported.",
   "每行必须包含且只包含一个制表符，格式为成员 ID<TAB>姓名。 支持 JSON 对象或每行“成员 ID<TAB>姓名”；未导入任何行。": "Each line must contain exactly one tab, in the format MEMBER_ID<TAB>NAME. Use a JSON object or one “MEMBER_ID<TAB>NAME” per line. No rows were imported.",
   "成员 ID 重复或姓名无效。 支持 JSON 对象或每行“成员 ID<TAB>姓名”；未导入任何行。": "Duplicate member ID or invalid name. Use a JSON object or one “MEMBER_ID<TAB>NAME” per line. No rows were imported.",
-  "已有成员 ID 对应其他姓名；未导入任何映射。 支持 JSON 对象或每行“成员 ID<TAB>姓名”；未导入任何行。": "An existing member ID has a different name. No mappings were imported. Use a JSON object or one “MEMBER_ID<TAB>NAME” per line. No rows were imported."
+  "已有成员 ID 对应其他姓名；未导入任何映射。 支持 JSON 对象或每行“成员 ID<TAB>姓名”；未导入任何行。": "An existing member ID has a different name. No mappings were imported. Use a JSON object or one “MEMBER_ID<TAB>NAME” per line. No rows were imported.",
+  "界面会立即切换；部分原生模板在保存并重新启动后应用所选语言。": "The interface changes immediately. Save and restart to apply the selected language to startup-native resources.",
+  "请先保存尚未保存的设置和凭据，再重新启动应用。": "Save your settings and credential drafts before restarting the application.",
+  "重新启动应用": "Restart application",
+  "锁定后的更新校验未通过；当前版本已保留。": "The locked update did not pass verification. The current version has been retained.",
+  "无法建立应用重启交接；当前版本仍在运行。": "The restart handoff could not be established. The current version is still running.",
+  "新进程未完成启动交接；当前应用和旧版本均已保留。": "The new process did not acknowledge the startup handoff. The current application and previous version have been retained."
 }

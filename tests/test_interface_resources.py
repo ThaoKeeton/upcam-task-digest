@@ -31,15 +31,19 @@ def _csharp_literals(source: str):
     This is a resource coverage audit, not a C# behavior substitute. Comments
     and expressions inside interpolated literals do not become translation keys.
     """
-    def read_string(index: int, interpolated: bool):
+    def read_string(index: int, interpolated: bool, verbatim: bool = False):
         pieces = []
         argument = 0
         index += 1  # opening quote
         while index < len(source):
             char = source[index]
+            if char == '"' and verbatim and source[index:index + 2] == '""':
+                pieces.append('"')
+                index += 2
+                continue
             if char == '"':
                 return "".join(pieces), index + 1
-            if char == "\\":
+            if char == "\\" and not verbatim:
                 end = index + (6 if source[index + 1:index + 2] == "u" else 2)
                 encoded = source[index:end]
                 pieces.append(json.loads('"' + encoded + '"'))
@@ -77,7 +81,8 @@ def _csharp_literals(source: str):
         elif source[index:index + 2] == "/*":
             index = source.index("*/", index + 2) + 2
         elif source[index] == '"':
-            text, index = read_string(index, index > 0 and source[index - 1] == "$")
+            text, index = read_string(index, index > 0 and source[index - 1] == "$",
+                                      index > 0 and source[index - 1] == "@")
             yield text
         else:
             index += 1
@@ -116,7 +121,7 @@ class InterfaceResourceTests(unittest.TestCase):
         resources = _resources()
         expected = set()
         for name in ("Ui.cs", "DesktopState.cs", "NativeDesktop.cs", "WorkerClient.cs",
-                     "MainWindow.xaml.cs", "MainWindow.Pages.cs", "MainWindow.General.cs"):
+                     "MainWindow.xaml.cs", "MainWindow.Pages.cs", "MainWindow.General.cs", "ProcessHandoff.cs"):
             expected.update(text for text in _csharp_literals((NATIVE / name).read_text(encoding="utf-8"))
                             if CJK.search(text))
         import xml.etree.ElementTree as ET

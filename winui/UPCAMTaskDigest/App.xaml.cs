@@ -9,12 +9,16 @@ public partial class App : Application
 
     public App()
     {
+        string language = IsSyntheticRun ? "zh-CN" : InterfaceLanguageBootstrap.Read(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPCAM", "TaskDigest", "language.json"));
         UnhandledException += (_, args) =>
         {
             if (IsSyntheticRun) RecordSyntheticFailure(args.Exception);
         };
         try
         {
+            UiStrings.Configure(language);
+            Microsoft.Windows.Globalization.ApplicationLanguages.PrimaryLanguageOverride = language == "system" ? "" : UiStrings.ResolvedLanguage;
             InitializeComponent();
             if (IsSyntheticRun)
             {
@@ -42,14 +46,7 @@ public partial class App : Application
         bool smoke = options.Smoke;
         if (options.ParentPid is int parentPid)
         {
-            try
-            {
-                using var parent = System.Diagnostics.Process.GetProcessById(parentPid);
-                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                await parent.WaitForExitAsync(deadline.Token);
-            }
-            catch (ArgumentException) { /* The parent has already exited. */ }
-            catch (Exception ex) when (ex is OperationCanceledException or System.ComponentModel.Win32Exception or InvalidOperationException)
+            if (!await ProcessHandoff.WaitForParentAsync(parentPid, options.HandoffEvent))
             {
                 Environment.Exit(3);
                 return;

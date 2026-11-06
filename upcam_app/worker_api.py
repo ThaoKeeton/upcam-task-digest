@@ -141,6 +141,12 @@ class WorkerService:
     def _initialize(self, payload: dict) -> dict:
         self._require_empty_payload(payload)
         settings = self.settings_store.load()
+        try:
+            self._write_language_bootstrap(settings)
+        except OSError:
+            # This bootstrap contains only an interface language, never business data.
+            # Its absence falls back to Windows defaults; ordinary UI loading continues.
+            pass
         credentials = self.secret_store.load()
         reject_credential_mentions(settings, credentials)
         self.history.recover_interrupted_sends()
@@ -174,6 +180,7 @@ class WorkerService:
                 or type(payload.get("clear_github_token", False)) is not bool):
             raise WorkerApiError("常规设置内容无效；未保存任何更改。")
         previous = self.settings_store.load()
+        bootstrap_existed = (self.data_dir / "language.json").exists()
         old_secrets = self.secret_store.load()
         credentials = dict(old_secrets)
         try:
@@ -190,6 +197,7 @@ class WorkerService:
         try:
             self.secret_store.save(credentials)
             self.settings_store.save(clean)
+            self._write_language_bootstrap(clean)
             if clean["start_with_windows"] != previous["start_with_windows"] or clean["start_with_windows"]:
                 startup_attempted = True
                 self.startup_configurer(clean["start_with_windows"],
@@ -208,10 +216,25 @@ class WorkerService:
                                             executable=_current_application_executable(), frozen=True)
                 except Exception:
                     restored = False
+            try:
+                if bootstrap_existed:
+                    self._write_language_bootstrap(previous)
+                else:
+                    (self.data_dir / "language.json").unlink(missing_ok=True)
+            except OSError:
+                restored = False
             raise WorkerApiError("常规设置保存失败，已恢复原设置。" if restored else
                                  "常规设置保存未完成；恢复也未完成，请重新打开应用核对设置和启动项。") from None
         return {"preferences": preference_values(clean), "secret_presence": _secret_presence(credentials),
                 "status": "常规设置已保存；未采集任务、未调用 OpenAI、未发送钉钉。"}
+
+    def _write_language_bootstrap(self, settings: dict) -> None:
+        # Inspired by PowerToys' separate language bootstrap, read before XAML.
+        # Keep project configuration and all secrets out of this tiny document.
+        content = (json.dumps({"language": settings["ui_language"]}) + "\n").encode("utf-8")
+        target = self.data_dir / "language.json"
+        if not target.exists() or target.stat().st_size > 4096 or target.read_bytes() != content:
+            atomic_write(target, content)
 
     def _update_operation(self, payload: dict, operation: str) -> dict:
         self._require_empty_payload(payload)

@@ -19,6 +19,7 @@ internal sealed class NativeDesktop : IDisposable
     private const uint TrayMessage = 0x8000 + 37;
     public bool TrayReady { get; private set; }
     private bool _trayEnabled = true;
+    private bool _addingTray;
     private readonly Func<uint, bool>? _trayRegistration;
 
     public NativeDesktop(Window window, Action show, Action exit, Func<bool> closeRequested, Func<uint, bool>? trayRegistration = null)
@@ -59,10 +60,15 @@ internal sealed class NativeDesktop : IDisposable
 
     private void AddIcon()
     {
-        if (!_trayEnabled) return;
-        NotifyIconData data = Data();
-        TrayReady = NotifyShell(0, ref data);
-        if (!TrayReady) _show();
+        if (!_trayEnabled || _addingTray) return;
+        _addingTray = true;
+        try
+        {
+            NotifyIconData data = Data();
+            TrayReady = NotifyShell(0, ref data);
+            if (!TrayReady && !IsWindowVisible(_hwnd)) _show();
+        }
+        finally { _addingTray = false; }
     }
 
     private bool NotifyShell(uint operation, ref NotifyIconData data) =>
@@ -75,7 +81,7 @@ internal sealed class NativeDesktop : IDisposable
             NotifyIconData previous = Data();
             NotifyShell(2, ref previous);
             TrayReady = false;
-            _show();
+            if (!IsWindowVisible(_hwnd)) _show();
         }
         _trayEnabled = enabled;
         if (enabled && !TrayReady) AddIcon();
@@ -157,6 +163,9 @@ internal sealed class NativeDesktop : IDisposable
         if ((message == 0x0010 || message == 0x0112 && (wparam.ToUInt64() & 0xFFF0) == 0xF060) && _closeRequested())
             return IntPtr.Zero;
         if (message == _taskbarCreated) AddIcon();
+        // PowerToys retries a failed initial registration on window-position activity.
+        // AddIcon is guarded against re-entry and restores only a hidden window.
+        if (message == 0x0046 && _trayEnabled && !TrayReady) AddIcon();
         if (message == 0x02E0)
         {
             IntPtr result = DefSubclassProc(hwnd, message, wparam, lparam);
@@ -266,6 +275,7 @@ internal sealed class NativeDesktop : IDisposable
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out Point point);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hwnd, int command);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int count);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowProc proc, IntPtr lparam);
     [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam);

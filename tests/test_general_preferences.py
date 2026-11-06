@@ -120,6 +120,13 @@ class GeneralPreferenceTests(unittest.TestCase):
             self.assertEqual(calls, [True])
             self.assertTrue(store.load()["start_with_windows"])
 
+    def test_language_bootstrap_contains_only_saved_interface_language(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worker, store, secret, calls = self.service(directory)
+            worker.dispatch({"op": "save_preferences", "payload": {
+                "preferences": {"ui_language": "en-US"}, "github_token": "github_pat_synthetic-only"}})
+            self.assertEqual(json.loads((Path(directory) / "language.json").read_text()), {"language": "en-US"})
+
 
 if __name__ == "__main__":
     unittest.main()
