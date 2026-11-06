@@ -1,6 +1,7 @@
 """Checkpoint acceptance uses fictional records and an authenticated test codec."""
 
 import copy
+from contextlib import closing, contextmanager
 import hashlib
 import hmac
 import importlib
@@ -33,6 +34,15 @@ def unprotect(payload):
     return zlib.decompress(bytes(value ^ 0xA6 for value in encrypted))
 
 
+@contextmanager
+def fixture_database(path):
+    """Preserve SQLite transaction semantics and release all fixture handles."""
+    with closing(sqlite3.connect(path)) as connection:
+        with connection:
+            with closing(connection.cursor()) as cursor:
+                yield cursor
+
+
 class CollectionCheckpointTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -60,6 +70,27 @@ class CollectionCheckpointTests(unittest.TestCase):
         store = self.module().DpapiCollectionCheckpoint(self.path, protect=protect, unprotect=unprotect, **kwargs)
         self.addCleanup(store.close)
         return store
+
+    def test_fixture_database_releases_held_resources_after_commit_and_rollback(self):
+        with fixture_database(self.path) as cursor:
+            connection = cursor.connection
+            cursor.execute("CREATE TABLE fixture_lifecycle(value TEXT)")
+            cursor.execute("INSERT INTO fixture_lifecycle VALUES('fictional-committed')")
+        with self.assertRaises(sqlite3.ProgrammingError):
+            cursor.execute("SELECT value FROM fixture_lifecycle")
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT value FROM fixture_lifecycle")
+        with self.assertRaisesRegex(RuntimeError, "fictional-rollback"):
+            with fixture_database(self.path) as failed_cursor:
+                failed_connection = failed_cursor.connection
+                failed_cursor.execute("INSERT INTO fixture_lifecycle VALUES('fictional-rolled-back')")
+                raise RuntimeError("fictional-rollback")
+        with self.assertRaises(sqlite3.ProgrammingError):
+            failed_cursor.execute("SELECT value FROM fixture_lifecycle")
+        with self.assertRaises(sqlite3.ProgrammingError):
+            failed_connection.execute("SELECT value FROM fixture_lifecycle")
+        with fixture_database(self.path) as verified:
+            self.assertEqual(verified.execute("SELECT value FROM fixture_lifecycle").fetchall(), [("fictional-committed",)])
 
     def test_completed_record_and_counters_resume_after_new_object_and_close(self):
         store = self.store()
@@ -143,9 +174,9 @@ class CollectionCheckpointTests(unittest.TestCase):
         for value in (self.task_id, "fictional-org", "demo-project", "candidate", "activities",
                       "response_bytes", "credential_identity", "created_at", "虚构旧任务"):
             self.assertNotIn(value.encode("utf-8"), raw)
-        with sqlite3.connect(self.path) as connection:
+        with fixture_database(self.path) as cursor:
             for table in ("checkpoint_state", "checkpoint_tasks"):
-                self.assertEqual(connection.execute(f"SELECT DISTINCT typeof(payload) FROM {table}").fetchall(), [("blob",)])
+                self.assertEqual(cursor.execute(f"SELECT DISTINCT typeof(payload) FROM {table}").fetchall(), [("blob",)])
 
     def test_store_session_is_exclusive_and_close_releases_it(self):
         first, second = self.store(), self.store()
@@ -238,9 +269,9 @@ os._exit(0)
                 if kind == "text":
                     self.path.write_bytes(b"fictional-private-non-cache")
                 else:
-                    with sqlite3.connect(self.path) as connection:
-                        connection.execute("CREATE TABLE unrelated(value TEXT)")
-                        connection.execute("INSERT INTO unrelated VALUES('fictional-private')")
+                    with fixture_database(self.path) as cursor:
+                        cursor.execute("CREATE TABLE unrelated(value TEXT)")
+                        cursor.execute("INSERT INTO unrelated VALUES('fictional-private')")
                 before = self.path.read_bytes()
                 store = self.store()
                 for operation in (lambda: store.start(self.context, now=100), store.clear):
@@ -420,8 +451,8 @@ os._exit(0)
         store.start(self.context, now=100)
         store.save_task(self.task_id, self.candidate, self.record)
         store.close()
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("UPDATE checkpoint_tasks SET payload=?", (b"fictional-damaged-ciphertext",))
+        with fixture_database(self.path) as cursor:
+            cursor.execute("UPDATE checkpoint_tasks SET payload=?", (b"fictional-damaged-ciphertext",))
         broken = self.store()
         with self.assertRaises(self.module().CollectionCheckpointError):
             broken.start(self.context, now=101)
@@ -433,18 +464,18 @@ os._exit(0)
         store.start(self.context, now=100)
         store.save_task(self.task_id, self.candidate, self.record)
         store.close()
-        with sqlite3.connect(self.path) as connection:
-            payload, logical_bytes = connection.execute("SELECT payload,logical_bytes FROM checkpoint_tasks").fetchone()
-            connection.execute("UPDATE checkpoint_tasks SET row_key=?", (hashlib.sha256(b"fictional-other-task").digest(),))
+        with fixture_database(self.path) as cursor:
+            payload, logical_bytes = cursor.execute("SELECT payload,logical_bytes FROM checkpoint_tasks").fetchone()
+            cursor.execute("UPDATE checkpoint_tasks SET row_key=?", (hashlib.sha256(b"fictional-other-task").digest(),))
         broken = self.store()
         with self.assertRaises(self.module().CollectionCheckpointError):
             broken.start(self.context, now=101)
         broken.clear()
         broken.start(self.context, now=102)
         broken.close()
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("INSERT INTO checkpoint_tasks(row_key,payload,logical_bytes) VALUES(?,?,?)",
-                               (hashlib.sha256(self.task_id.encode()).digest(), payload, logical_bytes))
+        with fixture_database(self.path) as cursor:
+            cursor.execute("INSERT INTO checkpoint_tasks(row_key,payload,logical_bytes) VALUES(?,?,?)",
+                           (hashlib.sha256(self.task_id.encode()).digest(), payload, logical_bytes))
         with self.assertRaises(self.module().CollectionCheckpointError):
             broken.start(self.context, now=103)
 
@@ -453,8 +484,8 @@ os._exit(0)
         store.start(self.context, now=100)
         store.save_task(self.task_id, self.candidate, self.record)
         store.close()
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("UPDATE checkpoint_state SET payload=?", (b"fictional-damaged-metadata",))
+        with fixture_database(self.path) as cursor:
+            cursor.execute("UPDATE checkpoint_state SET payload=?", (b"fictional-damaged-metadata",))
         broken = self.store()
         with self.assertRaises(self.module().CollectionCheckpointError):
             broken.start(self.context, now=101)
@@ -466,9 +497,9 @@ os._exit(0)
         store = self.store()
         store.start(self.context, now=100)
         store.close()
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("CREATE TABLE fictional_unrelated(value TEXT)")
-            connection.execute("INSERT INTO fictional_unrelated VALUES('fictional-preserve')")
+        with fixture_database(self.path) as cursor:
+            cursor.execute("CREATE TABLE fictional_unrelated(value TEXT)")
+            cursor.execute("INSERT INTO fictional_unrelated VALUES('fictional-preserve')")
         before = self.path.read_bytes()
         for operation in (lambda: store.start(self.context, now=101), store.clear):
             with self.assertRaises(self.module().CollectionCheckpointError):
@@ -479,8 +510,8 @@ os._exit(0)
         store = self.store()
         store.start(self.context, now=100)
         store.close()
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("ANALYZE")
+        with fixture_database(self.path) as cursor:
+            cursor.execute("ANALYZE")
         before = self.path.read_bytes()
         with self.assertRaises(self.module().CollectionCheckpointError):
             store.clear()
@@ -529,8 +560,8 @@ os._exit(0)
         store.start(self.context, now=100)
         store.save_task(self.task_id, self.candidate, self.record)
         store.close()
-        with sqlite3.connect(self.path) as connection:
-            connection.execute("UPDATE checkpoint_tasks SET logical_bytes=32768")
+        with fixture_database(self.path) as cursor:
+            cursor.execute("UPDATE checkpoint_tasks SET logical_bytes=32768")
         with self.assertRaises(self.module().CollectionCheckpointError):
             self.store(max_bytes=32768).start(self.context, now=101)
 
@@ -573,8 +604,8 @@ os._exit(0)
         store = self.store()
         store.start(self.context, now=100)
         store.save_task(self.task_id, self.candidate, self.record)
-        with sqlite3.connect(self.path) as connection:
-            ciphertext = connection.execute("SELECT payload FROM checkpoint_tasks").fetchone()[0]
+        with fixture_database(self.path) as cursor:
+            ciphertext = cursor.execute("SELECT payload FROM checkpoint_tasks").fetchone()[0]
         self.assertIn(ciphertext, self.path.read_bytes())
         store.clear()
         self.assertNotIn(ciphertext, self.path.read_bytes())
