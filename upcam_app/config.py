@@ -14,11 +14,13 @@ from runtime_mappings import validate_mappings
 from teambition_readonly import CollectionError
 from task_display import TaskDisplayError, validate_task_prefix, normalize_task_link_view
 from .dingtalk_mentions import MentionConfigError, normalize_mentions
+from .preferences import PREFERENCE_DEFAULTS, PreferenceError, preference_values
 
 
 SCHEMA_VERSION = 1
 SCHEDULE_RECOVERY_WINDOW = timedelta(hours=24)
 DEFAULT_SETTINGS = {
+    **PREFERENCE_DEFAULTS,
     "schema_version": SCHEMA_VERSION,
     "tenant_id": "",
     "project_id": "",
@@ -65,6 +67,10 @@ def validate_settings(settings: dict) -> dict:
     merged = {**DEFAULT_SETTINGS, **settings}
     if merged.get("schema_version") != SCHEMA_VERSION:
         raise SettingsError("Unsupported settings version")
+    try:
+        merged.update(preference_values(merged))
+    except PreferenceError as exc:
+        raise SettingsError(str(exc)) from None
     try:
         merged["dingtalk_mentions"] = normalize_mentions(
             merged["dingtalk_mention_mode"], merged["dingtalk_mentions"])

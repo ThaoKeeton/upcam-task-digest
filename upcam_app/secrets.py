@@ -18,8 +18,9 @@ SECRET_FIELDS = (
     "dingtalk_signing_secret",
     "openai_api_key",
 )
+UPDATE_SECRET_FIELDS = ("github_update_token",)
 INTERNAL_SECRET_FIELDS = ("delivery_ledger_id",)
-ALL_SECRET_FIELDS = SECRET_FIELDS + INTERNAL_SECRET_FIELDS
+ALL_SECRET_FIELDS = SECRET_FIELDS + UPDATE_SECRET_FIELDS + INTERNAL_SECRET_FIELDS
 
 
 class SecretStoreError(RuntimeError):

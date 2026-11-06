@@ -5,7 +5,7 @@
     xmlns:winuiex="using:WinUIEx"
     MinWidth="640" MinHeight="520">
   <Window.SystemBackdrop><MicaBackdrop /></Window.SystemBackdrop>
-  <Grid x:Name="RootGrid" RequestedTheme="Dark">
+  <Grid x:Name="RootGrid" RequestedTheme="Default">
     <Grid.RowDefinitions><RowDefinition Height="48" /><RowDefinition Height="*" /></Grid.RowDefinitions>
     <TitleBar x:Name="AppTitleBar" Title="UPCAM 站会日报"
         AutomationProperties.AutomationId="app-titlebar"
@@ -26,6 +26,7 @@
         SelectionChanged="Navigation_SelectionChanged">
       <NavigationView.MenuItems>
         <NavigationViewItem Content="主页" Tag="home" Icon="Home" />
+        <NavigationViewItem Content="常规" Tag="general" Icon="Setting" />
         <NavigationViewItemHeader Content="配置" />
         <NavigationViewItem Content="账户与模型" Tag="accounts" Icon="Contact" />
         <NavigationViewItem Content="项目范围" Tag="project" Icon="Folder" />

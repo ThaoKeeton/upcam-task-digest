@@ -37,8 +37,10 @@ from .project_setup import (
     ProjectSetupError, analyze_project_probe, merge_owner_mappings,
     parse_owner_mapping_tsv,
 )
+from .preferences import PREFERENCE_DEFAULTS, PreferenceError, preference_values, validate_update_token
+from .updates import GitHubUpdates, UpdateError
 from .secrets import (
-    INTERNAL_SECRET_FIELDS, SECRET_FIELDS,
+    INTERNAL_SECRET_FIELDS, SECRET_FIELDS, UPDATE_SECRET_FIELDS,
     DpapiSecretStore, SecretStoreError,
 )
 from .windows_integration import StartupIntegrationError, configure_user_startup
@@ -67,7 +69,7 @@ class WorkerService:
     def __init__(self, data_dir: Path | None = None, *, settings_store=None,
                  secret_store=None, history=None, model_catalog=None,
                  startup_configurer=None, client_factory=Client,
-                 workflow_factory=DigestWorkflow, sample_path=None):
+                 workflow_factory=DigestWorkflow, sample_path=None, update_manager=None):
         self.data_dir = Path(data_dir or user_data_dir())
         self.settings_store = settings_store or SettingsStore(self.data_dir / "settings.json")
         self.secret_store = secret_store or DpapiSecretStore(self.data_dir / "credentials.dpapi")
@@ -77,6 +79,7 @@ class WorkerService:
         self.client_factory = client_factory
         self.workflow_factory = workflow_factory
         self.sample_path = Path(sample_path or _resource_path("examples/digest.json"))
+        self.update_manager = update_manager or GitHubUpdates(self.data_dir, current_version=APP_VERSION)
         self._job_lock = threading.Lock()
         self._handled_schedule_slots: set[str] = set()
         self._setup_probe: dict | None = None
@@ -94,6 +97,11 @@ class WorkerService:
         handlers = {
             "initialize": self._initialize,
             "save": self._save,
+            "save_preferences": self._save_preferences,
+            "check_updates": self._check_updates,
+            "download_update": self._download_update,
+            "prepare_update": self._prepare_update,
+            "finish_update": self._finish_update,
             "clear_credentials": self._clear_credentials,
             "refresh_models": self._refresh_models,
             "import_owner_mappings": self._import_owner_mappings,
@@ -156,7 +164,94 @@ class WorkerService:
             "data_directory": str(self.data_dir),
             "application_version": APP_VERSION,
             "ruleset_revision": RULESET_REVISION,
+            "preferences": preference_values(settings),
         }
+
+    def _save_preferences(self, payload: dict) -> dict:
+        if (set(payload) - {"preferences", "github_token", "clear_github_token"}
+                or not isinstance(payload.get("preferences"), dict)
+                or set(payload["preferences"]) - set(PREFERENCE_DEFAULTS)
+                or type(payload.get("clear_github_token", False)) is not bool):
+            raise WorkerApiError("常规设置内容无效；未保存任何更改。")
+        previous = self.settings_store.load()
+        old_secrets = self.secret_store.load()
+        credentials = dict(old_secrets)
+        try:
+            token = validate_update_token(payload.get("github_token", ""))
+            clean = validate_settings(dict(previous, **payload["preferences"]))
+        except (PreferenceError, SettingsError) as exc:
+            raise WorkerApiError(str(exc)) from None
+        if payload.get("clear_github_token"):
+            credentials.pop("github_update_token", None)
+        if token:
+            credentials["github_update_token"] = token
+        reject_credential_mentions(clean, old_secrets, credentials)
+        startup_attempted = False
+        try:
+            self.secret_store.save(credentials)
+            self.settings_store.save(clean)
+            if clean["start_with_windows"] != previous["start_with_windows"] or clean["start_with_windows"]:
+                startup_attempted = True
+                self.startup_configurer(clean["start_with_windows"],
+                                        executable=_current_application_executable(), frozen=True)
+        except Exception:
+            restored = True
+            for restore in (lambda: self.secret_store.save(old_secrets),
+                            lambda: self.settings_store.save(previous)):
+                try:
+                    restore()
+                except Exception:
+                    restored = False
+            if startup_attempted:
+                try:
+                    self.startup_configurer(previous["start_with_windows"],
+                                            executable=_current_application_executable(), frozen=True)
+                except Exception:
+                    restored = False
+            raise WorkerApiError("常规设置保存失败，已恢复原设置。" if restored else
+                                 "常规设置保存未完成；恢复也未完成，请重新打开应用核对设置和启动项。") from None
+        return {"preferences": preference_values(clean), "secret_presence": _secret_presence(credentials),
+                "status": "常规设置已保存；未采集任务、未调用 OpenAI、未发送钉钉。"}
+
+    def _update_operation(self, payload: dict, operation: str) -> dict:
+        self._require_empty_payload(payload)
+        if not self._job_lock.acquire(blocking=False):
+            raise WorkerApiError("已有采集或发送正在运行；请完成后再更新应用。")
+        try:
+            token = self.secret_store.load().get("github_update_token", "")
+            if operation == "prepare_install":
+                return self.update_manager.prepare_install(token, current_executable=Path(_current_application_executable()))
+            return getattr(self.update_manager, operation)(token)
+        except UpdateError as exc:
+            raise WorkerApiError(exc.message) from None
+        finally:
+            self._job_lock.release()
+
+    def _check_updates(self, payload: dict) -> dict:
+        return self._update_operation(payload, "check")
+
+    def _download_update(self, payload: dict) -> dict:
+        return self._update_operation(payload, "download")
+
+    def _prepare_update(self, payload: dict) -> dict:
+        return self._update_operation(payload, "prepare_install")
+
+    def _finish_update(self, payload: dict) -> dict:
+        self._require_empty_payload(payload)
+        executable = Path(_current_application_executable())
+        try:
+            verified = self.update_manager.verify_installed(executable)
+        except UpdateError as exc:
+            raise WorkerApiError(exc.message) from None
+        settings = self.settings_store.load()
+        if settings["start_with_windows"]:
+            try:
+                self.startup_configurer(True, executable=str(executable), frozen=True)
+            except (OSError, StartupIntegrationError):
+                return {"status": "startup_not_updated", "version": verified.get("version"),
+                        "message": "新版已启动，但登录启动项未更新；原版本目录已保留，请在常规页重新保存启动设置。"}
+        return {"status": "installed", "version": verified.get("version"),
+                "message": "已从校验后的更新目录启动；本机数据和原版本目录已保留。"}
 
     def _save(self, payload: dict) -> dict:
         settings_input = payload.get("settings")
@@ -274,7 +369,7 @@ class WorkerService:
         settings["view"] = dict(settings["view"], verified=False, evidence="")
         self.settings_store.save(settings)
         retained = {key: value for key, value in current.items()
-                    if key in INTERNAL_SECRET_FIELDS}
+                    if key in INTERNAL_SECRET_FIELDS + UPDATE_SECRET_FIELDS}
         self.secret_store.save(retained)
         self._setup_probe = None
         return {"settings": settings, "secret_presence": _secret_presence(retained),
@@ -863,7 +958,7 @@ def _safe_history_row(row: dict) -> dict:
 
 
 def _secret_presence(values: dict) -> dict[str, bool]:
-    return {key: bool(values.get(key)) for key in SECRET_FIELDS}
+    return {key: bool(values.get(key)) for key in SECRET_FIELDS + UPDATE_SECRET_FIELDS}
 
 
 def _resource_path(relative: str) -> Path:

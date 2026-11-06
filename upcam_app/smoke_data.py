@@ -15,6 +15,8 @@ from .secrets import MemorySecretStore
 from .worker_api import WorkerService
 from .workflow import DigestWorkflow
 from .dingtalk import DingTalkSender
+from . import APP_VERSION
+from .smoke_updates import synthetic_update_manager
 
 
 class SyntheticClient:
@@ -133,6 +135,7 @@ def make_smoke_service(directory: Path) -> WorkerService:
     settings = deepcopy(DEFAULT_SETTINGS)
     settings.update({
         "tenant_id": "demo-org", "project_id": "demo-project",
+        "ui_language": "zh-CN", "ui_theme": "dark",
         "owner_names": {"demo-person": "虚构成员甲", "demo-person-2": "虚构成员乙"},
         "status_names": {
             "demo-open": "待处理", "demo-progress": "进行中",
@@ -165,4 +168,5 @@ def make_smoke_service(directory: Path) -> WorkerService:
         model_catalog=catalog, client_factory=SyntheticClient,
         workflow_factory=workflow,
         startup_configurer=lambda *_args, **_kwargs: None,
+        update_manager=synthetic_update_manager(directory, APP_VERSION),
     )

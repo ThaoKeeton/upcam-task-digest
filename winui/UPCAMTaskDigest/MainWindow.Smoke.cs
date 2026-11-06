@@ -49,6 +49,8 @@ public sealed partial class MainWindow
             ApplyInitializationResult(await _worker.SendAsync("initialize"));
             Assert(_ready && Navigation.IsEnabled && PageHost.IsEnabled && SaveButton.IsEnabled,
                 "Compatible synthetic worker restores native operation state");
+            ApplyGeneralAppearance();
+            await VerifyGeneralSettingsAsync(output);
             var titleBar = Find<TitleBar>("app-titlebar");
             Assert(titleBar is not null && ExtendsContentIntoTitleBar, "Native custom TitleBar replaces colored system title bar");
             Assert(titleBar!.IconSource is BitmapIconSource { ShowAsMonochrome: false }, "TitleBar keeps original icon colors");
@@ -382,6 +384,118 @@ public sealed partial class MainWindow
     {
         if (!condition) throw new InvalidOperationException(description);
         _smokeSteps.Add(description);
+    }
+
+    private async Task VerifyGeneralSettingsAsync(string output)
+    {
+        var recoveryWindow = new Window { Content = new Grid() };
+        recoveryWindow.Activate();
+        var recoveryAppWindow = Microsoft.UI.Windowing.AppWindow.GetFromWindowId(
+            Microsoft.UI.Win32Interop.GetWindowIdFromWindow(WinRT.Interop.WindowNative.GetWindowHandle(recoveryWindow)));
+        bool registrationWorks = true;
+        using (var tray = new NativeDesktop(recoveryWindow, () => recoveryAppWindow.Show(), () => { }, () => false,
+            _ => registrationWorks))
+        {
+            recoveryAppWindow.Hide();
+            registrationWorks = false;
+            tray.ConfigureTray(true);
+            Assert(!tray.TrayReady && recoveryAppWindow.IsVisible,
+                "Injected tray re-registration failure restores a visible native window");
+        }
+        recoveryWindow.Close();
+        var launch = AppLaunchOptions.Parse(new[] { "--background", "--wait-for-parent", "12345", "--after-update" }, 54321);
+        Assert(launch.Background && launch.AfterUpdate && launch.ParentPid == 12345,
+            "Update launch arguments carry an explicit parent handoff without elevation");
+        foreach (var invalid in new[] { new[] { "--after-update" }, new[] { "--background", "--background" },
+            new[] { "--wait-for-parent", "54321" }, new[] { "--wait-for-parent", "-1" }, new[] { "--untrusted" } })
+        {
+            bool rejected = false;
+            try { AppLaunchOptions.Parse(invalid, 54321); } catch (ArgumentException) { rejected = true; }
+            Assert(rejected, "Invalid or duplicate launch options are rejected");
+        }
+        _state.Set("task_number_prefix", "DRAFT");
+        _state.SetSecretDraft("openai_api_key", "ci-unsaved-secret-draft");
+        _generalTabIndex = 1;
+        Navigate("general");
+        await WaitForAsync(() => Find<ComboBox>("ui-language") is not null);
+        Find<ComboBox>("ui-language")!.SelectedIndex = 2;
+        await WaitForAsync(() => PageTitle.Text == "General");
+        Assert(UiStrings.ResolvedLanguage == "en-US" && SaveButton.Content.ToString() == "Save general settings",
+            "Actual native general controls and navigation switch to English");
+        await WaitForAsync(() => Find<ComboBox>("ui-theme") is not null);
+        Find<ComboBox>("ui-theme")!.SelectedIndex = 1;
+        await WaitForAsync(() => RootGrid.ActualTheme == ElementTheme.Light);
+        Assert(AppWindow.TitleBar.ButtonForegroundColor == Microsoft.UI.Colors.Black,
+            "Light theme gives caption buttons a visible foreground");
+        Invoke(SaveButton);
+        await WaitForAsync(() => !_busy);
+        Assert(_state.Text("task_number_prefix") == "DRAFT" && _state.Dirty &&
+            _state.SecretDrafts.GetValueOrDefault("openai_api_key") == "ci-unsaved-secret-draft",
+            "General save preserves unsaved project and credential drafts");
+        await CaptureAsync(Path.Combine(output, "general-english-light.png"));
+        foreach (var size in new[] { new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540) })
+        {
+            AppWindow.Resize(size);
+            foreach (string route in _routes.Keys)
+            {
+                Navigate(route); await Task.Delay(40); RootGrid.UpdateLayout();
+                Assert(PageHost.ActualWidth > 300 && PageHost.ActualHeight > 150,
+                    $"English light interface layout {route} {size.Width}x{size.Height}");
+            }
+        }
+        AppWindow.Resize(new SizeInt32(1180, 800));
+        _state.Apply(await Worker.SendAsync("initialize"));
+        ApplyGeneralAppearance();
+        _generalTabIndex = 2;
+        Navigate("general");
+        await WaitForAsync(() => Find<ToggleSwitch>("tray-enabled") is not null);
+        Find<ToggleSwitch>("tray-enabled")!.IsOn = false;
+        Invoke(SaveButton);
+        await WaitForAsync(() => !_busy);
+        Assert(!_native!.TrayReady && !_state.Flag("close_to_tray") && !_state.Flag("start_in_tray") && AppWindow.IsVisible,
+            "Disabling the tray disables hiding preferences and preserves a visible window");
+        await WaitForAsync(() => Find<ToggleSwitch>("tray-enabled") is not null);
+        Find<ToggleSwitch>("tray-enabled")!.IsOn = true;
+        await WaitForAsync(() => Find<ToggleSwitch>("close-to-tray")?.IsEnabled == true);
+        Find<ToggleSwitch>("close-to-tray")!.IsOn = true;
+        Invoke(SaveButton);
+        await WaitForAsync(() => !_busy);
+        Assert(_native.TrayReady && _state.Flag("close_to_tray"), "Tray preferences restore the existing native icon and close behavior");
+        _generalTabIndex = 1;
+        Navigate("general");
+        await WaitForAsync(() => Find<ComboBox>("ui-language") is not null);
+        Find<ComboBox>("ui-language")!.SelectedIndex = 1;
+        await WaitForAsync(() => UiStrings.ResolvedLanguage == "zh-CN");
+        await WaitForAsync(() => Find<ComboBox>("ui-theme") is not null);
+        Find<ComboBox>("ui-theme")!.SelectedIndex = 2;
+        await WaitForAsync(() => RootGrid.ActualTheme == ElementTheme.Dark);
+        Invoke(SaveButton);
+        await WaitForAsync(() => !_busy);
+        Assert(PageTitle.Text == "常规" && AppWindow.TitleBar.ButtonForegroundColor == Microsoft.UI.Colors.White,
+            "Chinese dark preferences restore caption and localized settings");
+        _generalTabIndex = 0;
+        Navigate("general");
+        Invoke(Find<Button>("update-check")!);
+        await WaitForAsync(() => !_busy);
+        Assert(Value(_state.UpdateState, "status") == "access_required",
+            "Private update source without token is not mislabeled as current");
+        Find<PasswordBox>("update-token")!.Password = "github_pat_ci_synthetic-not-real";
+        Invoke(SaveButton);
+        await WaitForAsync(() => !_busy);
+        Invoke(Find<Button>("update-check")!);
+        await WaitForAsync(() => !_busy);
+        Assert(Value(_state.UpdateState, "status") == "available", "Native update check uses only the synthetic fixed release");
+        Invoke(Find<Button>("update-download")!);
+        await WaitForAsync(() => !_busy);
+        Assert(Value(_state.UpdateState, "status") == "downloaded", "Native download completes real digest and package verification with synthetic bytes");
+        Invoke(Find<Button>("update-install")!);
+        await WaitForAsync(() => !_busy);
+        Assert(_syntheticUpdateLaunch && AppWindow.IsVisible && _state.History.Count == 0,
+            "Verified synthetic install prepares a per-user handoff without executing a fake binary or sending a report");
+        await CaptureAsync(Path.Combine(output, "general-chinese-dark.png"));
+        _state.Apply(await Worker.SendAsync("initialize"));
+        ApplyGeneralAppearance();
+        Navigate("home");
     }
 
     private async Task VerifyUtf8PipeBoundariesAsync()

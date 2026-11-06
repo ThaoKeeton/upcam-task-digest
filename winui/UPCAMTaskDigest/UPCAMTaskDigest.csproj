@@ -5,7 +5,7 @@
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>Upcam.Desktop</RootNamespace>
     <AssemblyName>UPCAMTaskDigest</AssemblyName>
-    <Version>0.3.10</Version>
+    <Version>0.4.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\Teambition.ico</ApplicationIcon>
     <UseWinUI>true</UseWinUI>
@@ -30,5 +30,8 @@
   <ItemGroup>
     <Content Include="Assets\Teambition.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Assets\Teambition.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Strings\en-US.json" LogicalName="Upcam.Desktop.Strings.en-US.json" />
   </ItemGroup>
 </Project>

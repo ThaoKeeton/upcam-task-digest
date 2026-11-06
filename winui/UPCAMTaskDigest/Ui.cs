@@ -16,7 +16,7 @@ public sealed partial class MainWindow
     private static TextBlock Paragraph(string text, bool secondary = false, double size = 14)
     {
         var block = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap, FontSize = size };
-        if (secondary) block.Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+        if (secondary) block.Style = (Style)Application.Current.Resources["SecondaryParagraphStyle"];
         return block;
     }
 
@@ -30,8 +30,7 @@ public sealed partial class MainWindow
     private static FrameworkElement Card(UIElement child) => new Border
     {
         Padding = new Thickness(20), CornerRadius = new CornerRadius(8),
-        Background = (Brush)Application.Current.Resources["CardBackgroundFillColorDefaultBrush"],
-        BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"],
+        Style = (Style)Application.Current.Resources["SettingsCardStyle"],
         BorderThickness = new Thickness(1), Child = child
     };
 
@@ -43,15 +42,15 @@ public sealed partial class MainWindow
 
     private Button ActionButton(string label, string id, Func<Task> action, bool accent = false)
     {
-        var button = Identify(new Button { Content = label }, id);
+        var button = Identify(new Button { Content = UiStrings.T(label) }, id);
         if (accent) button.Style = (Style)Application.Current.Resources["AccentButtonStyle"];
-        button.Click += async (_, _) => await RunOperationAsync(label + "…", action);
+        button.Click += async (_, _) => await RunOperationAsync(UiStrings.T(label) + "…", action);
         return button;
     }
 
     private Button NavigationButton(string label, string route)
     {
-        var button = new Button { Content = label };
+        var button = new Button { Content = UiStrings.T(label) };
         button.Click += (_, _) => Navigate(route);
         return button;
     }
@@ -60,9 +59,9 @@ public sealed partial class MainWindow
     {
         var input = Identify(new TextBox
         {
-            Header = header, AcceptsReturn = multiline,
+            Header = UiStrings.T(header), AcceptsReturn = multiline,
             TextWrapping = multiline ? TextWrapping.Wrap : TextWrapping.NoWrap,
-            Text = _state.Text(key), PlaceholderText = placeholder ?? ""
+            Text = _state.Text(key), PlaceholderText = UiStrings.T(placeholder ?? "")
         }, id);
         var settingsAtCreation = _state.Settings;
         // TextChanged is deferred by WinUI. Commit synchronously before a
@@ -78,7 +77,7 @@ public sealed partial class MainWindow
     {
         var input = Identify(new TextBox
         {
-            Header = start ? "开始（本机时间）" : "结束（本机时间）",
+            Header = UiStrings.T(start ? "开始（本机时间）" : "结束（本机时间）"),
             Text = start ? _state.ManualStart : _state.ManualEnd,
             PlaceholderText = "YYYY-MM-DD HH:MM"
         }, start ? "window-start" : "window-end");
@@ -122,7 +121,7 @@ public sealed partial class MainWindow
 
     private ToggleSwitch Toggle(string label, string key, string id)
     {
-        var toggle = Identify(new ToggleSwitch { Header = label, IsOn = _state.Flag(key), OnContent = "已开启", OffContent = "已关闭" }, id);
+        var toggle = Identify(new ToggleSwitch { Header = UiStrings.T(label), IsOn = _state.Flag(key), OnContent = UiStrings.T("已开启"), OffContent = UiStrings.T("已关闭") }, id);
         toggle.Toggled += (_, _) => _state.Set(key, toggle.IsOn);
         return toggle;
     }
