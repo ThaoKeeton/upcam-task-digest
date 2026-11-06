@@ -26,6 +26,8 @@ from .config import (
     scheduled_window, user_data_dir, validate_settings,
 )
 from .diagnostic_export import safe_structure_export
+from .collection_checkpoint import CollectionCheckpointBusy, DpapiCollectionCheckpoint
+from .collection_runtime import make_collection_client
 from .dingtalk_mentions import MentionConfigError, mention_options, reject_credential_mentions
 from .diagnostic_files import write_private_diagnostic
 from . import APP_VERSION, RULESET_REVISION
@@ -69,7 +71,8 @@ class WorkerService:
     def __init__(self, data_dir: Path | None = None, *, settings_store=None,
                  secret_store=None, history=None, model_catalog=None,
                  startup_configurer=None, client_factory=Client,
-                 workflow_factory=DigestWorkflow, sample_path=None, update_manager=None):
+                 workflow_factory=DigestWorkflow, sample_path=None, update_manager=None,
+                 checkpoint_factory=None):
         self.data_dir = Path(data_dir or user_data_dir())
         self.settings_store = settings_store or SettingsStore(self.data_dir / "settings.json")
         self.secret_store = secret_store or DpapiSecretStore(self.data_dir / "credentials.dpapi")
@@ -78,6 +81,7 @@ class WorkerService:
         self.startup_configurer = startup_configurer or configure_user_startup
         self.client_factory = client_factory
         self.workflow_factory = workflow_factory
+        self.checkpoint_factory = checkpoint_factory
         self.sample_path = Path(sample_path or _resource_path("examples/digest.json"))
         self.update_manager = update_manager or GitHubUpdates(self.data_dir, current_version=APP_VERSION)
         self._job_lock = threading.Lock()
@@ -103,6 +107,7 @@ class WorkerService:
             "prepare_update": self._prepare_update,
             "finish_update": self._finish_update,
             "clear_credentials": self._clear_credentials,
+            "clear_collection_progress": self._clear_collection_progress,
             "refresh_models": self._refresh_models,
             "import_owner_mappings": self._import_owner_mappings,
             "update_owner_mapping": self._update_owner_mapping,
@@ -398,6 +403,25 @@ class WorkerService:
         return {"settings": settings, "secret_presence": _secret_presence(retained),
                 "status": "已清除服务密钥并关闭自动运行；本机防重复身份已保留。"}
 
+    def _clear_collection_progress(self, payload: dict) -> dict:
+        self._require_empty_payload(payload)
+        if not self._job_lock.acquire(blocking=False):
+            raise WorkerApiError("采集正在进行，暂不能清除进度；请等待完成或退出应用后重试。")
+        try:
+            factory = self.checkpoint_factory if self.checkpoint_factory is not None else DpapiCollectionCheckpoint
+            checkpoint = factory(self.data_dir / "collection-progress.sqlite3")
+            try:
+                checkpoint.clear()
+            finally:
+                checkpoint.close()
+        except CollectionCheckpointBusy:
+            raise WorkerApiError("采集正在进行，暂不能清除进度；请等待完成或退出应用后重试。") from None
+        except Exception:
+            raise WorkerApiError("本地采集进度无法安全清除；请退出应用后重试。") from None
+        finally:
+            self._job_lock.release()
+        return {"status": "未完成的采集进度已清除；配置、凭据、模型缓存、运行记录和发送账本保持不变。"}
+
     def _refresh_models(self, payload: dict) -> dict:
         self._require_empty_payload(payload)
         credentials = self.secret_store.load()
@@ -501,8 +525,8 @@ class WorkerService:
         report_day = end.date().isoformat()
         selection = updated_selection(report_day, start, end)
         validate_settings(settings)
-        collection = self._client(settings, credentials).collect(
-            settings["project_id"], day=report_day, window=(start, end),
+        collection = self._collect_source(
+            settings, credentials, day=report_day, window=(start, end),
             include_archived=settings["include_archived"])
         probe = analyze_project_probe(
             collection, tenant_id=settings["tenant_id"], project_id=settings["project_id"],
@@ -539,8 +563,8 @@ class WorkerService:
             start, end = start_local.astimezone(SHANGHAI), end_local.astimezone(SHANGHAI)
             day = end.date().isoformat()
             config = runtime_config(settings)
-            collection = self._client(settings, secrets).collect(
-                settings["project_id"], day=day, window=(start, end),
+            collection = self._collect_source(
+                settings, secrets, day=day, window=(start, end),
                 include_archived=settings["include_archived"])
             diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
             self._last_diagnostic_shape = safe_structure_export(collection, config, day, (start, end))
@@ -704,8 +728,8 @@ class WorkerService:
         now = datetime.now().astimezone(SHANGHAI).replace(microsecond=0)
         start, end = now - timedelta(minutes=5), now
         try:
-            collection = self._client(settings, secrets).collect(
-                settings["project_id"], day=end.date().isoformat(), window=(start, end),
+            collection = self._collect_source(
+                settings, secrets, day=end.date().isoformat(), window=(start, end),
                 include_archived=settings["include_archived"])
         except (CollectionError, OSError):
             raise WorkerApiError("Teambition 只读连接测试失败；请检查本机网络、凭据和项目读取权限。") from None
@@ -809,9 +833,12 @@ class WorkerService:
             if allow_confirmed_repeat or manual_request_id is not None:
                 run_options.update(allow_confirmed_repeat=allow_confirmed_repeat,
                                    manual_request_id=manual_request_id)
-            result = self.workflow_factory(settings, secrets, self.data_dir,
-                                           history=self.history,
-                                           model_catalog=self.model_catalog).run(
+            workflow_options = {"history": self.history, "model_catalog": self.model_catalog}
+            if self.checkpoint_factory is not None:
+                workflow_options["checkpoint_factory"] = self.checkpoint_factory
+            if self.workflow_factory is DigestWorkflow:
+                workflow_options["client_factory"] = self.client_factory
+            result = self.workflow_factory(settings, secrets, self.data_dir, **workflow_options).run(
                                                start, end, **run_options)
             return {"run_id": result["run_id"], "state": result["state"],
                     "markdown": result["report"]["markdown"],
@@ -823,12 +850,19 @@ class WorkerService:
             self._job_lock.release()
 
     def _client(self, settings: dict, credentials: dict):
-        return self.client_factory(
-            settings["tenant_id"],
-            credentials=lambda: (credentials["teambition_app_id"],
-                                 credentials["teambition_app_secret"]),
-            **collection_client_limits(settings),
+        return make_collection_client(
+            settings, credentials, self.data_dir,
+            client_factory=self.client_factory, checkpoint_factory=self.checkpoint_factory,
         )
+
+    def _collect_source(self, settings: dict, credentials: dict, **options):
+        """Guard cache use without reentering the lock held by formal runs."""
+        if not self._job_lock.acquire(blocking=False):
+            raise WorkerApiError("已有日报或诊断任务正在运行；当前操作未并行执行。")
+        try:
+            return self._client(settings, credentials).collect(settings["project_id"], **options)
+        finally:
+            self._job_lock.release()
 
     def _validate_auto_ready(self, settings: dict, credentials: dict) -> None:
         if (settings.get("api_contract_verified") is not True

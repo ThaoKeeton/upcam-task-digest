@@ -198,7 +198,7 @@ class DiagnosticCounterClarityTests(unittest.TestCase):
              0, 0, 1),
             ("_MAX_CATALOG_TASKS", [self.record([self.event(0, "create")]),
                                     self.record([self.event(1, "future.synthetic.second")])],
-             0, 0, 1),
+             1, 0, 1),  # Window problems are prioritized over ordinary records.
         ]
         for limit, records, in_window, omitted, unscanned in cases:
             with self.subTest(limit=limit), patch.object(exporter, limit, 1):

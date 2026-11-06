@@ -287,6 +287,24 @@ def _activities(record):
     return value if isinstance(value, list) else []
 
 
+def _task_diagnostic_priority(record, bounds):
+    """Keep relevant evidence visible when bounded detail omits inactive tasks."""
+    priority = 3
+    for activity in _activities(record):
+        if not isinstance(activity, dict):
+            return 0
+        membership = _in_report_window(activity.get("createTime"), bounds)
+        if membership is None:
+            return 0
+        if membership:
+            action = activity.get("action")
+            priority = min(priority, 1 if not isinstance(action, str) or action not in OBSERVED_ACTIONS else 2)
+    task = record.get("task", {}) if isinstance(record, dict) else {}
+    if isinstance(task, dict) and _in_report_window(task.get("updated"), bounds) is True:
+        priority = min(priority, 2)
+    return priority
+
+
 def _protocol_catalog(records, bounds, total_events):
     """Scan bounded source identities independently of expensive detail shapes."""
     groups = {}
@@ -438,13 +456,16 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
 
     # Reading list lengths counts omissions without scanning omitted event values.
     total_events = sum(len(_activities(record)) for record in records)
-    catalog = _protocol_catalog(records, bounds, total_events)
+    # This is an export ordering only: source task order, event counts and
+    # sendability do not change. Catalog/detail truncation stays explicit.
+    diagnostic_records = sorted(records, key=lambda record: _task_diagnostic_priority(record, bounds))
+    catalog = _protocol_catalog(diagnostic_records, bounds, total_events)
     tasks, reasons = [], set()
     metadata_bytes = detail_bytes = included_events = 0
     detail_budget_exhausted = False
     if len(records) > _MAX_TASKS:
         reasons.add("task_count_limit")
-    for record in records[:_MAX_TASKS]:
+    for record in diagnostic_records[:_MAX_TASKS]:
         if not isinstance(record, dict):
             reasons.add("invalid_task_record")
             continue

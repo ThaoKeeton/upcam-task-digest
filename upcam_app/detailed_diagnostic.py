@@ -17,8 +17,8 @@ from urllib.parse import parse_qsl, quote, quote_plus, unquote, unquote_plus, ur
 
 MAX_DETAILED_BYTES = 16 * 1024 * 1024
 MAX_STRING_BYTES = 256 * 1024
-MAX_TASKS = 700
-MAX_ACTIVITIES = 50000
+MAX_TASKS = 10000
+MAX_ACTIVITIES = 1000000
 MAX_DEPTH = 16
 MAX_NODES = 2000000
 MAX_UNIT_NODES = 20000

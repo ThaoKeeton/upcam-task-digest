@@ -20,6 +20,10 @@ class CollectionError(RuntimeError):
     """Messages deliberately exclude response bodies, URLs and credentials."""
 
 
+class BatchBudgetExceeded(CollectionError):
+    """Only a local batch limit; a coordinator may start one fresh batch."""
+
+
 def identifier(value):
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
         raise CollectionError("Invalid identifier")
@@ -68,7 +72,9 @@ class Client:
     def __init__(self, tenant_id, *, transport=None, sleep=time.sleep, clock=time.monotonic,
                  credentials=None, interval=0.25, attempts=3, max_pages=50,
                  max_requests=1000, max_tasks=300, max_records=50000, max_seconds=310,
-                 max_response_bytes=128 * 1024 * 1024):
+                 max_response_bytes=128 * 1024 * 1024, batch_mode=False,
+                 max_project_tasks=10000, checkpoint=None, shared_budget=None,
+                 batch_policy=None):
         self.tenant_id = identifier(tenant_id)
         self.injected_transport = transport is not None
         self.transport = transport or build_opener(NoRedirect()).open
@@ -83,6 +89,11 @@ class Client:
                 or type(max_seconds) is not int or not 1 <= max_seconds <= 600
                 or type(max_response_bytes) is not int or not 1024 <= max_response_bytes <= 512 * 1024 * 1024):
             raise CollectionError("Invalid collection budgets")
+        if (type(batch_mode) is not bool or type(max_project_tasks) is not int
+                or not 1 <= max_project_tasks <= 10000):
+            raise CollectionError("Invalid batch collection policy")
+        self.batch_mode, self.max_project_tasks = batch_mode, max_project_tasks
+        self.checkpoint, self.shared_budget, self.batch_policy = checkpoint, shared_budget, batch_policy
         self.interval, self.attempts, self.max_pages = interval, attempts, max_pages
         self.max_requests, self.max_tasks = max_requests, max_tasks
         self.max_records, self.max_seconds = max_records, max_seconds
@@ -92,16 +103,20 @@ class Client:
         self.last_request = None
 
     def _remaining(self):
+        if self.shared_budget is not None:
+            self.shared_budget.check_time()
         if self.started is None:
             self.started = self.clock()
         remaining = self.max_seconds - (self.clock() - self.started)
         if remaining <= 0:
-            raise CollectionError("Collection time budget exhausted")
+            raise BatchBudgetExceeded("Collection time budget exhausted")
         return remaining
 
     def _wait(self, delay):
+        if self.shared_budget is not None:
+            self.shared_budget.before_wait(delay)
         if delay >= self._remaining():
-            raise CollectionError("Wait would exceed collection time budget")
+            raise BatchBudgetExceeded("Wait would exceed collection time budget")
         self.sleep(delay)
 
     def get(self, path, params):
@@ -109,11 +124,16 @@ class Client:
             raise CollectionError("Endpoint outside read-only allowlist")
         for attempt in range(self.attempts):
             if self.request_count >= self.max_requests:
-                raise CollectionError("Collection request budget exhausted")
+                raise BatchBudgetExceeded("Collection request budget exhausted")
             self._remaining()
             if self.last_request is not None:
                 self._wait(max(0, self.interval - (self.clock() - self.last_request)))
-            request = Request(self.ORIGIN + path + "?" + urlencode(params), method="GET", headers={
+            reservation = None
+            request_params, body_limit = params, 8 * 1024 * 1024
+            if self.shared_budget is not None:
+                reservation = self.shared_budget.plan_request(params, detail=path == "/api/v3/task/query")
+                request_params, body_limit = reservation["params"], reservation["body_limit"]
+            request = Request(self.ORIGIN + path + "?" + urlencode(request_params), method="GET", headers={
                 "Authorization": "Bearer " + app_jwt(*self.credentials()),
                 "X-Tenant-Id": self.tenant_id, "X-Tenant-Type": "organization",
                 "Accept": "application/json",
@@ -122,17 +142,37 @@ class Client:
             self.request_count += 1
             delay = 2 ** attempt
             try:
-                with self.transport(request, timeout=min(30, self._remaining())) as response:
+                timeout = min(30, self._remaining())
+                if self.shared_budget is not None:
+                    self.shared_budget.before_request(reservation)
+                    # Durable accounting can take time. Check the deadline and
+                    # start the rate interval at the actual transport boundary.
+                    timeout = min(30, self._remaining())
+                    self.last_request = self.clock()
+                with self.transport(request, timeout=timeout) as response:
                     if response.status != 200:
                         raise CollectionError("Unexpected HTTP status")
-                    body = response.read(8 * 1024 * 1024 + 1)
-                self._remaining()
-                if len(body) > 8 * 1024 * 1024:
+                    body = response.read(body_limit + 1)
+                    if self.shared_budget is not None:
+                        if len(body) > body_limit:
+                            raise CollectionError("Response size limit exceeded")
+                        data = json.loads(body)
+                        rows = data.get("result") if isinstance(data, dict) else None
+                        count = len(rows) if isinstance(rows, list) else int(isinstance(rows, dict))
+                        # Settle both charges atomically before __exit__ can fail.
+                        # An uncertain read/parse retains the write-ahead reservation.
+                        self.shared_budget.finish_response(reservation, len(body), count)
+                if self.shared_budget is None:
+                    self._remaining()
+                if len(body) > body_limit:
                     raise CollectionError("Response size limit exceeded")
+                if self.shared_budget is not None:
+                    self._remaining()
                 if self.response_bytes + len(body) > self.max_response_bytes:
-                    raise CollectionError("Collection response byte budget exhausted")
+                    raise BatchBudgetExceeded("Collection response byte budget exhausted")
                 self.response_bytes += len(body)
-                data = json.loads(body)
+                if self.shared_budget is None:
+                    data = json.loads(body)
                 if not isinstance(data, dict) or type(data.get("code")) is not int or data["code"] != 200:
                     raise CollectionError("API rejected request or malformed envelope")
                 return data
@@ -171,7 +211,7 @@ class Client:
             for row in rows:
                 self.record_count += 1
                 if self.record_count > self.max_records:
-                    raise CollectionError("Collection record budget exhausted")
+                    raise BatchBudgetExceeded("Collection record budget exhausted")
                 key = record_id(row, task_fallback=not path.endswith("/activity/list"))
                 if key in seen_records:
                     if row != seen_records[key]:
@@ -190,7 +230,8 @@ class Client:
             params["pageToken"] = token
         raise CollectionError("Pagination limit exceeded; incomplete collection")
 
-    def collect(self, project_id, *, include_archived=False, day=None, page_size=100, window=None):
+    def collect(self, project_id, *, include_archived=False, day=None, page_size=100, window=None,
+                batch_mode=None):
         # Caller freezes the Shanghai report date and optional half-open window
         # before any request. Task updated timestamps never select candidates.
         try:
@@ -199,6 +240,12 @@ class Client:
             raise CollectionError('Canonical report day and timezone-aware window must be fixed before collection') from None
         if type(page_size) is not int or not 1 <= page_size <= 100:
             raise CollectionError('Invalid page size')
+        if batch_mode is not None and type(batch_mode) is not bool:
+            raise CollectionError('Invalid batch collection policy')
+        enabled = self.batch_mode if batch_mode is None else batch_mode
+        if enabled:
+            from collection_batches import collect_project
+            return collect_project(self, project_id, include_archived, page_size, selection)
         return self._collect(project_id, include_archived, page_size, selection)
 
     def _collect_bounded_fixture(self, project_id, *, include_archived=False):

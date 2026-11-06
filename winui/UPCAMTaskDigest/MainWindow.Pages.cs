@@ -369,7 +369,7 @@ public sealed partial class MainWindow
     {
         var limit = Identify(new NumberBox
         {
-            Header = UiStrings.T("单次采集任务上限（1–700）"), Minimum = 1, Maximum = 700,
+            Header = UiStrings.T("每批采集任务数（1–700）"), Minimum = 1, Maximum = 700,
             Value = _state.Number("max_tasks_per_run", 300), SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact
         }, "task-limit");
         limit.ValueChanged += (_, _) =>
@@ -384,7 +384,16 @@ public sealed partial class MainWindow
             Card(Column(Toggle("应用运行期间自动采集、校验、摘要并发送", "auto_send_enabled", "auto-run"),
                 Paragraph(UiStrings.T("保存后生效。电脑关机、休眠、未登录或断网时无法执行；重开后只补跑最近 24 小时内、自动执行启用期间且没有本机记录的时段。"), true))),
             Pair(Slot("上午日报", "morning"), Slot("下午日报", "afternoon")),
-            Card(Column(limit, Paragraph(UiStrings.T("超出任务、分页、请求、响应体或时间预算时会阻断后续摘要与发送；不会把不完整采集当成没有动态。"), true)))));
+            Card(Column(limit,
+                Paragraph(UiStrings.T("默认每批 300 个任务；这不是项目总数限制，全项目最多 10,000 个当前可读任务。缩短时间窗不会减少基础扫描。"), true),
+                Paragraph(UiStrings.T("整次采集最多 50,000 次请求、1,000,000 条返回记录、512 MiB 响应、128 MiB 保留数据及两小时（含进度缓存年龄），最多进行 3 轮来源重核；各批仍受分页、请求、记录、响应体和时间预算约束。超过任一限制会阻断摘要与发送，不会截断采集。"), true),
+                Paragraph(UiStrings.T("完整读取任务及全部动态分页后才保存短期进度。取消或断电保留未完成进度，自本次采集开始最多两小时；下次会重列任务并刷新变更。这不是历史快照。"), true),
+                Toolbar(ActionButton("清除未完成的采集进度", "clear-collection-progress", async () =>
+                {
+                    var result = await Worker.SendAsync("clear_collection_progress");
+                    SetStatus(Value(result, "status"));
+                })),
+                Paragraph(UiStrings.T("仅清除临时采集进度，保留本机设置、凭据、运行历史和发送防重账本；不改变自动发送授权。"), true)))));
     }
 
     private FrameworkElement BuildRun()
