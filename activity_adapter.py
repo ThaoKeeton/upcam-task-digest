@@ -7,13 +7,15 @@ from urllib.parse import unquote, urlsplit
 
 from teambition_readonly import CollectionError, identifier, validate_binding
 from standard_notices import standard_association_notification
+from attachment_activities import attachment_change
 
 
 MAX_CONTENT = 65536
 QUOTE_ROLE = 'quoted-context-not-author-opinion'
 OBSERVED_ACTIONS = frozenset({'create', 'comment', 'involve.add', 'update.taskflowstatus',
                               'standard', 'update_content', 'update_executor',
-                              'move.cross.from.stage.to.stage'})
+                              'move.cross.from.stage.to.stage',
+                              'upload.customfield.work', 'customfield.create.v2'})
 
 
 def unsafe_controls(value):
@@ -84,7 +86,7 @@ def quoted_context(value):
 
 
 def status_transition(content, config):
-    """Return validated structured transition, or None (must be reviewed)."""
+    """Return a validated transition with separate target membership and entry."""
     if not isinstance(content, str) or len(content.encode('utf-8')) > MAX_CONTENT:
         return None
     try:
@@ -100,10 +102,14 @@ def status_transition(content, config):
                 or names[target] != data['taskflowstatus']
                 or names[previous] != data['oldTaskflowstatus']):
             return None
-        resolved = target in config.get('resolved_status_ids', [])
+        resolved_ids = config.get('resolved_status_ids', [])
+        resolved = target in resolved_ids
+        previous_resolved = previous in resolved_ids
         # This event flag's meaning is unverified; preserve it without treating it
         # as the target state's completion flag (or the current task's flag).
         return {'target_id': target, 'previous_id': previous, 'resolved': resolved,
+                'previous_resolved': previous_resolved,
+                'entered_resolved': resolved and not previous_resolved,
                 'event_is_done': data['isDone']}
     except (ValueError, TypeError, CollectionError, RecursionError):
         return None
@@ -401,6 +407,8 @@ def parse_activity(raw, config):
         return ('other', False) if executor_change(raw, config) is not None else ('unknown', False)
     if action == 'move.cross.from.stage.to.stage':
         return ('other', False) if stage_movement(raw) is not None else ('unknown', False)
+    if action in ('upload.customfield.work', 'customfield.create.v2'):
+        return ('other', False) if attachment_change(raw, config) is not None else ('unknown', False)
     if action == 'standard':
         return ('other', False) if (standard_association_notification(raw) is not None
                                    or standard_commit_candidate(raw) is not None) else ('unknown', False)

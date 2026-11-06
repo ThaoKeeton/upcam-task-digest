@@ -178,11 +178,11 @@ public sealed partial class MainWindow
         archived.Click += (_, _) => _state.Set("include_archived", archived.IsChecked == true);
         var scope = Card(Column(
             Paragraph(UiStrings.F("项目：{0}", _state.Text("project_id", UiStrings.T("尚未配置"))), size: 18),
-            Paragraph(UiStrings.T("推荐范围：指定 Project ID 下，当前真实 updated 时间落在日报半开窗口内的任务；默认不含归档，不添加其他条件。它不等同于网页“昨天/今天动态”视图。"), true),
+            Paragraph(UiStrings.T("推荐范围：扫描指定 Project ID 下当前可读任务的动态，按动态发生时间筛选日报窗口；默认不含归档，不添加其他条件。任务在截止后再更新也会检查；已删除或不可见任务无法保证追溯。"), true),
             Paragraph(UiStrings.T("保存配置即采用当前项目、归档选项和筛选条件。范围或 Teambition 凭据变化时，会使用下面的时间区间自动只读核验；核验未通过时仍保存编辑，自动运行会关闭。"), true),
             archived, BuildFilterEditor()));
         var probe = Card(Column(Paragraph(UiStrings.T("只读核验与映射发现"), size: 18), TimeInputs(),
-            Paragraph(UiStrings.T("选择确有任务更新和动态的区间。保存时会校验完整翻页、来源与字段样本，并发现映射 ID。成员姓名和状态名称仍需核对。"), true),
+            Paragraph(UiStrings.T("选择含任务动态的区间。保存时会校验完整翻页、来源与字段样本，并发现映射 ID。任务当前更新时间不必落在所选区间；成员姓名和状态名称仍需核对。"), true),
             ActionButton("只读验证项目并发现映射 ID", "probe-project", async () =>
             {
                 if (_state.SecretDrafts.Any(x => !string.IsNullOrEmpty(x.Value))) await SaveCoreAsync();

@@ -8,7 +8,7 @@ import re
 import unicodedata
 from datetime import datetime
 
-from report_contract import updated_in_window
+from report_contract import task_updated_timestamp
 from teambition_readonly import CollectionError, identifier, record_id, validate_binding
 
 
@@ -199,10 +199,9 @@ def analyze_project_probe(collection, *, tenant_id, project_id, expected_selecti
             if task.get("projectId") != project or type(task.get("isArchived")) is not bool:
                 raise ProjectSetupError("任务身份或归档字段无法核验，未保存核验状态。")
             try:
-                updated_in_window(task.get("updated"), expected_selection["date"],
-                                  expected_selection["start"], expected_selection["end_exclusive"])
+                task_updated_timestamp(task.get("updated"))
             except (KeyError, TypeError, ValueError):
-                raise ProjectSetupError("任务更新时间字段与所选时间窗不符，未保存核验状态。") from None
+                raise ProjectSetupError("任务更新时间字段缺失或没有时区，未保存核验状态。") from None
             if task["isArchived"] and not include_archived:
                 raise ProjectSetupError("只读查询返回了超出当前归档范围的任务，未保存核验状态。")
             for key, target in (("executorId", owners), ("tfsId", statuses)):

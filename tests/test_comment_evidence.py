@@ -467,7 +467,7 @@ class CommentEvidenceTests(unittest.TestCase):
                 changed["records"][0]["activities"][0][field] = value
                 variants.append((changed, config))
             changed = deepcopy(collection)
-            changed["records"][0]["task"]["updated"] = "2026-01-04T01:00:00Z"
+            changed["records"][0]["task"]["updated"] = "2026-01-04T01:00:00"
             variants.append((changed, config))
             for source, settings in variants:
                 with self.subTest(payload_keys=list(payload)):

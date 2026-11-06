@@ -2,6 +2,8 @@
 
 import re
 
+from status_resolution import resolved_in_window
+
 
 class FormalContentError(ValueError):
     """Formal content evidence has an invalid local shape."""
@@ -52,13 +54,16 @@ def formal_task_content(audit: dict, summary_entry: dict | None,
     if (not isinstance(counts, dict)
             or any(type(value) is not int or value < 0 for value in counts.values())
             or not isinstance(transitions, list)
-            or any(not isinstance(change, dict) or type(change.get("resolved")) is not bool
+            or any(not isinstance(change, dict)
+                   or any(type(change.get(key)) is not bool
+                          for key in ("resolved", "previous_resolved", "entered_resolved"))
+                   or change["entered_resolved"] != (change["resolved"] and not change["previous_resolved"])
                    for change in transitions)
             or not isinstance(changes, list)
             or any(not isinstance(change, dict) for change in changes)):
         raise FormalContentError("Invalid formal task evidence")
 
-    if transitions and transitions[-1]["resolved"] is True:
+    if resolved_in_window(transitions):
         category = "resolved"
     elif has_substantive and proposed:
         category = "progress"
