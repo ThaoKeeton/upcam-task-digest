@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from upcam_app.smoke_data import make_smoke_service
+from upcam_app import APP_VERSION
 from upcam_app.worker_api import WorkerApiError
 
 
@@ -28,7 +29,8 @@ class UpdateWorkerTests(unittest.TestCase):
                 "preferences": {}, "github_token": "github_pat_ci_synthetic-not-real"}})
             checked = worker.dispatch({"op": "check_updates"})
             self.assertEqual(checked["status"], "available")
-            self.assertEqual(checked["version"], "0.4.1")
+            self.assertGreater(tuple(map(int, checked["version"].split("."))),
+                               tuple(map(int, APP_VERSION.split("."))))
             downloaded = worker.dispatch({"op": "download_update"})
             self.assertEqual(downloaded["status"], "downloaded")
             previous = root / "previous" / "UPCAMTaskDigest.exe"

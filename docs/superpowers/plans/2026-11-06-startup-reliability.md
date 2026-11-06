@@ -30,11 +30,11 @@ only fixes supported by the failing test and record safe startup error metadata.
 
 Files: `tests/windows/ordinary_startup.ps1`, `.github/workflows/windows-build.yml`.
 
-- [ ] Add normal EXE launches without the synthetic flag, require an enabled
+- [x] Add normal EXE launches without the synthetic flag, require an enabled
   `save-settings` UI Automation control, and retain only safe test evidence.
-- [ ] Guard the ephemeral CI KnownFolder, disable automatic work, and verify old
+- [x] Guard the ephemeral CI KnownFolder, disable automatic work, and verify old
   settings are unchanged. Never use a real user profile or just override LOCALAPPDATA.
-- [ ] Run on unchanged v0.4.0 production source and inspect the actual failure.
+- [x] Run on unchanged v0.4.0 production source and inspect the actual failure.
 
 ### Task 2: Fix the demonstrated startup path
 
@@ -58,3 +58,13 @@ Files: `App.xaml.cs`, startup helpers/tests as needed, application version/docs.
 Ruling: Proceed without another design approval because the user explicitly
 authorized diagnosis, correction, tests, review and merge of this shipped defect.
 No implementation change is approved as a root-cause fix until Windows reproduces it.
+
+RED evidence: Windows CI50 (42168024484), unmodified v0.4.0 production code.
+Fresh, legacy, system and invalid-bootstrap each exit before ready with
+code -1073741189; explicit zh-CN and en-US both reach an enabled main-window
+save control and preserve settings bytes. No exception contents were exported.
+
+Ruling: Keep this fix to the demonstrated invalid API argument and its regression
+coverage. The bounded CI report records startup error metadata; a general crash
+reporter is outside this one-parameter correction. Any target-PC-only failure
+will request Windows fault code/module rather than configuration or credentials.

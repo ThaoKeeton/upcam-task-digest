@@ -18,7 +18,9 @@ public partial class App : Application
         try
         {
             UiStrings.Configure(language);
-            Microsoft.Windows.Globalization.ApplicationLanguages.PrimaryLanguageOverride = language == "system" ? "" : UiStrings.ResolvedLanguage;
+            // MRT Core requires one well-formed BCP-47 tag, including when the
+            // preference follows Windows. An empty override fails before XAML.
+            Microsoft.Windows.Globalization.ApplicationLanguages.PrimaryLanguageOverride = UiStrings.ResolvedLanguage;
             InitializeComponent();
             if (IsSyntheticRun)
             {

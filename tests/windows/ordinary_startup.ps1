@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Ordinary startup fixture is restricted to ephemeral Windows Actions' }
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 $exe = Join-Path ([IO.Path]::GetFullPath($ApplicationDirectory)) 'UPCAMTaskDigest.exe'
@@ -13,8 +14,8 @@ $known = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicat
 if (-not [string]::Equals([IO.Path]::GetFullPath($known), [IO.Path]::GetFullPath($env:LOCALAPPDATA), [StringComparison]::OrdinalIgnoreCase)) {
     throw 'CI KnownFolder and worker LOCALAPPDATA differ; no profile was accessed'
 }
-$profile = Join-Path $known 'UPCAM/TaskDigest'
-if (Test-Path -LiteralPath $profile) { throw 'A pre-existing profile must never be inspected or replaced' }
+$testProfileDirectory = Join-Path $known 'UPCAM/TaskDigest'
+if (Test-Path -LiteralPath $testProfileDirectory) { throw 'A pre-existing profile must never be inspected or replaced' }
 [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($EvidenceDirectory)) | Out-Null
 $report = [Collections.Generic.List[object]]::new()
 $failures = 0
@@ -22,10 +23,10 @@ $failures = 0
 try {
     foreach ($case in $Cases) {
         if ($case -notin @('fresh', 'legacy', 'system', 'zh-CN', 'en-US', 'invalid-bootstrap')) { throw 'Unsupported test case' }
-        if (Test-Path -LiteralPath $profile) { throw 'Test profile was not cleaned; refusing to reuse it' }
+        if (Test-Path -LiteralPath $testProfileDirectory) { throw 'Test profile was not cleaned; refusing to reuse it' }
         $owner = [guid]::NewGuid().ToString('N')
-        [IO.Directory]::CreateDirectory($profile) | Out-Null
-        $marker = Join-Path $profile '.ordinary-startup-test-owner'
+        [IO.Directory]::CreateDirectory($testProfileDirectory) | Out-Null
+        $marker = Join-Path $testProfileDirectory '.ordinary-startup-test-owner'
         [IO.File]::WriteAllText($marker, $owner)
         $process = $null
         $settingsHash = $null
@@ -46,14 +47,18 @@ try {
                     $settings.ui_language = if ($case -in @('zh-CN', 'en-US')) { $case } else { 'system' }
                     $settings.auto_check_updates = $false
                 }
-                $settingsFile = Join-Path $profile 'settings.json'
+                $settingsFile = Join-Path $testProfileDirectory 'settings.json'
                 [IO.File]::WriteAllText($settingsFile, ($settings | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
                 $settingsHash = (Get-FileHash -LiteralPath $settingsFile -Algorithm SHA256).Hash
             }
             if ($case -in @('system', 'zh-CN', 'en-US')) {
-                [IO.File]::WriteAllText((Join-Path $profile 'language.json'), (@{language=$case} | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $testProfileDirectory 'language.json'), (@{language=$case} | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
             } elseif ($case -eq 'invalid-bootstrap') {
-                [IO.File]::WriteAllText((Join-Path $profile 'language.json'), '{invalid synthetic json', [Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $testProfileDirectory 'language.json'), '{invalid synthetic json', [Text.UTF8Encoding]::new($false))
+            }
+            if ($case -eq 'legacy') {
+                & python "$PSScriptRoot/legacy_profile.py" prepare $testProfileDirectory $owner
+                if ($LASTEXITCODE -ne 0) { throw 'Could not prepare the test-owned legacy persistence fixture' }
             }
             $process = Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -PassThru
             $deadline = [DateTime]::UtcNow.AddSeconds(35)
@@ -82,7 +87,12 @@ try {
                 $entry.settingsPreserved = (Get-FileHash -LiteralPath $settingsFile -Algorithm SHA256).Hash -eq $settingsHash
                 if (-not $entry.settingsPreserved) { throw 'Ordinary startup unexpectedly changed saved settings' }
             }
-            if (-not (Test-Path -LiteralPath (Join-Path $profile 'history.sqlite3'))) { throw 'Ordinary worker did not initialize local storage' }
+            if (-not (Test-Path -LiteralPath (Join-Path $testProfileDirectory 'history.sqlite3'))) { throw 'Ordinary worker did not initialize local storage' }
+            if ($case -eq 'legacy') {
+                & python "$PSScriptRoot/legacy_profile.py" verify $testProfileDirectory $owner
+                if ($LASTEXITCODE -ne 0) { throw 'Legacy persistence was not preserved across ordinary startup' }
+                $entry.legacyPersistencePreserved = $true
+            }
             Write-Output "Ordinary startup case $case passed; no synthetic launch argument"
         } catch {
             $failures++
@@ -103,7 +113,7 @@ try {
             $report.Add([pscustomobject]$entry)
             [IO.File]::WriteAllText((Join-Path $EvidenceDirectory 'ordinary-startup-report.json'), (@($report) | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
             if ((Test-Path -LiteralPath $marker) -and [IO.File]::ReadAllText($marker) -eq $owner) {
-                Remove-Item -LiteralPath $profile -Recurse -Force
+                Remove-Item -LiteralPath $testProfileDirectory -Recurse -Force
             } else { throw 'Test ownership marker was lost; profile was not removed' }
         }
     }

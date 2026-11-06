@@ -1,4 +1,4 @@
-# Windows 原生应用 v0.4.0
+# Windows 原生应用 v0.4.1
 
 新版采用 C#、XAML、WinUI 3 / Windows App SDK 和 WinUIEx，与 PowerToys 主设置窗口使用相同的技术体系。Mica 背景、Fluent 控件和侧边导航均为真实原生界面。成员与状态列表使用页面可用空间，编辑和批量导入使用原生对话框，诊断内容固定在运行页面内部。
 
@@ -14,7 +14,17 @@
 4. 同一 Windows 账户会沿用 `%LOCALAPPDATA%\UPCAM\TaskDigest` 中原有设置、DPAPI 凭据、模型缓存、历史和发送防重账本，不要求重新录入姓名映射或密钥。
 5. 如果原来已开启登录启动，在“常规 → 启动与托盘”确认开关后点右上角“保存常规设置”，将启动路径更新为新版目录。以后移动应用目录也需要重新保存。不要删除或复制替换防重账本。
 
-标题栏和主页均显示实际版本。界面与随附工作进程的版本必须一致，否则应用停止初始化；不要混合复制不同版本的 DLL 或 `worker`。升级后确认显示 `v0.4.0`，再运行同一范围的只读诊断。
+标题栏和主页均显示实际版本。界面与随附工作进程的版本必须一致，否则应用停止初始化；不要混合复制不同版本的 DLL 或 `worker`。升级后确认显示 `v0.4.1`，再运行同一范围的只读诊断。
+
+### v0.4.1：普通启动修复
+
+v0.4.0 在“Windows 默认”及缺失、损坏语言快照时，将原生语言覆盖值设为空字符串。MRT Core 要求有效的单个语言标签，这条路径可能在主窗口出现前退出。v0.4.1 始终传入根据系统偏好解析出的 `zh-CN` 或 `en-US`。旧配置、DPAPI 凭据、模型缓存、映射和运行记录继续沿用。
+
+Windows 回归新增真正不带 `--ui-smoke-test` 的启动，分别检查全新用户配置、旧版 schema 1、Windows 默认、中文、English 和损坏快照，并要求主窗口中的保存按钮实际可用。完整 ZIP 解压后的应用重复同样检查。测试目录由 CI 创建，遇到既有目录即停止；配置样本不含服务凭据，自动发送和自动更新关闭。
+
+如果新版仍无法出现窗口，可用 `Win + R` 打开 `perfmon /rel`，选择对应应用失败项，再打开“查看技术详细信息”。排查只需要 **应用版本、Windows 版本、故障模块名称、异常代码**；请勿发送配置文件、凭据文件或进程转储。
+
+官方依据：[ApplicationLanguages 的标签校验实现](https://github.com/microsoft/WindowsAppSDK/blob/main/dev/MRTCore/mrt/Microsoft.Windows.ApplicationModel.Resources/src/ApplicationLanguages.cpp)、[空值触发异常的官方问题记录](https://github.com/microsoft/WindowsAppSDK/issues/5335)。实际修复证据以本版本 Windows 构建结果为准。
 
 应用发布目标为 Windows x64，随附自包含 .NET / Windows App SDK 及 Python 工作进程，日常运行不依赖 Codex。目标电脑与干净 Windows 环境的安装验收需要单独进行，不能把 CI 启动当成所有电脑均已验证。构建不会自动部署到用户电脑。
 
