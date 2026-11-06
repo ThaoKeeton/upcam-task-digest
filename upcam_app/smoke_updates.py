@@ -5,7 +5,7 @@ import io
 import json
 import zipfile
 
-from . import RULESET_REVISION
+from . import APP_VERSION, RULESET_REVISION
 from .updates import ASSET_NAME, GitHubUpdates, LATEST_RELEASE_API, REPOSITORY_API
 
 
@@ -25,7 +25,8 @@ class _Response:
 
 class SyntheticUpdateTransport:
     def __init__(self):
-        version = "0.4.1"
+        major, minor, patch = map(int, APP_VERSION.split("."))
+        version = f"{major}.{minor}.{patch + 1}"
         commit = "c" * 40
         files = {
             "UPCAMTaskDigest.exe": b"CI synthetic app; cannot execute",

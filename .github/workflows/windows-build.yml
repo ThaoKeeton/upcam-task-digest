@@ -95,6 +95,9 @@ jobs:
             workerSha256 = (Get-FileHash dist/winui/worker/UPCAMWorker.exe -Algorithm SHA256).Hash
           }
           $manifest | ConvertTo-Json | Set-Content dist/winui/build-info.json -Encoding utf8
+      - name: Verify ordinary startup and legacy settings without the synthetic flag
+        shell: pwsh
+        run: ./tests/windows/ordinary_startup.ps1 -ApplicationDirectory "$PWD/dist/winui" -EvidenceDirectory "$PWD/dist/startup-evidence"
       - name: Launch and interact with real WinUI controls using isolated synthetic services
         shell: pwsh
         run: |
@@ -139,6 +142,7 @@ jobs:
           if ((Get-FileHash dist/install-check/worker/UPCAMWorker.exe -Algorithm SHA256).Hash -ne $manifest.workerSha256) {
             throw "Packaged worker hash mismatch"
           }
+          ./tests/windows/ordinary_startup.ps1 -ApplicationDirectory "$PWD/dist/install-check" -EvidenceDirectory "$PWD/dist/startup-evidence/extracted"
           $handoffParent = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 2' -PassThru
           $process = Start-Process -FilePath "$PWD/dist/install-check/UPCAMTaskDigest.exe" -ArgumentList "--ui-smoke-test --background --wait-for-parent $($handoffParent.Id) --after-update" -PassThru
           if (-not $process.WaitForExit(120000)) {
@@ -180,6 +184,7 @@ jobs:
             dist/UPCAMTaskDigest-WinUI3-win-x64.zip
             dist/UPCAMTaskDigest-WinUI3-win-x64.zip.sha256
             dist/ui-evidence/
+            dist/startup-evidence/
           retention-days: 14
       - uses: actions/upload-artifact@v4
         if: failure()
@@ -189,6 +194,7 @@ jobs:
             dist/ui-evidence/
             dist/winui/smoke-output/
             dist/install-check/smoke-output/
+            dist/startup-evidence/
           retention-days: 14
   publish-stable:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_stable == true && github.ref == 'refs/heads/main' }}
