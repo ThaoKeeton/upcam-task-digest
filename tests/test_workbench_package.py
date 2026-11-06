@@ -110,6 +110,43 @@ class WorkbenchReferenceTests(unittest.TestCase):
         self.assertIn("reference/src/Workbench.App/Workbench.App.csproj", workflow)
         self.assertIn("'-NonInteractive', '-STA'", workflow)
 
+    def test_acceptance_artifact_is_uploaded_separately_only_after_success(self):
+        workflow = (ROOT / ".github/workflows/workbench-plugin.yml").read_text()
+        marker = "name: UPCAMTaskDigest-workbench-acceptance-0.1.0-windows"
+        self.assertIn(marker, workflow)
+        position = workflow.index(marker)
+        start = workflow.rfind("- uses: actions/upload-artifact@v4", 0, position)
+        finish = workflow.index("retention-days:", position)
+        upload = workflow[start:finish]
+        self.assertIn("if: success()", upload)
+        for path in ("UPCAMTaskDigest-workbench-acceptance-0.1.0-win-x64.zip",
+                     "UPCAMTaskDigest-workbench-acceptance-0.1.0-win-x64.zip.sha256",
+                     "acceptance-handoff.json", "ACCEPTANCE.zh-CN.md"):
+            self.assertIn("dist/workbench-plugin/" + path, upload)
+        self.assertNotIn("workbench-production-", upload)
+
+    def test_acceptance_handoff_checks_identity_hash_and_records_source(self):
+        workflow = (ROOT / ".github/workflows/workbench-plugin.yml").read_text()
+        self.assertIn("name: Record verified synthetic package handoff", workflow)
+        self.assertIn("Get-FileHash -LiteralPath $archive -Algorithm SHA256", workflow)
+        self.assertIn("$declaredHash -cne $hash", workflow)
+        self.assertIn("$metadata.pluginId -cne 'com.upcam.task-digest.acceptance'", workflow)
+        self.assertIn("$metadata.syntheticAcceptance -ne $true", workflow)
+        for field in ("buildCommit", "sourceHeadCommit", "hostReferenceCommit", "minimumHostVersion",
+                      "windowsAppSdk", "sha256", "publisherSignatureVerified"):
+            self.assertIn(field + " =", workflow)
+
+    def test_acceptance_package_has_an_explicit_isolated_handoff_guide(self):
+        guide = (INTEGRATION / "ACCEPTANCE.zh-CN.md").read_text()
+        self.assertIn("com.upcam.task-digest.acceptance", guide)
+        self.assertIn(".plugin-synthetic.json", guide)
+        self.assertIn("不填写真实凭据", guide)
+        self.assertIn("不访问真实 Webhook", guide)
+        script = (INTEGRATION / "build-plugin.ps1").read_text()
+        self.assertIn("(Join-Path $PSScriptRoot 'ACCEPTANCE.zh-CN.md')", script)
+        self.assertIn("https://github.com/ThaoKeeton/upcam-task-digest/blob/main/integrations/project-workbench/ACCEPTANCE.zh-CN.md",
+                      (INTEGRATION / "README.zh-CN.md").read_text())
+
 
 class WorkbenchDistributionTests(unittest.TestCase):
     def make_package(self, root):

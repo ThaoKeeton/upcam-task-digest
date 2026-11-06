@@ -17,6 +17,8 @@
 
 正式包名称含 `production`；名称含 `acceptance` 的包只用于 CI 虚构数据验收，页面会明确显示测试标识，不应用于真实项目。
 
+平台联合验收请下载独立 CI 产物 `UPCAMTaskDigest-workbench-acceptance-0.1.0-windows`。其中含可安装模拟 ZIP、SHA-256、记录实际源码和 SDK 的 `acceptance-handoff.json`，以及[合成包安装与验收说明](https://github.com/ThaoKeeton/upcam-task-digest/blob/main/integrations/project-workbench/ACCEPTANCE.zh-CN.md)。它不包含真实项目配置，全部服务由本地模拟替身提供。
+
 ## 接续独立版数据与回退
 
 先完全退出独立版，再在插件的数据目录设置中指定原有独立版数据文件夹。接续绑定的是原目录，配置、Windows 当前用户 DPAPI 凭据、模型缓存、运行记录、采集进度和发送账本继续共用；不会生成可独立调度的副本。路径必须是本机绝对目录，不能是网络目录、链接或磁盘根目录。
