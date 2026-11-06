@@ -317,7 +317,8 @@ internal sealed partial class DigestPage
             SettingText(profile, "Run at (HH:MM local)", prefix + "_run_at", prefix + "-run-at"),
             SettingText(profile, prefix == "morning" ? "Range starts on previous day (HH:MM)" : "Range starts (HH:MM)", prefix + "_start_at", prefix + "-start-at"),
             SettingText(profile, prefix == "morning" ? "Range ends on current day (HH:MM)" : "Range ends (HH:MM)", prefix + "_end_at", prefix + "-end-at"));
-            panel.IsEnabled = _state.Ready;
+            foreach (Control input in panel.Children.OfType<Control>())
+                input.IsEnabled = _state.Ready;
             return panel;
         }
         var resume = Identify(new ToggleSwitch { Header = "在 Workbench 启动时恢复此自动任务", IsOn = _state.ResumeOnStartup,
