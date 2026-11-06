@@ -89,6 +89,12 @@ try {
             }
             if (-not (Test-Path -LiteralPath (Join-Path $testProfileDirectory 'history.sqlite3'))) { throw 'Ordinary worker did not initialize local storage' }
             if ($case -eq 'legacy') {
+                $loadedMappings = $false
+                foreach ($label in @('1 位成员 · 1 个状态', '1 members · 1 statuses')) {
+                    $labelCondition = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, $label)
+                    if ($null -ne $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $labelCondition)) { $loadedMappings = $true }
+                }
+                if (-not $loadedMappings) { throw 'Legacy mappings were not loaded into the actual home page' }
                 & python "$PSScriptRoot/legacy_profile.py" verify $testProfileDirectory $owner
                 if ($LASTEXITCODE -ne 0) { throw 'Legacy persistence was not preserved across ordinary startup' }
                 $entry.legacyPersistencePreserved = $true

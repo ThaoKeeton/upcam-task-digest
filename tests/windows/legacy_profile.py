@@ -6,6 +6,7 @@ transport, provider client, credential environment or sender is used.
 """
 
 from datetime import datetime, timedelta, timezone
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -29,9 +30,11 @@ def fingerprint(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def ledger_identity(path):
-    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
-        return db.execute("SELECT identity FROM metadata").fetchone()[0]
+def ledger_snapshot(path):
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
+        return {"identity": db.execute("SELECT identity FROM metadata").fetchone()[0],
+                "deliveries": [list(row) for row in db.execute("SELECT * FROM deliveries ORDER BY key")],
+                "manual_attempts": [list(row) for row in db.execute("SELECT * FROM manual_attempts ORDER BY request_id")]}
 
 
 def main():
@@ -50,6 +53,13 @@ def main():
         if any((root / name).exists() for name in (*FILES[1:], "history.sqlite3", "delivery_ledger.sqlite3", expected_path.name)):
             raise RuntimeError("Existing persisted files must never be used as fixtures")
         identity = initialize_ledger(root / "delivery_ledger.sqlite3")
+        # Existing confirmed and ambiguous attempts must survive startup. These
+        # are local synthetic rows, inserted without calling any sender.
+        with closing(sqlite3.connect(root / "delivery_ledger.sqlite3")) as db, db:
+            db.executemany("INSERT INTO deliveries VALUES (?, ?, ?)",
+                           [("a" * 64, "c" * 64, "confirmed"), ("b" * 64, "d" * 64, "unknown")])
+            db.execute("INSERT INTO manual_attempts VALUES (?, ?, ?, ?)",
+                       ("11111111-1111-4111-8111-111111111111", "b" * 64, "d" * 64, "unknown"))
         DpapiSecretStore(root / "credentials.dpapi").save(
             {"openai_api_key": DUMMY_KEY, "delivery_ledger_id": identity})
         cache = {"schema_version": CACHE_SCHEMA, "source": MODELS_URL,
@@ -61,7 +71,7 @@ def main():
         start = datetime(2026, 11, 1, tzinfo=timezone.utc)
         history.create_draft(start, start + timedelta(hours=1), "sample", "CI synthetic legacy preview")
         expected = {"hashes": {name: fingerprint(root / name) for name in FILES},
-                    "history": history.list_runs(), "ledger_identity": identity}
+                    "history": history.list_runs(), "ledger": ledger_snapshot(root / "delivery_ledger.sqlite3")}
         expected_path.write_text(json.dumps(expected), encoding="utf-8")
         print("Prepared test-owned legacy persistence; no provider credentials or requests")
     else:
@@ -69,12 +79,12 @@ def main():
         if any(fingerprint(root / name) != value for name, value in expected["hashes"].items()):
             raise AssertionError("Legacy settings, encrypted fixture or model cache changed")
         values = DpapiSecretStore(root / "credentials.dpapi").load()
-        if values != {"openai_api_key": DUMMY_KEY, "delivery_ledger_id": expected["ledger_identity"]}:
+        if values != {"openai_api_key": DUMMY_KEY, "delivery_ledger_id": expected["ledger"]["identity"]}:
             raise AssertionError("Synthetic DPAPI fixture could not be preserved and unlocked")
         if HistoryStore(root / "history.sqlite3").list_runs() != expected["history"]:
             raise AssertionError("Legacy history rows changed")
-        if ledger_identity(root / "delivery_ledger.sqlite3") != expected["ledger_identity"]:
-            raise AssertionError("Legacy delivery identity changed")
+        if ledger_snapshot(root / "delivery_ledger.sqlite3") != expected["ledger"]:
+            raise AssertionError("Legacy delivery identity or attempts changed")
         print("Verified legacy settings, DPAPI, cache, history and ledger without exposing values")
 
 
