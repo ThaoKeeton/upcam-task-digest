@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <InternalsVisibleTo Include="Workbench.Core.Tests" />
+    <ProjectReference Include="../Workbench.Sdk/Workbench.Sdk.csproj" />
+  </ItemGroup>
+  <!-- The SDK's framework references identify the .NET contract assemblies.
+       Directory contents cannot do this in a self-contained application. -->
+  <Target Name="GenerateFrameworkAssemblyCatalog" BeforeTargets="AssignTargetPaths" DependsOnTargets="ResolveReferences">
+    <ItemGroup>
+      <_WorkbenchFrameworkReference Include="@(ReferencePath)" Condition="'%(ReferencePath.FrameworkReferenceName)' == 'Microsoft.NETCore.App'" />
+    </ItemGroup>
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <WriteLinesToFile File="$(IntermediateOutputPath)FrameworkAssemblies.txt"
+                      Lines="@(_WorkbenchFrameworkReference->'%(Filename)')"
+                      Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <EmbeddedResource Include="$(IntermediateOutputPath)FrameworkAssemblies.txt" LogicalName="Workbench.Core.FrameworkAssemblies" />
+    </ItemGroup>
+  </Target>
+</Project>

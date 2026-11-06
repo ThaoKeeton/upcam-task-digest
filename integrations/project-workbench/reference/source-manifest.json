@@ -1,0 +1,177 @@
+{
+  "repository": "ThaoKeeton/project-workbench",
+  "branch": "feat/native-plugin-workbench",
+  "commit": "d2005d469aef6a385c134b6914fb6dfa9cff20b2",
+  "tree": "46e072e9a97afcfaef89f1683b841e521801fb94",
+  "purpose": "Unmodified same-owner host 0.2 SDK/Core and complete host build/test input; never bundled in plugin package.",
+  "files": [
+    {
+      "path": "Directory.Build.props",
+      "gitBlob": "36e5497e5cc12332136545036d8b6aa873869b4d"
+    },
+    {
+      "path": "README.md",
+      "gitBlob": "756da1af74d386e9ba450e0803d1cf459d1e2471"
+    },
+    {
+      "path": "docs/integrations/plugin-contract-v1.md",
+      "gitBlob": "da921cf9b0c1528336235c3260b75cfd809c094f"
+    },
+    {
+      "path": "docs/plugin-sdk.md",
+      "gitBlob": "df9e427cbc6828932244a69b963868211fc9b283"
+    },
+    {
+      "path": "docs/superpowers/specs/2026-11-06-business-plugin-platform-design.md",
+      "gitBlob": "b5a92562fc8bd933821403be82f36224a508b481"
+    },
+    {
+      "path": "global.json",
+      "gitBlob": "ddcd6c772a44554bb20e1118efc84e42f824e694"
+    },
+    {
+      "path": "plugins/Workbench.Summary.Sample/SummaryPlugin.cs",
+      "gitBlob": "3d45b2a07534f4ad71b35c939ac68b44ba8b2564"
+    },
+    {
+      "path": "plugins/Workbench.Summary.Sample/Workbench.Summary.Sample.csproj",
+      "gitBlob": "0bdffa292cb1393556795583cb27e44e845f475a"
+    },
+    {
+      "path": "plugins/Workbench.Summary.Sample/plugin.json",
+      "gitBlob": "6e61991a27b6f5becd6f1c6934b00d3b8e859103"
+    },
+    {
+      "path": "plugins/Workbench.TestCases.Sample/TestCasesPlugin.cs",
+      "gitBlob": "464e6eafcdd089ff864cd8bb55b0e1bad2a1829f"
+    },
+    {
+      "path": "plugins/Workbench.TestCases.Sample/Workbench.TestCases.Sample.csproj",
+      "gitBlob": "0bdffa292cb1393556795583cb27e44e845f475a"
+    },
+    {
+      "path": "plugins/Workbench.TestCases.Sample/plugin.json",
+      "gitBlob": "9324adf05fec368d63a2567da2f4db517a612eee"
+    },
+    {
+      "path": "src/Workbench.App/App.xaml",
+      "gitBlob": "e4ee81a9bd07b42cf2f415d7d5433be699ef9f43"
+    },
+    {
+      "path": "src/Workbench.App/HostRuntime.cs",
+      "gitBlob": "1e39bb594fb217f5e6ea4408336c9d92d5eedbdd"
+    },
+    {
+      "path": "src/Workbench.App/MainWindow.cs",
+      "gitBlob": "96ee3bee268b7c1c3c01a132280abb2f7a36c0e0"
+    },
+    {
+      "path": "src/Workbench.App/NativeSmoke.cs",
+      "gitBlob": "d0d4879361716c77277acf1e378260a32c7b6700"
+    },
+    {
+      "path": "src/Workbench.App/RunOptions.cs",
+      "gitBlob": "bb081cc4c7a65d9c3324bc7810090eec7dba90d9"
+    },
+    {
+      "path": "src/Workbench.App/ShellPages.cs",
+      "gitBlob": "c9114d0b8626184e8a74c6a1d8493d14f54a567e"
+    },
+    {
+      "path": "src/Workbench.App/Ui.cs",
+      "gitBlob": "a99502ed52481244d274c86bcd32f71631c44d0f"
+    },
+    {
+      "path": "src/Workbench.App/Workbench.App.csproj",
+      "gitBlob": "47f5ff93af41a408cbfb8f6fb2dad6bc4b372d86"
+    },
+    {
+      "path": "src/Workbench.App/WorkbenchApplication.cs",
+      "gitBlob": "a1694b1cc01373633fe4568bab912448681f61fa"
+    },
+    {
+      "path": "src/Workbench.App/app.manifest",
+      "gitBlob": "b784f164d832d04a4ded93a79d9f617b9f692033"
+    },
+    {
+      "path": "src/Workbench.Core/AtomicJsonFile.cs",
+      "gitBlob": "e8603ffb8b27412926bd40264d130725da34198a"
+    },
+    {
+      "path": "src/Workbench.Core/FileSystemGuard.cs",
+      "gitBlob": "cc495968d8242eb651f4b7b99430353c20ed57ac"
+    },
+    {
+      "path": "src/Workbench.Core/JsonPluginSettings.cs",
+      "gitBlob": "1abb6d99bad2314eea69da9a912a83eb1b5a0a16"
+    },
+    {
+      "path": "src/Workbench.Core/PackageValidator.cs",
+      "gitBlob": "01420adb951761f0efd6ad417ae6ee0fc7fc7264"
+    },
+    {
+      "path": "src/Workbench.Core/PluginBackgroundTasks.cs",
+      "gitBlob": "e977908605624dc64143e98939d0e8883af57324"
+    },
+    {
+      "path": "src/Workbench.Core/PluginLoadContext.cs",
+      "gitBlob": "2cf7aac8b2f8e0a39cb62d13d93d3248fb07af70"
+    },
+    {
+      "path": "src/Workbench.Core/PluginManager.cs",
+      "gitBlob": "a2155d535cfdc57813665808586bc81457c7bb2d"
+    },
+    {
+      "path": "src/Workbench.Core/PluginModels.cs",
+      "gitBlob": "a1fd95e6c3a34bdadcdc6a0b0e27a66915d990e0"
+    },
+    {
+      "path": "src/Workbench.Core/PluginRegistrationContext.cs",
+      "gitBlob": "025bef765a0ad5b0a8a0a620049cfce70d0f1e4f"
+    },
+    {
+      "path": "src/Workbench.Core/PluginRuntimeState.cs",
+      "gitBlob": "be32ba7dbef668d117ef74d26713e45296d25dc5"
+    },
+    {
+      "path": "src/Workbench.Core/PluginSecretStore.cs",
+      "gitBlob": "4ca1dc74129ca04cc96e20358bc7692b6d6b8d7a"
+    },
+    {
+      "path": "src/Workbench.Core/PluginStateStore.cs",
+      "gitBlob": "ea3795b8b2effdca16fa8b566470f124b82a5d81"
+    },
+    {
+      "path": "src/Workbench.Core/README.md",
+      "gitBlob": "ceec6dba080f049f95df74bd638a8b4471e6b5e1"
+    },
+    {
+      "path": "src/Workbench.Core/WindowsSecretProtector.cs",
+      "gitBlob": "a3fec56716d4d746b7a691793446ed72e0e9eb4d"
+    },
+    {
+      "path": "src/Workbench.Core/Workbench.Core.csproj",
+      "gitBlob": "161fa99217db7f6f2d56d3c9780e49821256ad32"
+    },
+    {
+      "path": "src/Workbench.Sdk/PluginContracts.cs",
+      "gitBlob": "acf86a1f39ae3bd0c95b4bc2cb82e236a6adea91"
+    },
+    {
+      "path": "src/Workbench.Sdk/RuntimeContracts.cs",
+      "gitBlob": "ee61641895fbe2d7a9a9167ebdda447bee337160"
+    },
+    {
+      "path": "src/Workbench.Sdk/Workbench.Sdk.csproj",
+      "gitBlob": "2ce50e9e2102b696a5fe07a7b038e86764a9f93e"
+    },
+    {
+      "path": "src/Workbench.WinUI.Sdk/WinUiView.cs",
+      "gitBlob": "a3772dbe6a873953bb5bd9457393f4685153b4ce"
+    },
+    {
+      "path": "src/Workbench.WinUI.Sdk/Workbench.WinUI.Sdk.csproj",
+      "gitBlob": "6d815f42244a305d81d39c8b39b27ac130e387e5"
+    }
+  ]
+}

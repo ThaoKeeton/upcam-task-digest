@@ -1,0 +1,16 @@
+{
+  "id": "com.projectworkbench.test-cases",
+  "name": "测试用例 · 示例",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "minimumHostVersion": "0.1.0",
+  "entryAssembly": "Workbench.TestCases.Sample.dll",
+  "entryType": "Workbench.TestCases.Sample.TestCasesPlugin",
+  "description": "原生可编辑演示用例与本地 CSV 导出；不执行真实测试或电脑自动化。",
+  "capabilities": [
+    "native-views",
+    "local-commands",
+    "settings",
+    "local-files"
+  ]
+}

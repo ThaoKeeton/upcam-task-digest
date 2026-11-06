@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PlatformTarget>x64</PlatformTarget>
+    <SelfContained>true</SelfContained>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishAot>false</PublishAot>
+    <PublishSingleFile>false</PublishSingleFile>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <AssemblyName>Workbench.Digest.Acceptance</AssemblyName>
+    <RootNamespace>Workbench.Digest.Acceptance</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260921001" />
+    <!-- These are the unmodified API 1 platform projects, pinned in source-manifest.json.
+         The plugin itself is independently built, installed and loaded by PluginManager. -->
+    <ProjectReference Include="../../reference/src/Workbench.Core/Workbench.Core.csproj" />
+    <ProjectReference Include="../../reference/src/Workbench.WinUI.Sdk/Workbench.WinUI.Sdk.csproj" />
+    <!-- Fixture preparation only: seed a second explicit synthetic profile before plugin activation.
+         No plugin entry point, page, session or replacement SDK contract is compiled into this host. -->
+    <Compile Include="../../../../plugins/UPCAM.Workbench/PluginWorkerClient.cs" Link="FixtureSupport/PluginWorkerClient.cs" />
+    <!-- The actual BCL-only admission policy is exercised with deterministic barriers; no SDK service is replaced. -->
+    <Compile Include="../../../../plugins/UPCAM.Workbench/SchedulerAdmission.cs" Link="PolicySupport/SchedulerAdmission.cs" />
+  </ItemGroup>
+</Project>

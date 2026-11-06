@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <IsPublishable>false</IsPublishable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <AssemblyName>UPCAM.Workbench</AssemblyName>
+    <RootNamespace>Upcam.Workbench</RootNamespace>
+    <Version>0.1.0</Version>
+    <AcceptanceBuild Condition="'$(AcceptanceBuild)' == ''">false</AcceptanceBuild>
+    <DefineConstants Condition="'$(AcceptanceBuild)' == 'true'">$(DefineConstants);UPCAM_ACCEPTANCE_BUILD</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260921001" />
+    <ProjectReference Include="../../integrations/project-workbench/reference/src/Workbench.Sdk/Workbench.Sdk.csproj" Private="false" />
+    <ProjectReference Include="../../integrations/project-workbench/reference/src/Workbench.WinUI.Sdk/Workbench.WinUI.Sdk.csproj" Private="false" />
+    <!-- These two source files use only BCL/JSON; the standalone window assembly is never referenced. -->
+    <Compile Include="../../winui/UPCAMTaskDigest/DesktopState.cs" Link="Shared/DesktopState.cs" />
+    <Compile Include="../../winui/UPCAMTaskDigest/UiStrings.cs" Link="Shared/UiStrings.cs" />
+    <EmbeddedResource Include="../../winui/UPCAMTaskDigest/Strings/en-US.json" LogicalName="Upcam.Desktop.Strings.en-US.json" />
+    <None Update="plugin.json" CopyToOutputDirectory="PreserveNewest" Condition="'$(AcceptanceBuild)' != 'true'" />
+    <None Update="plugin.acceptance.json" CopyToOutputDirectory="Never" />
+  </ItemGroup>
+</Project>
