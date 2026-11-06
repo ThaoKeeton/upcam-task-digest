@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Globalization;
 
 namespace Upcam.Desktop;
 
@@ -36,8 +37,8 @@ internal sealed class DesktopState
         _modelCacheFetched is null ? UiStrings.T("尚无本机模型缓存；点击刷新后获取当前 API Key 可用模型。") :
         UiStrings.F("缓存 {0} 个 API 模型 · {1}", Models.Count, _modelCacheFetched) +
         (_cacheMatches ? "" : UiStrings.T(" · 当前 Key 尚未匹配，请手动刷新。"));
-    private string _manualStart = DateTime.Now.Date.ToString("yyyy-MM-dd HH:mm");
-    private string _manualEnd = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+    private string _manualStart = DateTime.Now.Date.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+    private string _manualEnd = DateTime.Now.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
     public string ManualStart
     {
         get => _manualStart;

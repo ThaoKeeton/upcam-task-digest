@@ -76,6 +76,7 @@ internal sealed class NativeDesktop : IDisposable
 
     internal void ConfigureTray(bool enabled)
     {
+        _trayEnabled = enabled;
         if (!enabled)
         {
             NotifyIconData previous = Data();
@@ -83,7 +84,6 @@ internal sealed class NativeDesktop : IDisposable
             TrayReady = false;
             if (!IsWindowVisible(_hwnd)) _show();
         }
-        _trayEnabled = enabled;
         if (enabled && !TrayReady) AddIcon();
         else if (enabled)
         {

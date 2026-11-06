@@ -410,14 +410,22 @@ public sealed partial class MainWindow
         var recoveryAppWindow = Microsoft.UI.Windowing.AppWindow.GetFromWindowId(
             Microsoft.UI.Win32Interop.GetWindowIdFromWindow(WinRT.Interop.WindowNative.GetWindowHandle(recoveryWindow)));
         bool registrationWorks = true;
+        var trayOperations = new List<uint>();
         using (var tray = new NativeDesktop(recoveryWindow, () => recoveryAppWindow.Show(), () => { }, () => false,
-            _ => registrationWorks))
+            operation => { trayOperations.Add(operation); return registrationWorks; }))
         {
             recoveryAppWindow.Hide();
             registrationWorks = false;
             tray.ConfigureTray(true);
             Assert(!tray.TrayReady && recoveryAppWindow.IsVisible,
                 "Injected tray re-registration failure restores a visible native window");
+            registrationWorks = true;
+            tray.ConfigureTray(true);
+            recoveryAppWindow.Hide();
+            trayOperations.Clear();
+            tray.ConfigureTray(false);
+            Assert(!tray.TrayReady && recoveryAppWindow.IsVisible && trayOperations.SequenceEqual(new uint[] { 2 }),
+                "Disabling a hidden tray prevents reentrant window messages from registering the icon again");
         }
         recoveryWindow.Close();
         ShowMainWindow();
@@ -445,6 +453,9 @@ public sealed partial class MainWindow
         await WaitForAsync(() => RootGrid.ActualTheme == ElementTheme.Light);
         Assert(AppWindow.TitleBar.ButtonForegroundColor == Microsoft.UI.Colors.Black,
             "Light theme gives caption buttons a visible foreground");
+        Assert(RootGrid.Background is SolidColorBrush lightCanvas && lightCanvas.Color.R > 180 &&
+            Navigation.PaneBackground is SolidColorBrush lightPane && lightPane.Color.R > 180,
+            "Light theme provides opaque readable navigation and page backgrounds");
         Invoke(SaveButton);
         await WaitForAsync(() => !_busy);
         Assert(_state.Text("task_number_prefix") == "DRAFT" && _state.Dirty &&
@@ -498,19 +509,24 @@ public sealed partial class MainWindow
         Assert(_syntheticRestart && AppWindow.IsVisible, "Explicit restart checks saved state without discarding edits or exiting the synthetic test");
         _generalTabIndex = 0;
         Navigate("general");
+        await WaitForAsync(() => Find<Button>("update-check") is not null);
         Invoke(Find<Button>("update-check")!);
         await WaitForAsync(() => !_busy);
         Assert(Value(_state.UpdateState, "status") == "access_required",
             "Private update source without token is not mislabeled as current");
+        await WaitForAsync(() => Find<PasswordBox>("update-token") is not null);
         Find<PasswordBox>("update-token")!.Password = "github_pat_ci_synthetic-not-real";
         Invoke(SaveButton);
         await WaitForAsync(() => !_busy);
+        await WaitForAsync(() => Find<Button>("update-check") is not null);
         Invoke(Find<Button>("update-check")!);
         await WaitForAsync(() => !_busy);
         Assert(Value(_state.UpdateState, "status") == "available", "Native update check uses only the synthetic fixed release");
+        await WaitForAsync(() => Find<Button>("update-download")?.IsEnabled == true);
         Invoke(Find<Button>("update-download")!);
         await WaitForAsync(() => !_busy);
         Assert(Value(_state.UpdateState, "status") == "downloaded", "Native download completes real digest and package verification with synthetic bytes");
+        await WaitForAsync(() => Find<Button>("update-install")?.IsEnabled == true);
         Invoke(Find<Button>("update-install")!);
         await WaitForAsync(() => !_busy);
         Assert(_syntheticUpdateLaunch && AppWindow.IsVisible && _state.History.Count == 0,
