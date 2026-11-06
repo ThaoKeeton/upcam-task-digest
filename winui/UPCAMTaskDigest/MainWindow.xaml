@@ -20,11 +20,15 @@
       </TitleBar.IconSource>
     </TitleBar>
     <NavigationView x:Name="Navigation" Grid.Row="1" PaneDisplayMode="Left" IsPaneOpen="True"
-        PaneBackground="{ThemeResource ApplicationPageBackgroundThemeBrush}"
         IsBackButtonVisible="Collapsed" IsSettingsVisible="False"
         IsPaneToggleButtonVisible="False" IsTitleBarAutoPaddingEnabled="False"
         OpenPaneLength="224"
         SelectionChanged="Navigation_SelectionChanged">
+      <NavigationView.Resources>
+        <!-- Let the theme-aware root canvas show through both pane states. -->
+        <SolidColorBrush x:Key="NavigationViewDefaultPaneBackground" Color="Transparent" />
+        <SolidColorBrush x:Key="NavigationViewExpandedPaneBackground" Color="Transparent" />
+      </NavigationView.Resources>
       <NavigationView.MenuItems>
         <NavigationViewItem Content="主页" Tag="home" Icon="Home" />
         <NavigationViewItem Content="常规" Tag="general" Icon="Setting" />

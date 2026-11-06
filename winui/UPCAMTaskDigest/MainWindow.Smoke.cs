@@ -453,8 +453,9 @@ public sealed partial class MainWindow
         await WaitForAsync(() => RootGrid.ActualTheme == ElementTheme.Light);
         Assert(AppWindow.TitleBar.ButtonForegroundColor == Microsoft.UI.Colors.Black,
             "Light theme gives caption buttons a visible foreground");
+        var navigationPane = FindIn<SplitView>(Navigation, view => view.Name == "RootSplitView");
         Assert(RootGrid.Background is SolidColorBrush lightCanvas && lightCanvas.Color.R > 180 &&
-            Navigation.PaneBackground is SolidColorBrush lightPane && lightPane.Color.R > 180,
+            navigationPane?.PaneBackground is SolidColorBrush { Color.A: 0 },
             "Light theme provides opaque readable navigation and page backgrounds");
         Invoke(SaveButton);
         await WaitForAsync(() => !_busy);
