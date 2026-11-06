@@ -96,7 +96,7 @@ public sealed partial class MainWindow
             _state.ApplyModels(models);
             Assert(_state.Models.Count == 2, "Synthetic model refresh and IPC");
             Navigate("members");
-            Invoke(Find<Button>("member-import")!);
+            await InvokeWhenReadyAsync("member-import");
             await WaitForAsync(() => Find<TextBox>("member-import-text") is not null);
             Find<TextBox>("member-import-text")!.Text = "{\"ci-member\":\"CI 虚构成员\"}";
             Invoke(await WaitForPrimaryAsync());
@@ -104,7 +104,7 @@ public sealed partial class MainWindow
             Assert(_state.Map("owner_names")["ci-member"]?.GetValue<string>() == "CI 虚构成员", "Native JSON import dialog");
 
             Navigate("statuses");
-            Invoke(Find<Button>("status-add")!);
+            await InvokeWhenReadyAsync("status-add");
             await WaitForAsync(() => Find<TextBox>("status-id-input") is not null);
             Find<TextBox>("status-id-input")!.Text = "ci-status";
             Find<TextBox>("status-name-input")!.Text = "CI 虚构状态";
@@ -151,7 +151,7 @@ public sealed partial class MainWindow
             Assert(reloadedMentions.AcceptsReturn &&
                 reloadedMentions.Text.Replace("\r\n", "\n").Replace("\r", "\n") == "ci-mention-one\nci-mention-two",
                 "Reloaded native multiline mention input retains every saved recipient");
-            Invoke(Find<Button>("check-dingtalk")!);
+            await InvokeWhenReadyAsync("check-dingtalk");
             await WaitForAsync(() => !_busy);
             var mentionCheck = await Worker.SendAsync("validate_dingtalk_config");
             Assert(mentionCheck["mention_count"]?.GetValue<int>() == 2 &&
@@ -171,7 +171,7 @@ public sealed partial class MainWindow
                 "Automatic save also discovers mapping IDs");
             Assert(_state.Number("schema_version", 0) == 1 && !_state.Flag("auto_send_enabled") && _state.History.Count == 0,
                 "Automatic scope validation preserves legacy settings and does not send");
-            Invoke(Find<Button>("probe-project")!);
+            await InvokeWhenReadyAsync("probe-project");
             await WaitForAsync(() => !_busy);
             Assert(_state.CandidateOwners.Contains("demo-person"), "Read-only synthetic project probe");
 
@@ -185,16 +185,16 @@ public sealed partial class MainWindow
             Assert(true, "Native dialog serialization prevents reentrant failures");
 
             Navigate("run");
-            Invoke(Find<Button>("preview-sample")!);
+            await InvokeWhenReadyAsync("preview-sample");
             await WaitForAsync(() => !_busy);
             Assert(_state.Output.Contains("虚构示例"), "Repository template preview button");
-            Invoke(Find<Button>("diagnose")!);
+            await InvokeWhenReadyAsync("diagnose");
             await WaitForAsync(() => !_busy);
             Assert(_state.ExportAvailable && _state.Output.Contains("通过"), "Read-only diagnostic button and safe export availability");
             Assert(_state.Output.Contains("窗口内未支持动作：0 条") && _state.Output.Contains("时间归属无法判断的未支持动作：0 条"),
                 "Native diagnostics distinguish unsupported actions from unknown time membership");
             string previousDiagnostic = _state.DiagnosticText;
-            Invoke(Find<Button>("export-detailed-diagnostic")!);
+            await InvokeWhenReadyAsync("export-detailed-diagnostic");
             await WaitForAsync(() => Find<ContentDialog>("detailed-export-consent") is not null);
             var detailedDialog = Find<ContentDialog>("detailed-export-consent")!;
             Assert(detailedDialog.DefaultButton == ContentDialogButton.Close &&
@@ -224,7 +224,7 @@ public sealed partial class MainWindow
             var clipboardOptions = DiagnosticClipboardOptions();
             Assert(!clipboardOptions.IsAllowedInHistory && !clipboardOptions.IsRoamable,
                 "Diagnostic clipboard options disable history and device roaming");
-            Invoke(Find<Button>("copy-diagnostic")!);
+            await InvokeWhenReadyAsync("copy-diagnostic");
             await WaitForAsync(() => !_busy);
             string copiedDiagnostic = await Windows.ApplicationModel.DataTransfer.Clipboard.GetContent().GetTextAsync();
             Assert(copiedDiagnostic == _state.DiagnosticText && copiedDiagnostic.Contains("只读校验通过"),
@@ -252,7 +252,7 @@ public sealed partial class MainWindow
             Assert(!Find<Button>("copy-diagnostic")!.IsEnabled && _state.DiagnosticText == "",
                 "Stale diagnostic copy is disabled after window changes");
             _state.ManualStart = previousStart;
-            Invoke(Find<Button>("run-manual")!);
+            await InvokeWhenReadyAsync("run-manual");
             await WaitForAsync(() => !_busy);
             Assert(_state.History.Count == 1, "Synthetic workflow and local history");
             Assert(_state.Output.Contains("DEMO\\-101") && _state.Output.Contains("🕒 时间范围") &&
@@ -266,7 +266,7 @@ public sealed partial class MainWindow
                 !_state.Output.Contains("CI 虚构通知内容") && !_state.Output.Contains("ci-unverified-account"),
                 "Native formal report keeps communication summary without file processing or assignee appendices");
 
-            Invoke(Find<Button>("run-manual")!);
+            await InvokeWhenReadyAsync("run-manual");
             await WaitForAsync(() => !_busy);
             Assert(_state.History.Count == 2 && _state.History.All(row => Value(row, "state") == "sent"),
                 "Deliberate second manual click resends the same window without an extra confirmation dialog");
@@ -505,13 +505,13 @@ public sealed partial class MainWindow
         await WaitForAsync(() => !_busy);
         Assert(PageTitle.Text == "常规" && AppWindow.TitleBar.ButtonForegroundColor == Microsoft.UI.Colors.White,
             "Chinese dark preferences restore caption and localized settings");
-        Invoke(Find<Button>("restart-app")!);
+        await InvokeWhenReadyAsync("restart-app");
         await WaitForAsync(() => !_busy);
         Assert(_syntheticRestart && AppWindow.IsVisible, "Explicit restart checks saved state without discarding edits or exiting the synthetic test");
         _generalTabIndex = 0;
         Navigate("general");
         await WaitForAsync(() => Find<Button>("update-check") is not null);
-        Invoke(Find<Button>("update-check")!);
+        await InvokeWhenReadyAsync("update-check");
         await WaitForAsync(() => !_busy);
         Assert(Value(_state.UpdateState, "status") == "access_required",
             "Private update source without token is not mislabeled as current");
@@ -524,16 +524,16 @@ public sealed partial class MainWindow
         Assert(_state.SecretPresence["github_update_token"]?.GetValue<bool>() == true && _state.UpdateTokenDraft.Length == 0,
             "Immediate native save persists the update credential and clears only its input draft");
         await WaitForAsync(() => Find<Button>("update-check") is not null);
-        Invoke(Find<Button>("update-check")!);
+        await InvokeWhenReadyAsync("update-check");
         await WaitForAsync(() => !_busy);
         Assert(Value(_state.UpdateState, "status") == "available",
             "Native update check uses only the synthetic fixed release; observed status: " + Value(_state.UpdateState, "status"));
         await WaitForAsync(() => Find<Button>("update-download")?.IsEnabled == true);
-        Invoke(Find<Button>("update-download")!);
+        await InvokeWhenReadyAsync("update-download");
         await WaitForAsync(() => !_busy);
         Assert(Value(_state.UpdateState, "status") == "downloaded", "Native download completes real digest and package verification with synthetic bytes");
         await WaitForAsync(() => Find<Button>("update-install")?.IsEnabled == true);
-        Invoke(Find<Button>("update-install")!);
+        await InvokeWhenReadyAsync("update-install");
         await WaitForAsync(() => !_busy);
         Assert(_syntheticUpdateLaunch && AppWindow.IsVisible && _state.History.Count == 0,
             "Verified synthetic install prepares a per-user handoff without executing a fake binary or sending a report");
@@ -610,6 +610,17 @@ public sealed partial class MainWindow
         if (button is null) throw new InvalidOperationException("The required native button has not been realized.");
         var peer = new ButtonAutomationPeer(button);
         ((IInvokeProvider)peer.GetPattern(PatternInterface.Invoke)).Invoke();
+    }
+
+    private async Task InvokeWhenReadyAsync(string id)
+    {
+        Button? button = null;
+        await WaitForAsync(() =>
+        {
+            button = Find<Button>(id);
+            return button is { IsLoaded: true, IsEnabled: true };
+        });
+        Invoke(button!);
     }
 
     private static async Task WaitForAsync(Func<bool> ready)
