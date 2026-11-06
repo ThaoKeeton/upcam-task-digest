@@ -5,9 +5,20 @@ using System.Text;
 
 namespace Workbench.Digest.Acceptance;
 
+internal sealed record NativeWindowInfo(nint Handle, nint Owner, uint ProcessId, string ClassName, uint Style, uint ExtendedStyle, bool Visible);
+
 internal static class NativeProbes
 {
     internal const string SingletonName = @"Local\UPCAMTaskDigest.Singleton.v1";
+    private const string VerifiedPopupClass = "Microsoft.UI.Content.PopupWindowSiteBridge";
+    private const uint VerifiedPopupStyle = 0x94000000; // WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS, observed in actual run 42266298714.
+    private const uint VerifiedPopupExtendedStyle = 0x08200000; // WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP.
+    private static readonly List<string> IgnoredPopups = [];
+
+    internal static IReadOnlyList<string> IgnoredFrameworkPopups
+    {
+        get { lock (IgnoredPopups) return IgnoredPopups.ToArray(); }
+    }
 
     internal static bool SingletonExists()
     {
@@ -46,34 +57,65 @@ internal static class NativeProbes
         return ids;
     }
 
-    internal static int VisibleWindowCount()
+    internal static IReadOnlyList<NativeWindowInfo> VisibleWindows()
     {
-        var count = 0;
-        EnumWindows((window, _) =>
-        {
-            GetWindowThreadProcessId(window, out var processId);
-            if (processId == Environment.ProcessId && IsWindowVisible(window)) count++;
-            return true;
-        }, nint.Zero);
-        return count;
-    }
-
-    internal static string VisibleWindowInventory(nint mainWindow)
-    {
-        var windows = new List<string>();
+        var windows = new List<NativeWindowInfo>();
         EnumWindows((window, _) =>
         {
             GetWindowThreadProcessId(window, out var processId);
             if (processId != Environment.ProcessId || !IsWindowVisible(window)) return true;
-            if (windows.Count >= 16) return true;
             var name = new StringBuilder(128);
             GetClassName(window, name, name.Capacity);
             var safeClass = new string(name.ToString().Where(character => !char.IsControl(character)).Take(127).ToArray());
-            var owner = GetWindow(window, 4); // GW_OWNER. No window title or UI content is read.
-            windows.Add($"hwnd=0x{window:X};class={safeClass};owner=0x{owner:X};main={(window == mainWindow ? 1 : 0)};ownerIsMain={(owner == mainWindow ? 1 : 0)};style=0x{GetWindowLongPtr(window, -16):X};exstyle=0x{GetWindowLongPtr(window, -20):X};pid={processId}");
+            windows.Add(new(window, GetWindow(window, 4), processId, safeClass,
+                unchecked((uint)GetWindowLongPtr(window, -16).ToInt64()),
+                unchecked((uint)GetWindowLongPtr(window, -20).ToInt64()), true));
             return true;
         }, nint.Zero);
-        return "Visible native window inventory (bounded, no titles/text): " + string.Join(" | ", windows);
+        return windows;
+    }
+
+    internal static bool IsVerifiedFrameworkPopup(NativeWindowInfo window, nint mainWindow, uint processId) =>
+        mainWindow != nint.Zero && window.Handle != nint.Zero && window.Handle != mainWindow && window.Visible &&
+        window.ProcessId == processId && window.Owner == mainWindow &&
+        string.Equals(window.ClassName, VerifiedPopupClass, StringComparison.Ordinal) &&
+        (window.Style & 0x80000000) != 0 && (window.Style & 0x40000000) == 0 && // popup, never child
+        (window.ExtendedStyle & 0x08000000) != 0 && // must not activate independently
+        window.Style == VerifiedPopupStyle && window.ExtendedStyle == VerifiedPopupExtendedStyle;
+
+    internal static void RecordIgnoredPopup(NativeWindowInfo window, nint mainWindow)
+    {
+        var detail = DescribeWindow(window, mainWindow);
+        lock (IgnoredPopups)
+        {
+            if (IgnoredPopups.Count < 16 && !IgnoredPopups.Contains(detail, StringComparer.Ordinal)) IgnoredPopups.Add(detail);
+        }
+    }
+
+    internal static string VisibleWindowInventory(IEnumerable<NativeWindowInfo> windows, nint mainWindow) =>
+        "Visible native window inventory (bounded, no titles/text): " + string.Join(" | ", windows.Take(16).Select(window => DescribeWindow(window, mainWindow)));
+
+    private static string DescribeWindow(NativeWindowInfo window, nint mainWindow) =>
+        $"hwnd=0x{window.Handle:X};class={window.ClassName};owner=0x{window.Owner:X};main={(window.Handle == mainWindow ? 1 : 0)};ownerIsMain={(window.Owner == mainWindow ? 1 : 0)};style=0x{window.Style:X8};exstyle=0x{window.ExtendedStyle:X8};pid={window.ProcessId}";
+
+    internal static void VerifyWindowClassification()
+    {
+        nint main = 0x6012A;
+        const uint pid = 7712;
+        var observed = new NativeWindowInfo(0x501DE, main, pid, VerifiedPopupClass, VerifiedPopupStyle, VerifiedPopupExtendedStyle, true);
+        NativeHost.Require(IsVerifiedFrameworkPopup(observed, main, pid), "The proven owned WinUI no-activate popup was not classified correctly.");
+        NativeWindowInfo[] rejected =
+        [
+            observed with { Owner = nint.Zero }, observed with { Owner = 0x99 }, observed with { ProcessId = pid + 1 },
+            observed with { ClassName = "WinUIDesktopWin32WindowClass" }, observed with { ClassName = "Microsoft.UI.Content.PopupWindowSiteBridge.Other" },
+            observed with { Handle = main }, observed with { Handle = nint.Zero }, observed with { Visible = false },
+            observed with { Style = VerifiedPopupStyle & ~0x80000000u }, observed with { Style = VerifiedPopupStyle | 0x40000000u },
+            observed with { ExtendedStyle = VerifiedPopupExtendedStyle & ~0x08000000u },
+            observed with { ExtendedStyle = VerifiedPopupExtendedStyle | 0x00000008u }
+        ];
+        NativeHost.Require(rejected.All(window => !IsVerifiedFrameworkPopup(window, main, pid)) &&
+            !IsVerifiedFrameworkPopup(observed, nint.Zero, pid),
+            "The popup classifier admitted an independent, unowned, wrong-class, activating or unexpected-style window.");
     }
 
     /// <summary>Only fixed aggregate queries against this run's own databases; never report row bodies or identities.</summary>

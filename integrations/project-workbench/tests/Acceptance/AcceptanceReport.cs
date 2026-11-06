@@ -93,6 +93,8 @@ internal sealed class AcceptanceReport(string path)
             productionNetworkBoundary = "Production performs only unconfigured local setup/status. Empty UI, authorization and SQLite counts are observed; transient network requests are not instrumented or proven absent by this harness. Synthetic business operations use transport-free injected factories; their no-network regression evidence belongs to backend tests.",
             evidenceBoundary = "Only passed checks ran and met assertions. A skipped check is unverified. Screenshots are native RenderTargetBitmap captures and require visual review. Shutdown/restart checks recreate the actual manager in this process; they do not claim a separate full host process launch.",
             captureBoundary = "The dedicated native CI shell requests Light theme and has a real opaque white background before RenderTargetBitmap. PNG pixels are not flattened or postprocessed. Captures show the native content subtree, not complete production host chrome; production theme behavior is not overridden.",
+            windowBoundary = "Exactly the main visible app window is permitted. Only the actual-run-verified same-PID/main-owned Microsoft.UI.Content.PopupWindowSiteBridge with style 0x94000000 and no-activate/no-redirection extended style 0x08200000 is classified as a framework popup. Independent, unowned, other-class or unexpected-style windows fail.",
+            ignoredFrameworkPopups = NativeProbes.IgnoredFrameworkPopups,
             isolatedUserRoots = _roots.ToArray(),
             checks = _checks.ToArray(),
             artifacts = _artifacts.ToArray()

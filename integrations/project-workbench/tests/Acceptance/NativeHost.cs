@@ -56,6 +56,7 @@ internal sealed class NativeHost
     internal void AssertStartup()
     {
         AssertUiThread();
+        NativeProbes.VerifyWindowClassification();
         Require(SynchronizationContext.Current is Microsoft.UI.Dispatching.DispatcherQueueSynchronizationContext,
             "SDK generated startup did not install the WinUI synchronization context.");
         Require(Application.Current is IXamlMetadataProvider, "The application has no generated WinUI metadata provider.");
@@ -119,8 +120,17 @@ internal sealed class NativeHost
 
     internal void AssertSingleWindow(string failure)
     {
-        if (NativeProbes.VisibleWindowCount() != 1)
-            throw new AcceptanceFailure(failure + " " + NativeProbes.VisibleWindowInventory(WinRT.Interop.WindowNative.GetWindowHandle(_window)));
+        var main = WinRT.Interop.WindowNative.GetWindowHandle(_window);
+        var windows = NativeProbes.VisibleWindows();
+        var application = new List<NativeWindowInfo>();
+        foreach (var window in windows)
+        {
+            if (NativeProbes.IsVerifiedFrameworkPopup(window, main, (uint)Environment.ProcessId))
+                NativeProbes.RecordIgnoredPopup(window, main);
+            else application.Add(window);
+        }
+        if (application.Count != 1 || application[0].Handle != main)
+            throw new AcceptanceFailure(failure + " " + NativeProbes.VisibleWindowInventory(windows, main));
     }
 
     internal async Task SelectTabAsync(FrameworkElement root, string id, int selected)

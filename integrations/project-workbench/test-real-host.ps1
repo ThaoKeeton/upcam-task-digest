@@ -142,6 +142,11 @@ function Find-Exact([string]$Name, [string]$Id = '', [string]$Role = '', [string
             Set-SelectorIssue 'pattern'
             if (-not $item.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) { continue }
         }
+        elseif ($Role -eq 'dialog') {
+            # Actual WinUI exposes both a Window peer and its Text title with this name.
+            # Require the observed dialog role instead of accepting the first same-name element.
+            if ($item.Current.ControlType -ne [System.Windows.Automation.ControlType]::Window) { continue }
+        }
         $script:selectorProbe.eligibleCount++
         $found = $item
     }
@@ -577,7 +582,7 @@ public sealed class UpcamRealHostRun : IDisposable
 
     Set-Phase 'native-trust' 'explicit-native-trust-failed'
     Invoke-Exact '启用 UPCAM Task Digest' 'enable-plugin'
-    $null = Get-Exact '信任并启用 UPCAM Task Digest？' '' '' 'trust-title'
+    $null = Get-Exact '信任并启用 UPCAM Task Digest？' '' 'dialog' 'trust-title'
     $null = Get-Exact '信任并启用' '' 'invoke' 'trust-primary'
     Assert-Check 'explicitTrustDialog' $true
     # Authorization is limited to the controlled production fixture in this fresh CI account.

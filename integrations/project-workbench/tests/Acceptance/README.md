@@ -154,8 +154,12 @@ The real dedicated CI shell requests Light theme and uses an opaque white native
 background before capture. There is no pixel postprocessing or flattened/forged
 backing; this styles only the test parent, not production plugin theme behavior.
 Captures show native content, while the separate complete-host driver covers host
-chrome. Extra visible windows still fail; failures now include bounded HWND class,
-owner/main-handle, style and known PID metadata, with no titles or window text.
+chrome. Independent or unexpected visible windows still fail. The sole exception
+is the actual-run-verified same-PID, main-owned exact class
+`Microsoft.UI.Content.PopupWindowSiteBridge`, with visible popup style `0x94000000`
+and no-activate/no-redirection extended style `0x08200000`. Startup runs pure
+positive/negative metadata classification checks. Matched popup inventories remain
+bounded in the JSON report; failures retain all window metadata without titles or text.
 
 This is a dedicated native acceptance host, **not a full production Workbench UI
 test**. Manager restart checks reconstruct the actual manager inside this native
