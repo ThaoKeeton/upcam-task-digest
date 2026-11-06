@@ -18,13 +18,17 @@ internal sealed class NativeDesktop : IDisposable
     private readonly uint _taskbarCreated = RegisterWindowMessage("TaskbarCreated");
     private const uint TrayMessage = 0x8000 + 37;
     public bool TrayReady { get; private set; }
+    private bool _trayEnabled = true;
+    private bool _addingTray;
+    private readonly Func<uint, bool>? _trayRegistration;
 
-    public NativeDesktop(Window window, Action show, Action exit, Func<bool> closeRequested)
+    public NativeDesktop(Window window, Action show, Action exit, Func<bool> closeRequested, Func<uint, bool>? trayRegistration = null)
     {
         _hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
         _show = show;
         _exit = exit;
         _closeRequested = closeRequested;
+        _trayRegistration = trayRegistration;
         _callback = WindowProcedure;
         if (!SetWindowSubclass(_hwnd, _callback, 1, 0))
             throw new InvalidOperationException("无法初始化窗口消息处理。");
@@ -51,13 +55,42 @@ internal sealed class NativeDesktop : IDisposable
     {
         Size = (uint)Marshal.SizeOf<NotifyIconData>(), Window = _hwnd, Id = 1,
         Flags = 1 | 2 | 4, Callback = TrayMessage, Icon = _trayIcon,
-        Tip = "UPCAM 站会日报", Info = "", InfoTitle = ""
+        Tip = UiStrings.T("UPCAM 站会日报"), Info = "", InfoTitle = ""
     };
 
     private void AddIcon()
     {
-        NotifyIconData data = Data();
-        TrayReady = ShellNotifyIcon(0, ref data);
+        if (!_trayEnabled || _addingTray) return;
+        _addingTray = true;
+        try
+        {
+            NotifyIconData data = Data();
+            TrayReady = NotifyShell(0, ref data);
+            if (!TrayReady && !IsWindowVisible(_hwnd)) _show();
+        }
+        finally { _addingTray = false; }
+    }
+
+    private bool NotifyShell(uint operation, ref NotifyIconData data) =>
+        _trayRegistration?.Invoke(operation) ?? ShellNotifyIcon(operation, ref data);
+
+    internal void ConfigureTray(bool enabled)
+    {
+        _trayEnabled = enabled;
+        if (!enabled)
+        {
+            NotifyIconData previous = Data();
+            NotifyShell(2, ref previous);
+            TrayReady = false;
+            if (!IsWindowVisible(_hwnd)) _show();
+        }
+        if (enabled && !TrayReady) AddIcon();
+        else if (enabled)
+        {
+            NotifyIconData current = Data();
+            TrayReady = NotifyShell(1, ref current);
+            if (!TrayReady) AddIcon();
+        }
     }
 
     private IntPtr LoadAssetIcon(uint dpi, bool small = true)
@@ -79,9 +112,12 @@ internal sealed class NativeDesktop : IDisposable
         _trayIcon = replacement;
         _largeWindowIcon = large;
         SetWindowIcons();
-        NotifyIconData data = Data();
-        TrayReady = ShellNotifyIcon(1, ref data);
-        if (!TrayReady) AddIcon();
+        if (_trayEnabled)
+        {
+            NotifyIconData data = Data();
+            TrayReady = NotifyShell(1, ref data);
+            if (!TrayReady) AddIcon();
+        }
         if (previous != IntPtr.Zero) DestroyIcon(previous);
         if (previousLarge != IntPtr.Zero) DestroyIcon(previousLarge);
     }
@@ -127,6 +163,9 @@ internal sealed class NativeDesktop : IDisposable
         if ((message == 0x0010 || message == 0x0112 && (wparam.ToUInt64() & 0xFFF0) == 0xF060) && _closeRequested())
             return IntPtr.Zero;
         if (message == _taskbarCreated) AddIcon();
+        // PowerToys retries a failed initial registration on window-position activity.
+        // AddIcon is guarded against re-entry and restores only a hidden window.
+        if (message == 0x0046 && _trayEnabled && !TrayReady) AddIcon();
         if (message == 0x02E0)
         {
             IntPtr result = DefSubclassProc(hwnd, message, wparam, lparam);
@@ -154,9 +193,9 @@ internal sealed class NativeDesktop : IDisposable
         if (menu == IntPtr.Zero) return;
         try
         {
-            AppendMenu(menu, 0, 1, "显示主窗口");
+            AppendMenu(menu, 0, 1, UiStrings.T("显示主窗口"));
             AppendMenu(menu, 0x800, 0, null);
-            AppendMenu(menu, 0, 2, "退出应用");
+            AppendMenu(menu, 0, 2, UiStrings.T("退出应用"));
             GetCursorPos(out Point point);
             SetForegroundWindow(_hwnd);
             uint choice = TrackPopupMenu(menu, 0x0100 | 0x0002, point.X, point.Y, 0, _hwnd, IntPtr.Zero);
@@ -173,7 +212,7 @@ internal sealed class NativeDesktop : IDisposable
         {
             var title = new StringBuilder(512);
             GetWindowText(hwnd, title, title.Capacity);
-            if (!title.ToString().StartsWith("UPCAM 站会日报", StringComparison.Ordinal)) return true;
+            if (!title.ToString().StartsWith("UPCAM ", StringComparison.Ordinal)) return true;
             ShowWindow(hwnd, 9);
             SetForegroundWindow(hwnd);
             return false;
@@ -183,7 +222,7 @@ internal sealed class NativeDesktop : IDisposable
     public void Dispose()
     {
         NotifyIconData data = Data();
-        ShellNotifyIcon(2, ref data);
+        NotifyShell(2, ref data);
         RemoveWindowSubclass(_hwnd, _callback, 1);
         SendMessage(_hwnd, 0x0080, UIntPtr.Zero, IntPtr.Zero);
         SendMessage(_hwnd, 0x0080, (UIntPtr)1, IntPtr.Zero);
@@ -236,6 +275,7 @@ internal sealed class NativeDesktop : IDisposable
     [DllImport("user32.dll")] private static extern bool GetCursorPos(out Point point);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hwnd, int command);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder text, int count);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowProc proc, IntPtr lparam);
     [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam);

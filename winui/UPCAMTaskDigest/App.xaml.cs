@@ -9,13 +9,16 @@ public partial class App : Application
 
     public App()
     {
-        RequestedTheme = ApplicationTheme.Dark;
+        string language = IsSyntheticRun ? "zh-CN" : InterfaceLanguageBootstrap.Read(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "UPCAM", "TaskDigest", "language.json"));
         UnhandledException += (_, args) =>
         {
             if (IsSyntheticRun) RecordSyntheticFailure(args.Exception);
         };
         try
         {
+            UiStrings.Configure(language);
+            Microsoft.Windows.Globalization.ApplicationLanguages.PrimaryLanguageOverride = language == "system" ? "" : UiStrings.ResolvedLanguage;
             InitializeComponent();
             if (IsSyntheticRun)
             {
@@ -30,14 +33,24 @@ public partial class App : Application
         }
     }
 
-    protected override void OnLaunched(LaunchActivatedEventArgs args)
+    protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
         string[] arguments = Environment.GetCommandLineArgs().Skip(1).ToArray();
-        bool smoke = arguments.Contains("--ui-smoke-test");
-        if (arguments.Any(arg => arg is not ("--ui-smoke-test" or "--background")))
+        AppLaunchOptions options;
+        try { options = AppLaunchOptions.Parse(arguments, Environment.ProcessId); }
+        catch (ArgumentException)
         {
             Environment.Exit(2);
             return;
+        }
+        bool smoke = options.Smoke;
+        if (options.ParentPid is int parentPid)
+        {
+            if (!await ProcessHandoff.WaitForParentAsync(parentPid, options.HandoffEvent))
+            {
+                Environment.Exit(3);
+                return;
+            }
         }
         _instance = new Mutex(false, @"Local\UPCAMTaskDigest.Singleton.v1", out bool createdNew);
         if (!createdNew)
@@ -50,7 +63,7 @@ public partial class App : Application
         try
         {
             if (smoke) SyntheticTrace("Creating main window.");
-            _window = new MainWindow(smoke, arguments.Contains("--background"));
+            _window = new MainWindow(smoke, options.Background, options.AfterUpdate);
             if (smoke) SyntheticTrace("Main window constructed.");
             _window.Closed += (_, _) => _instance.Dispose();
             _window.Activate();

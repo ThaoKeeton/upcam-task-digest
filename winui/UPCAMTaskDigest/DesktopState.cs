@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Globalization;
 
 namespace Upcam.Desktop;
 
@@ -11,6 +12,13 @@ internal sealed class DesktopState
     public JsonArray FastModels { get; set; } = new();
     public JsonArray History { get; set; } = new();
     public Dictionary<string, string> SecretDrafts { get; } = new();
+    internal static readonly string[] GeneralKeys = { "ui_language", "ui_theme", "tray_icon_enabled",
+        "close_to_tray", "start_in_tray", "auto_check_updates", "start_with_windows" };
+    public JsonObject GeneralPreferences { get; private set; } = new();
+    public JsonObject UpdateState { get; set; } = new();
+    public bool GeneralDirty { get; private set; }
+    public string UpdateTokenDraft { get; set; } = "";
+    public bool ClearUpdateToken { get; set; }
     public HashSet<string> CandidateOwners { get; } = new();
     public HashSet<string> CandidateStatuses { get; } = new();
     public Dictionary<string, string> StatusSuggestions { get; } = new();
@@ -23,9 +31,14 @@ internal sealed class DesktopState
     public string DataDirectory { get; set; } = "";
     public string ApplicationVersion { get; set; } = "";
     public string RulesetRevision { get; set; } = "";
-    public string ModelCacheStatus { get; set; } = "尚未刷新当前 API Key 可用模型。";
-    private string _manualStart = DateTime.Now.Date.ToString("yyyy-MM-dd HH:mm");
-    private string _manualEnd = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
+    private string? _modelCacheFetched, _modelCacheError;
+    private bool _cacheMatches;
+    public string ModelCacheStatus => _modelCacheError is not null ? UiStrings.T(_modelCacheError) :
+        _modelCacheFetched is null ? UiStrings.T("尚无本机模型缓存；点击刷新后获取当前 API Key 可用模型。") :
+        UiStrings.F("缓存 {0} 个 API 模型 · {1}", Models.Count, _modelCacheFetched) +
+        (_cacheMatches ? "" : UiStrings.T(" · 当前 Key 尚未匹配，请手动刷新。"));
+    private string _manualStart = DateTime.Now.Date.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+    private string _manualEnd = DateTime.Now.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
     public string ManualStart
     {
         get => _manualStart;
@@ -121,6 +134,9 @@ internal sealed class DesktopState
             InvalidateDiagnostic();
         }
         if (result["secret_presence"] is JsonObject presence) SecretPresence = (JsonObject)presence.DeepClone();
+        if (!GeneralDirty && result["settings"] is JsonObject saved)
+            GeneralPreferences = new JsonObject(GeneralKeys.Select(key =>
+                KeyValuePair.Create<string, JsonNode?>(key, saved[key]?.DeepClone())));
         if (result["scope_probe"] is JsonObject probe) ApplyProbe(probe);
         LedgerReady = result["ledger_ready"]?.GetValue<bool>() ?? LedgerReady;
         LedgerMessage = result["ledger_message"]?.GetValue<string>() ?? LedgerMessage;
@@ -133,6 +149,33 @@ internal sealed class DesktopState
         Dirty = false;
     }
 
+    public string GeneralText(string key, string fallback = "system") => GeneralPreferences[key]?.GetValue<string>() ?? fallback;
+    public bool GeneralFlag(string key) => GeneralPreferences[key]?.GetValue<bool>() == true;
+    public void SetGeneral(string key, JsonNode value)
+    {
+        if (!GeneralKeys.Contains(key)) throw new ArgumentException("Unknown general preference");
+        GeneralPreferences[key] = value;
+        GeneralDirty = true;
+    }
+    public JsonObject GeneralSavePayload() => new()
+    {
+        ["preferences"] = GeneralPreferences.DeepClone(),
+        ["github_token"] = UpdateTokenDraft,
+        ["clear_github_token"] = ClearUpdateToken
+    };
+    public void ApplyGeneral(JsonObject result)
+    {
+        if (result["preferences"] is JsonObject preferences)
+        {
+            GeneralPreferences = (JsonObject)preferences.DeepClone();
+            foreach (string key in GeneralKeys) Settings[key] = preferences[key]?.DeepClone();
+        }
+        if (result["secret_presence"] is JsonObject presence) SecretPresence = (JsonObject)presence.DeepClone();
+        GeneralDirty = false;
+        UpdateTokenDraft = "";
+        ClearUpdateToken = false;
+    }
+
     public void ApplyModels(JsonObject result)
     {
         Models = result["models"]?.DeepClone().AsArray() ?? new JsonArray();
@@ -140,9 +183,9 @@ internal sealed class DesktopState
         FastModels = result["fast_models"]?.DeepClone().AsArray() ?? new JsonArray();
         string? fetched = result["fetched_at_utc"]?.GetValue<string>() ?? result["model_cache_fetched_at_utc"]?.GetValue<string>();
         bool matches = result["model_cache_matches_key"]?.GetValue<bool>() == true;
-        ModelCacheStatus = result["model_cache_error"]?.GetValue<string>() ??
-            (fetched is null ? "尚无本机模型缓存；点击刷新后获取当前 API Key 可用模型。" :
-             $"缓存 {Models.Count} 个 API 模型 · {fetched}" + (matches ? "" : " · 当前 Key 尚未匹配，请手动刷新。"));
+        _modelCacheFetched = fetched;
+        _modelCacheError = result["model_cache_error"]?.GetValue<string>();
+        _cacheMatches = matches;
     }
 
     public JsonObject SavePayload() => new()

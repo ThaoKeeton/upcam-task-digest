@@ -49,6 +49,8 @@ public sealed partial class MainWindow
             ApplyInitializationResult(await _worker.SendAsync("initialize"));
             Assert(_ready && Navigation.IsEnabled && PageHost.IsEnabled && SaveButton.IsEnabled,
                 "Compatible synthetic worker restores native operation state");
+            ApplyGeneralAppearance();
+            await VerifyGeneralSettingsAsync(output);
             var titleBar = Find<TitleBar>("app-titlebar");
             Assert(titleBar is not null && ExtendsContentIntoTitleBar, "Native custom TitleBar replaces colored system title bar");
             Assert(titleBar!.IconSource is BitmapIconSource { ShowAsMonochrome: false }, "TitleBar keeps original icon colors");
@@ -94,7 +96,7 @@ public sealed partial class MainWindow
             _state.ApplyModels(models);
             Assert(_state.Models.Count == 2, "Synthetic model refresh and IPC");
             Navigate("members");
-            Invoke(Find<Button>("member-import")!);
+            await InvokeWhenReadyAsync("member-import");
             await WaitForAsync(() => Find<TextBox>("member-import-text") is not null);
             Find<TextBox>("member-import-text")!.Text = "{\"ci-member\":\"CI 虚构成员\"}";
             Invoke(await WaitForPrimaryAsync());
@@ -102,7 +104,7 @@ public sealed partial class MainWindow
             Assert(_state.Map("owner_names")["ci-member"]?.GetValue<string>() == "CI 虚构成员", "Native JSON import dialog");
 
             Navigate("statuses");
-            Invoke(Find<Button>("status-add")!);
+            await InvokeWhenReadyAsync("status-add");
             await WaitForAsync(() => Find<TextBox>("status-id-input") is not null);
             Find<TextBox>("status-id-input")!.Text = "ci-status";
             Find<TextBox>("status-name-input")!.Text = "CI 虚构状态";
@@ -149,7 +151,7 @@ public sealed partial class MainWindow
             Assert(reloadedMentions.AcceptsReturn &&
                 reloadedMentions.Text.Replace("\r\n", "\n").Replace("\r", "\n") == "ci-mention-one\nci-mention-two",
                 "Reloaded native multiline mention input retains every saved recipient");
-            Invoke(Find<Button>("check-dingtalk")!);
+            await InvokeWhenReadyAsync("check-dingtalk");
             await WaitForAsync(() => !_busy);
             var mentionCheck = await Worker.SendAsync("validate_dingtalk_config");
             Assert(mentionCheck["mention_count"]?.GetValue<int>() == 2 &&
@@ -169,7 +171,7 @@ public sealed partial class MainWindow
                 "Automatic save also discovers mapping IDs");
             Assert(_state.Number("schema_version", 0) == 1 && !_state.Flag("auto_send_enabled") && _state.History.Count == 0,
                 "Automatic scope validation preserves legacy settings and does not send");
-            Invoke(Find<Button>("probe-project")!);
+            await InvokeWhenReadyAsync("probe-project");
             await WaitForAsync(() => !_busy);
             Assert(_state.CandidateOwners.Contains("demo-person"), "Read-only synthetic project probe");
 
@@ -183,16 +185,16 @@ public sealed partial class MainWindow
             Assert(true, "Native dialog serialization prevents reentrant failures");
 
             Navigate("run");
-            Invoke(Find<Button>("preview-sample")!);
+            await InvokeWhenReadyAsync("preview-sample");
             await WaitForAsync(() => !_busy);
             Assert(_state.Output.Contains("虚构示例"), "Repository template preview button");
-            Invoke(Find<Button>("diagnose")!);
+            await InvokeWhenReadyAsync("diagnose");
             await WaitForAsync(() => !_busy);
             Assert(_state.ExportAvailable && _state.Output.Contains("通过"), "Read-only diagnostic button and safe export availability");
             Assert(_state.Output.Contains("窗口内未支持动作：0 条") && _state.Output.Contains("时间归属无法判断的未支持动作：0 条"),
                 "Native diagnostics distinguish unsupported actions from unknown time membership");
             string previousDiagnostic = _state.DiagnosticText;
-            Invoke(Find<Button>("export-detailed-diagnostic")!);
+            await InvokeWhenReadyAsync("export-detailed-diagnostic");
             await WaitForAsync(() => Find<ContentDialog>("detailed-export-consent") is not null);
             var detailedDialog = Find<ContentDialog>("detailed-export-consent")!;
             Assert(detailedDialog.DefaultButton == ContentDialogButton.Close &&
@@ -222,7 +224,7 @@ public sealed partial class MainWindow
             var clipboardOptions = DiagnosticClipboardOptions();
             Assert(!clipboardOptions.IsAllowedInHistory && !clipboardOptions.IsRoamable,
                 "Diagnostic clipboard options disable history and device roaming");
-            Invoke(Find<Button>("copy-diagnostic")!);
+            await InvokeWhenReadyAsync("copy-diagnostic");
             await WaitForAsync(() => !_busy);
             string copiedDiagnostic = await Windows.ApplicationModel.DataTransfer.Clipboard.GetContent().GetTextAsync();
             Assert(copiedDiagnostic == _state.DiagnosticText && copiedDiagnostic.Contains("只读校验通过"),
@@ -250,7 +252,7 @@ public sealed partial class MainWindow
             Assert(!Find<Button>("copy-diagnostic")!.IsEnabled && _state.DiagnosticText == "",
                 "Stale diagnostic copy is disabled after window changes");
             _state.ManualStart = previousStart;
-            Invoke(Find<Button>("run-manual")!);
+            await InvokeWhenReadyAsync("run-manual");
             await WaitForAsync(() => !_busy);
             Assert(_state.History.Count == 1, "Synthetic workflow and local history");
             Assert(_state.Output.Contains("DEMO\\-101") && _state.Output.Contains("🕒 时间范围") &&
@@ -264,7 +266,7 @@ public sealed partial class MainWindow
                 !_state.Output.Contains("CI 虚构通知内容") && !_state.Output.Contains("ci-unverified-account"),
                 "Native formal report keeps communication summary without file processing or assignee appendices");
 
-            Invoke(Find<Button>("run-manual")!);
+            await InvokeWhenReadyAsync("run-manual");
             await WaitForAsync(() => !_busy);
             Assert(_state.History.Count == 2 && _state.History.All(row => Value(row, "state") == "sent"),
                 "Deliberate second manual click resends the same window without an extra confirmation dialog");
@@ -384,6 +386,163 @@ public sealed partial class MainWindow
         _smokeSteps.Add(description);
     }
 
+    private async Task VerifyGeneralSettingsAsync(string output)
+    {
+        string bootstrap = Path.Combine(output, "synthetic-language.json");
+        File.WriteAllText(bootstrap, "{\"language\":\"en-US\"}");
+        Assert(InterfaceLanguageBootstrap.Read(bootstrap) == "en-US", "Early interface language bootstrap reads only a bounded language snapshot");
+        File.WriteAllText(bootstrap, "{\"language\":\"unimplemented\"}");
+        Assert(InterfaceLanguageBootstrap.Read(bootstrap) == "system", "Invalid bootstrap language falls back to the Windows default");
+        File.Delete(bootstrap);
+        string handoffToken = Guid.NewGuid().ToString("N");
+        using (var handoffReady = new EventWaitHandle(false, EventResetMode.ManualReset, @"Local\UPCAMTaskDigest.Handoff." + handoffToken))
+        {
+            var dummyStart = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                "WindowsPowerShell", "v1.0", "powershell.exe")) { UseShellExecute = false, CreateNoWindow = true };
+            foreach (string arg in new[] { "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Milliseconds 500" }) dummyStart.ArgumentList.Add(arg);
+            using var dummyParent = System.Diagnostics.Process.Start(dummyStart)!;
+            var exitWait = ProcessHandoff.WaitForParentAsync(dummyParent.Id, handoffToken);
+            Assert(handoffReady.WaitOne(TimeSpan.FromSeconds(2)), "Native handoff acknowledges a held SYNCHRONIZE parent handle before exit");
+            Assert(await exitWait.WaitAsync(TimeSpan.FromSeconds(10)), "Native handoff waits for a real synthetic parent process to exit");
+        }
+        var recoveryWindow = new Window { Content = new Grid() };
+        recoveryWindow.Activate();
+        var recoveryAppWindow = Microsoft.UI.Windowing.AppWindow.GetFromWindowId(
+            Microsoft.UI.Win32Interop.GetWindowIdFromWindow(WinRT.Interop.WindowNative.GetWindowHandle(recoveryWindow)));
+        bool registrationWorks = true;
+        var trayOperations = new List<uint>();
+        using (var tray = new NativeDesktop(recoveryWindow, () => recoveryAppWindow.Show(), () => { }, () => false,
+            operation => { trayOperations.Add(operation); return registrationWorks; }))
+        {
+            recoveryAppWindow.Hide();
+            registrationWorks = false;
+            tray.ConfigureTray(true);
+            Assert(!tray.TrayReady && recoveryAppWindow.IsVisible,
+                "Injected tray re-registration failure restores a visible native window");
+            registrationWorks = true;
+            tray.ConfigureTray(true);
+            recoveryAppWindow.Hide();
+            trayOperations.Clear();
+            tray.ConfigureTray(false);
+            Assert(!tray.TrayReady && recoveryAppWindow.IsVisible && trayOperations.SequenceEqual(new uint[] { 2 }),
+                "Disabling a hidden tray prevents reentrant window messages from registering the icon again");
+        }
+        recoveryWindow.Close();
+        ShowMainWindow();
+        var launch = AppLaunchOptions.Parse(new[] { "--background", "--wait-for-parent", "12345", "--after-update", "--handoff-event", new string('a', 32) }, 54321);
+        Assert(launch.Background && launch.AfterUpdate && launch.ParentPid == 12345,
+            "Update launch arguments carry an explicit parent handoff without elevation");
+        foreach (var invalid in new[] { new[] { "--after-update" }, new[] { "--background", "--background" },
+            new[] { "--wait-for-parent", "54321" }, new[] { "--wait-for-parent", "-1" }, new[] { "--untrusted" } })
+        {
+            bool rejected = false;
+            try { AppLaunchOptions.Parse(invalid, 54321); } catch (ArgumentException) { rejected = true; }
+            Assert(rejected, "Invalid or duplicate launch options are rejected");
+        }
+        _state.Set("task_number_prefix", "DRAFT");
+        _state.SetSecretDraft("openai_api_key", "ci-unsaved-secret-draft");
+        _generalTabIndex = 1;
+        Navigate("general");
+        await WaitForAsync(() => Find<ComboBox>("ui-language") is not null);
+        Find<ComboBox>("ui-language")!.SelectedIndex = 2;
+        await WaitForAsync(() => PageTitle.Text == "General");
+        Assert(UiStrings.ResolvedLanguage == "en-US" && SaveButton.Content.ToString() == "Save general settings",
+            "Actual native general controls and navigation switch to English");
+        await WaitForAsync(() => Find<ComboBox>("ui-theme") is not null);
+        Find<ComboBox>("ui-theme")!.SelectedIndex = 1;
+        await WaitForAsync(() => RootGrid.ActualTheme == ElementTheme.Light);
+        Assert(AppWindow.TitleBar.ButtonForegroundColor == Microsoft.UI.Colors.Black,
+            "Light theme gives caption buttons a visible foreground");
+        var navigationPane = FindIn<SplitView>(Navigation, view => view is FrameworkElement { Name: "RootSplitView" });
+        Assert(RootGrid.Background is SolidColorBrush lightCanvas && lightCanvas.Color.R > 180 &&
+            navigationPane?.PaneBackground is SolidColorBrush { Color.A: 0 },
+            "Light theme provides opaque readable navigation and page backgrounds");
+        Invoke(SaveButton);
+        await WaitForAsync(() => !_busy);
+        Assert(_state.Text("task_number_prefix") == "DRAFT" && _state.Dirty &&
+            _state.SecretDrafts.GetValueOrDefault("openai_api_key") == "ci-unsaved-secret-draft",
+            "General save preserves unsaved project and credential drafts");
+        await CaptureAsync(Path.Combine(output, "general-english-light.png"));
+        Assert(FindIn<CommunityToolkit.WinUI.Controls.SettingsCard>(PageHost, _ => true) is not null,
+            "General page uses actual PowerToys-matched CommunityToolkit SettingsCard controls");
+        foreach (var size in new[] { new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540) })
+        {
+            AppWindow.Resize(size);
+            foreach (string route in _routes.Keys)
+            {
+                Navigate(route); await Task.Delay(40); RootGrid.UpdateLayout();
+                Assert(PageHost.ActualWidth > 300 && PageHost.ActualHeight > 150,
+                    $"English light interface layout {route} {size.Width}x{size.Height}");
+            }
+        }
+        AppWindow.Resize(new SizeInt32(1180, 800));
+        _state.Apply(await Worker.SendAsync("initialize"));
+        ApplyGeneralAppearance();
+        _generalTabIndex = 2;
+        Navigate("general");
+        await WaitForAsync(() => Find<ToggleSwitch>("tray-enabled") is not null);
+        Find<ToggleSwitch>("tray-enabled")!.IsOn = false;
+        Invoke(SaveButton);
+        await WaitForAsync(() => !_busy);
+        Assert(!_native!.TrayReady && !_state.Flag("close_to_tray") && !_state.Flag("start_in_tray") && AppWindow.IsVisible,
+            "Disabling the tray disables hiding preferences and preserves a visible window");
+        await WaitForAsync(() => Find<ToggleSwitch>("tray-enabled") is not null);
+        Find<ToggleSwitch>("tray-enabled")!.IsOn = true;
+        await WaitForAsync(() => Find<ToggleSwitch>("close-to-tray")?.IsEnabled == true);
+        Find<ToggleSwitch>("close-to-tray")!.IsOn = true;
+        Invoke(SaveButton);
+        await WaitForAsync(() => !_busy);
+        Assert(_native.TrayReady && _state.Flag("close_to_tray"), "Tray preferences restore the existing native icon and close behavior");
+        _generalTabIndex = 1;
+        Navigate("general");
+        await WaitForAsync(() => Find<ComboBox>("ui-language") is not null);
+        Find<ComboBox>("ui-language")!.SelectedIndex = 1;
+        await WaitForAsync(() => UiStrings.ResolvedLanguage == "zh-CN");
+        await WaitForAsync(() => Find<ComboBox>("ui-theme") is not null);
+        Find<ComboBox>("ui-theme")!.SelectedIndex = 2;
+        await WaitForAsync(() => RootGrid.ActualTheme == ElementTheme.Dark);
+        Invoke(SaveButton);
+        await WaitForAsync(() => !_busy);
+        Assert(PageTitle.Text == "常规" && AppWindow.TitleBar.ButtonForegroundColor == Microsoft.UI.Colors.White,
+            "Chinese dark preferences restore caption and localized settings");
+        await InvokeWhenReadyAsync("restart-app");
+        await WaitForAsync(() => !_busy);
+        Assert(_syntheticRestart && AppWindow.IsVisible, "Explicit restart checks saved state without discarding edits or exiting the synthetic test");
+        _generalTabIndex = 0;
+        Navigate("general");
+        await WaitForAsync(() => Find<Button>("update-check") is not null);
+        await InvokeWhenReadyAsync("update-check");
+        await WaitForAsync(() => !_busy);
+        Assert(Value(_state.UpdateState, "status") == "access_required",
+            "Private update source without token is not mislabeled as current");
+        await WaitForAsync(() => Find<PasswordBox>("update-token") is not null);
+        Find<PasswordBox>("update-token")!.Password = "github_pat_ci_synthetic-not-real";
+        Assert(_state.UpdateTokenDraft == "github_pat_ci_synthetic-not-real",
+            "Update token edits reach the current draft synchronously before save");
+        Invoke(SaveButton);
+        await WaitForAsync(() => !_busy);
+        Assert(_state.SecretPresence["github_update_token"]?.GetValue<bool>() == true && _state.UpdateTokenDraft.Length == 0,
+            "Immediate native save persists the update credential and clears only its input draft");
+        await WaitForAsync(() => Find<Button>("update-check") is not null);
+        await InvokeWhenReadyAsync("update-check");
+        await WaitForAsync(() => !_busy);
+        Assert(Value(_state.UpdateState, "status") == "available",
+            "Native update check uses only the synthetic fixed release; observed status: " + Value(_state.UpdateState, "status"));
+        await WaitForAsync(() => Find<Button>("update-download")?.IsEnabled == true);
+        await InvokeWhenReadyAsync("update-download");
+        await WaitForAsync(() => !_busy);
+        Assert(Value(_state.UpdateState, "status") == "downloaded", "Native download completes real digest and package verification with synthetic bytes");
+        await WaitForAsync(() => Find<Button>("update-install")?.IsEnabled == true);
+        await InvokeWhenReadyAsync("update-install");
+        await WaitForAsync(() => !_busy);
+        Assert(_syntheticUpdateLaunch && AppWindow.IsVisible && _state.History.Count == 0,
+            "Verified synthetic install prepares a per-user handoff without executing a fake binary or sending a report");
+        await CaptureAsync(Path.Combine(output, "general-chinese-dark.png"));
+        _state.Apply(await Worker.SendAsync("initialize"));
+        ApplyGeneralAppearance();
+        Navigate("home");
+    }
+
     private async Task VerifyUtf8PipeBoundariesAsync()
     {
         foreach (int length in new[] { 4096, 8192 })
@@ -453,6 +612,17 @@ public sealed partial class MainWindow
         ((IInvokeProvider)peer.GetPattern(PatternInterface.Invoke)).Invoke();
     }
 
+    private async Task InvokeWhenReadyAsync(string id)
+    {
+        Button? button = null;
+        await WaitForAsync(() =>
+        {
+            button = Find<Button>(id);
+            return button is { IsLoaded: true, IsEnabled: true };
+        });
+        Invoke(button!);
+    }
+
     private static async Task WaitForAsync(Func<bool> ready)
     {
         for (int i = 0; i < 240; i++)
@@ -466,15 +636,9 @@ public sealed partial class MainWindow
     private async Task CaptureAsync(string path)
     {
         var bitmap = new RenderTargetBitmap();
-        // System Mica is outside the XAML visual tree. Use a neutral dark base
-        // for the exported XAML snapshot so translucent brushes remain readable.
-        Brush? background = RootGrid.Background;
-        try
-        {
-            RootGrid.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 32, 32, 32));
-            await bitmap.RenderAsync(RootGrid);
-        }
-        finally { RootGrid.Background = background; }
+        // RootGrid has an opaque theme brush. Capture the actual selected theme
+        // without substituting a dark canvas beneath light interface controls.
+        await bitmap.RenderAsync(RootGrid);
         var pixels = await bitmap.GetPixelsAsync();
         using var reader = DataReader.FromBuffer(pixels);
         byte[] bytes = new byte[pixels.Length];

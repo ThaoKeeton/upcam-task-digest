@@ -1,6 +1,12 @@
 name: Windows desktop build
 on:
   workflow_dispatch:
+    inputs:
+      publish_stable:
+        description: 'Publish this tested main version as a stable private GitHub Release'
+        required: false
+        type: boolean
+        default: false
   pull_request:
     branches: [main]
     paths:
@@ -81,6 +87,8 @@ jobs:
           Copy-Item dist/UPCAMWorker -Destination dist/winui/worker -Recurse
           $manifest = @{
             sourceCommit = (git rev-parse HEAD)
+            applicationVersion = (& python -c "from upcam_app import APP_VERSION; print(APP_VERSION)")
+            rulesetRevision = (& python -c "from upcam_app import RULESET_REVISION; print(RULESET_REVISION)")
             framework = "WinUI 3 / Windows App SDK 2.6.5"
             worker = "Python 3.12 / existing UPCAM core"
             applicationSha256 = (Get-FileHash dist/winui/UPCAMTaskDigest.exe -Algorithm SHA256).Hash
@@ -118,6 +126,8 @@ jobs:
         run: |
           Expand-Archive dist/UPCAMTaskDigest-WinUI3-win-x64.zip -DestinationPath dist/install-check
           foreach ($file in @('UPCAMTaskDigest.exe', 'UPCAMTaskDigest.dll', 'UPCAMTaskDigest.pri', 'coreclr.dll', 'hostfxr.dll',
+                               'CommunityToolkit.WinUI.Controls.SettingsControls.dll', 'THIRD_PARTY_NOTICES.md',
+                               'LICENSES/PowerToys-MIT.txt', 'LICENSES/CommunityToolkit-MIT.txt',
                                'Assets/Teambition.ico', 'Assets/Teambition.png',
                                'worker/UPCAMWorker.exe', 'worker/_internal/templates/daily_digest.json', 'worker/_internal/examples/digest.json')) {
             if (-not (Test-Path "dist/install-check/$file")) { throw "Package missing $file" }
@@ -129,7 +139,8 @@ jobs:
           if ((Get-FileHash dist/install-check/worker/UPCAMWorker.exe -Algorithm SHA256).Hash -ne $manifest.workerSha256) {
             throw "Packaged worker hash mismatch"
           }
-          $process = Start-Process -FilePath "$PWD/dist/install-check/UPCAMTaskDigest.exe" -ArgumentList "--ui-smoke-test --background" -PassThru
+          $handoffParent = Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Seconds 2' -PassThru
+          $process = Start-Process -FilePath "$PWD/dist/install-check/UPCAMTaskDigest.exe" -ArgumentList "--ui-smoke-test --background --wait-for-parent $($handoffParent.Id) --after-update" -PassThru
           if (-not $process.WaitForExit(120000)) {
             Stop-Process -Id $process.Id -Force
             throw "Extracted background WinUI smoke timed out"
@@ -152,7 +163,7 @@ jobs:
             Write-Output ("UPCAM_STATUS_PNG_BASE64=" + [Convert]::ToBase64String([IO.File]::ReadAllBytes($image)))
             Write-Output "::endgroup::"
           }
-          foreach ($name in @('native-window', 'tray-icon', 'run', 'schedule', 'dingtalk')) {
+          foreach ($name in @('native-window', 'tray-icon', 'run', 'schedule', 'dingtalk', 'general-english-light', 'general-chinese-dark')) {
             $nativeImage = "$PWD/dist/ui-evidence/$name.png"
             if (-not (Test-Path $nativeImage)) { $nativeImage = "$PWD/dist/winui/smoke-output/$name.png" }
             if (Test-Path $nativeImage) {
@@ -179,3 +190,79 @@ jobs:
             dist/winui/smoke-output/
             dist/install-check/smoke-output/
           retention-days: 14
+  publish-stable:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_stable == true && github.ref == 'refs/heads/main' }}
+    needs: [tests, windows-winui, windows-exe]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: UPCAMTaskDigest-WinUI3-windows-x64
+          path: release-bundle
+      - name: Verify this complete application before creating a draft release
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, re, zipfile
+          from pathlib import Path
+          from upcam_app import APP_VERSION, RULESET_REVISION
+          assert re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', APP_VERSION)
+          package = Path('release-bundle/UPCAMTaskDigest-WinUI3-win-x64.zip')
+          checksum = Path(str(package) + '.sha256').read_text(encoding='utf-8-sig').split()[0].lower()
+          assert hashlib.sha256(package.read_bytes()).hexdigest() == checksum
+          with zipfile.ZipFile(package) as archive:
+              manifest = json.loads(archive.read('build-info.json'))
+              assert manifest['sourceCommit'] == os.environ['GITHUB_SHA']
+              assert manifest['applicationVersion'] == APP_VERSION
+              assert manifest['rulesetRevision'] == RULESET_REVISION
+          Path('release-tag.txt').write_text('v' + APP_VERSION)
+          Path('release-notes.txt').write_text('UPCAM Task Digest ' + APP_VERSION + '\n\n'
+              'WinUI 3 x64 portable application. Extract the whole ZIP and retain DLLs and worker.\n'
+              'Source commit: ' + os.environ['GITHUB_SHA'] + '\n'
+              'Rules revision: ' + RULESET_REVISION + '\n'
+              'ZIP SHA-256: ' + checksum + '\n', encoding='utf-8')
+          PY
+      - name: Create a new draft without overwriting existing versions
+        shell: bash
+        run: |
+          tag=$(cat release-tag.txt)
+          python - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          assert os.environ['GITHUB_REPOSITORY'] == 'ThaoKeeton/upcam-task-digest'
+          tag = Path('release-tag.txt').read_text()
+          result = subprocess.run(['gh', 'api', 'repos/' + os.environ['GITHUB_REPOSITORY'] + '/git/ref/tags/' + tag], capture_output=True, text=True)
+          if result.returncode == 0:
+              reference = json.loads(result.stdout)
+              assert reference['object']['type'] == 'commit' and reference['object']['sha'] == os.environ['GITHUB_SHA'], 'Existing tag does not match this tested source'
+          elif '(HTTP 404)' not in result.stderr:
+              raise RuntimeError('Unable to verify existing release tag; nothing published')
+          PY
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'This version already has a Release. Publish a new version instead.'
+            exit 1
+          fi
+          gh release create "$tag" release-bundle/UPCAMTaskDigest-WinUI3-win-x64.zip release-bundle/UPCAMTaskDigest-WinUI3-win-x64.zip.sha256 --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "UPCAM Task Digest $tag" --notes-file release-notes.txt --draft
+      - name: Verify GitHub asset digest then publish the stable release
+        shell: bash
+        run: |
+          tag=$(cat release-tag.txt)
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > release-metadata.json
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          release = json.loads(Path('release-metadata.json').read_text())
+          assert release['draft'] is True and release['prerelease'] is False
+          assert release['target_commitish'] == os.environ['GITHUB_SHA']
+          name = 'UPCAMTaskDigest-WinUI3-win-x64.zip'
+          assets = [asset for asset in release['assets'] if asset['name'] == name]
+          assert len(assets) == 1 and assets[0]['state'] == 'uploaded'
+          expected = hashlib.sha256(Path('release-bundle', name).read_bytes()).hexdigest()
+          assert assets[0]['digest'].lower() == 'sha256:' + expected
+          PY
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
