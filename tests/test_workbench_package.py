@@ -144,6 +144,8 @@ class WorkbenchReferenceTests(unittest.TestCase):
         self.assertIn("不访问真实 Webhook", guide)
         script = (INTEGRATION / "build-plugin.ps1").read_text()
         self.assertIn("(Join-Path $PSScriptRoot 'ACCEPTANCE.zh-CN.md')", script)
+        self.assertIn("https://github.com/ThaoKeeton/upcam-task-digest/blob/main/integrations/project-workbench/ACCEPTANCE.zh-CN.md",
+                      (INTEGRATION / "README.zh-CN.md").read_text())
 
 
 class WorkbenchDistributionTests(unittest.TestCase):

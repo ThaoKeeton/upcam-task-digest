@@ -17,7 +17,7 @@
 
 正式包名称含 `production`；名称含 `acceptance` 的包只用于 CI 虚构数据验收，页面会明确显示测试标识，不应用于真实项目。
 
-平台联合验收请下载独立 CI 产物 `UPCAMTaskDigest-workbench-acceptance-0.1.0-windows`。其中含可安装模拟 ZIP、SHA-256、记录实际源码和 SDK 的 `acceptance-handoff.json`，以及[合成包安装与验收说明](ACCEPTANCE.zh-CN.md)。它不包含真实项目配置，全部服务由本地模拟替身提供。
+平台联合验收请下载独立 CI 产物 `UPCAMTaskDigest-workbench-acceptance-0.1.0-windows`。其中含可安装模拟 ZIP、SHA-256、记录实际源码和 SDK 的 `acceptance-handoff.json`，以及[合成包安装与验收说明](https://github.com/ThaoKeeton/upcam-task-digest/blob/main/integrations/project-workbench/ACCEPTANCE.zh-CN.md)。它不包含真实项目配置，全部服务由本地模拟替身提供。
 
 ## 接续独立版数据与回退
 
