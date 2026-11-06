@@ -45,7 +45,7 @@ def _isolated_environment(directory: Path) -> dict[str, str]:
 
 @contextmanager
 def _owned_job(process: subprocess.Popen):
-    """A private job kills only this test's assigned process and descendants."""
+    """A private job drains only this test's process tree before files are removed."""
     class BasicLimits(ctypes.Structure):
         _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64),
                     ("flags", ctypes.c_uint32), ("minimum_working_set", ctypes.c_size_t),
@@ -63,6 +63,12 @@ def _owned_job(process: subprocess.Popen):
                     ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
                     ("peak_process_memory", ctypes.c_size_t), ("peak_job_memory", ctypes.c_size_t)]
 
+    class Accounting(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_int64) for name in (
+            "user_time", "kernel_time", "period_user_time", "period_kernel_time")] + [
+            (name, ctypes.c_uint32) for name in (
+                "page_faults", "total_processes", "active_processes", "terminated_processes")]
+
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateJobObjectW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
     kernel.CreateJobObjectW.restype = ctypes.c_void_p
@@ -70,6 +76,19 @@ def _owned_job(process: subprocess.Popen):
     kernel.SetInformationJobObject.restype = ctypes.c_int
     kernel.AssignProcessToJobObject.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
     kernel.AssignProcessToJobObject.restype = ctypes.c_int
+    kernel.TerminateJobObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+    kernel.TerminateJobObject.restype = ctypes.c_int
+    kernel.QueryInformationJobObject.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p,
+                                                ctypes.c_uint32, ctypes.c_void_p)
+    kernel.QueryInformationJobObject.restype = ctypes.c_int
+    kernel.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.IsProcessInJob.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int))
+    kernel.IsProcessInJob.restype = ctypes.c_int
+    kernel.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+    kernel.WaitForSingleObject.restype = ctypes.c_uint32
+    kernel.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))
+    kernel.GetExitCodeProcess.restype = ctypes.c_int
     kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
     kernel.CloseHandle.restype = ctypes.c_int
     job = kernel.CreateJobObjectW(None, None)
@@ -83,9 +102,62 @@ def _owned_job(process: subprocess.Popen):
         # The probe waits for a go marker before creating any descendants.
         if not kernel.AssignProcessToJobObject(job, int(process._handle)):
             raise ctypes.WinError(ctypes.get_last_error())
-        yield
+        yield kernel, job
     finally:
-        kernel.CloseHandle(job)
+        try:
+            # KILL_ON_JOB_CLOSE alone requests asynchronous termination. Retain
+            # the job until the assigned tree has actually left it, including
+            # when an assertion or marker wait failed partway through a case.
+            if not kernel.TerminateJobObject(job, 1):
+                raise ctypes.WinError(ctypes.get_last_error())
+            deadline = time.monotonic() + 10
+            while True:
+                accounting = Accounting()
+                if not kernel.QueryInformationJobObject(job, 1, ctypes.byref(accounting),
+                                                        ctypes.sizeof(accounting), None):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if accounting.active_processes == 0:
+                    break
+                if time.monotonic() >= deadline:
+                    raise AssertionError("Synthetic probe job still has active processes after termination")
+                time.sleep(0.025)
+        finally:
+            if not kernel.CloseHandle(job):
+                raise ctypes.WinError(ctypes.get_last_error())
+
+
+@contextmanager
+def _owned_probe_handle(kernel, job, pid):
+    """Bind the acknowledged child while it is still waiting for its parent."""
+    if type(pid) is not int or pid <= 0 or pid == os.getpid():
+        raise AssertionError("Expected a synthetic child PID")
+    # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION; never terminate by PID.
+    handle = kernel.OpenProcess(0x00100000 | 0x1000, False, pid)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        assigned = ctypes.c_int()
+        if not kernel.IsProcessInJob(handle, job, ctypes.byref(assigned)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not assigned.value:
+            raise AssertionError("Acknowledged child is outside this synthetic probe job")
+        yield handle
+    finally:
+        if not kernel.CloseHandle(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _wait_for_probe_exit(kernel, handle):
+    result = kernel.WaitForSingleObject(handle, 10000)
+    if result == 0xffffffff:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if result != 0:
+        raise AssertionError("Synthetic child did not exit after its completion marker")
+    exit_code = ctypes.c_uint32()
+    if not kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if exit_code.value != 0:
+        raise AssertionError(f"Synthetic child exited with code {exit_code.value}")
 
 
 @unittest.skipUnless(os.name == "nt", "Real Win32 handoff probes require Windows; no native behavior is simulated on Linux")
@@ -162,7 +234,7 @@ class NativeHandoffTests(unittest.TestCase):
                                    env=self.environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    text=True, encoding="utf-8")
         try:
-            with _owned_job(process):
+            with _owned_job(process) as (kernel, job):
                 (directory / "go").write_text("synthetic", encoding="utf-8")
                 if mode in {"success", "locked"}:
                     ack = self._marker(directory, "parent-ack.json", process)
@@ -171,16 +243,27 @@ class NativeHandoffTests(unittest.TestCase):
                     self.assertTrue(ack["child_waiting"])
                     if mode == "locked":
                         self.assertTrue(ack["write_denied"] and ack["delete_denied"])
-                    (directory / "release-parent").write_text("synthetic", encoding="utf-8")
-                    stdout, stderr = process.communicate(timeout=15)
-                    self.assertEqual(process.returncode, 0, stdout + stderr)
-                    deadline = time.monotonic() + 12
-                    while not (directory / "child-complete.json").exists() and time.monotonic() < deadline:
-                        time.sleep(0.025)
-                    self.assertTrue((directory / "child-complete.json").is_file(), "Child did not finish after the parent exited")
-                    child = json.loads((directory / "child-complete.json").read_text(encoding="utf-8"))
-                    self.assertTrue(child["parent_exit_observed"] and child["after_update"] and child["background"])
-                    self.assertEqual(child["parent_pid"], process.pid)
+                    started = self._marker(directory, "child-started.json", process)
+                    self.assertEqual(ack["child_pid"], started["pid"])
+                    with _owned_probe_handle(kernel, job, ack["child_pid"]) as child_handle:
+                        (directory / "release-parent").write_text("synthetic", encoding="utf-8")
+                        # A descendant may inherit the parent's output pipes;
+                        # drain them only after the exact child has also exited.
+                        process.wait(timeout=15)
+                        deadline = time.monotonic() + 12
+                        while not (directory / "child-complete.json").exists() and time.monotonic() < deadline:
+                            time.sleep(0.025)
+                        self.assertTrue((directory / "child-complete.json").is_file(), "Child did not finish after the parent exited")
+                        child = json.loads((directory / "child-complete.json").read_text(encoding="utf-8"))
+                        self.assertTrue(child["parent_exit_observed"] and child["after_update"] and child["background"])
+                        self.assertEqual(child["parent_pid"], process.pid)
+                        # The probe deliberately remains alive after publishing
+                        # this marker: a marker can never substitute for exit.
+                        self.assertEqual(kernel.WaitForSingleObject(child_handle, 0), 0x102)
+                        (directory / "release-child-exit").write_text("synthetic", encoding="utf-8")
+                        _wait_for_probe_exit(kernel, child_handle)
+                        stdout, stderr = process.communicate(timeout=5)
+                        self.assertEqual(process.returncode, 0, stdout + stderr)
                 elif mode == "timeout":
                     observed = self._marker(directory, "timeout-observed.json", process, timeout=50)
                     self.assertIsNone(process.poll(), "No-ack timeout must preserve the parent")
@@ -282,6 +365,7 @@ internal static class Program
         Require(File.Exists(Marker("parent-ack.json")), "parent did not receive the acknowledgement");
         Write("child-complete.json", new { parent_exit_observed = exited, parent_pid = options.ParentPid,
             after_update = options.AfterUpdate, background = options.Background });
+        await WaitFile("release-child-exit");
         return 0;
     }
     static async Task<int> SuccessParent()

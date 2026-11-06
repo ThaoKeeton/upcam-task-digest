@@ -100,7 +100,7 @@ _COLLECTION_ERROR_MESSAGES = {
     "View evidence must be a string": "本机项目范围验证记录无效；重新执行只读项目验证并保存。",
     "View equality values must be strings": "项目筛选条件值无效；核对字段 ID/值后重新保存。",
     "Cannot render incomplete collection": "Teambition 分页不完整；未调用 OpenAI、未发送钉钉。检查项目权限和查询范围后，重新采集并确认完整翻页。",
-    "Pagination limit exceeded; incomplete collection": "Teambition 查询超过分页上限，结果不完整；缩小时间窗或检查项目数据量后再试。",
+    "Pagination limit exceeded; incomplete collection": "Teambition 查询超过分页上限，结果不完整；请检查项目任务及历史动态量。仅缩短日报时间窗不会减少基础扫描量，未发送部分结果。",
     "Invalid or repeated pagination token": "Teambition 分页标记无效或重复，结果不完整；稍后重新只读检查。",
     "Collection source differs from configuration": "返回的企业或 Project ID 与本机配置不一致；检查 Tenant ID、Project ID 后重新验证。",
     "Unsupported activity schema override": "任务动态字段配置不受当前仓库规则支持；恢复仓库默认 createTime/action 字段并重新验证。",
@@ -423,7 +423,7 @@ def _source_event_failure_message(report: dict, collection: dict, config: dict) 
 
     for issue in issues:
         if issue not in _GLOBAL_SOURCE_ISSUES and not issue.startswith("任务 "):
-            reasons.append("本机范围或来源校验未通过；重新验证 Project ID、更新时间窗口和归档选项。")
+            reasons.append("本机范围或来源校验未通过；重新验证 Project ID、动态时间窗口和归档选项。")
     # Put other hard failures first so repeated unsupported events cannot hide them.
     # Group only by the existing safe display value, never by raw action/content.
     if unknown_actions:
