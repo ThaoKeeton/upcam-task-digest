@@ -3,6 +3,7 @@ using System.Globalization;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
@@ -103,7 +104,8 @@ internal sealed class NativeHost
         Require(tabs.SelectedIndex == selected, "The native tab did not retain the selected index.");
     }
 
-    internal async Task InvokeAsync(FrameworkElement root, string buttonId)
+    internal async Task<string> InvokeAsync(FrameworkElement root, string buttonId, bool expectSuccess = true,
+        string? operationId = null, bool expectReady = true)
     {
         AssertUiThread();
         var before = ReadRevision(Find<TextBlock>(root, "operation-result").Text);
@@ -114,9 +116,23 @@ internal sealed class NativeHost
         await WaitUntilAsync(() => TryFind<TextBlock>(root, "operation-result") is { } text && ReadRevision(text.Text) > before,
             TimeSpan.FromSeconds(90));
         var result = Find<TextBlock>(root, "operation-result").Text;
-        Require(result.Contains(" · " + buttonId + " · succeeded", StringComparison.Ordinal),
-            "The requested native business operation did not report success; raw result suppressed.");
-        await WaitReadyAsync(root, synthetic: true);
+        var expected = expectSuccess ? "succeeded" : "failed";
+        Require(result.Contains(" · " + (operationId ?? buttonId) + " · " + expected, StringComparison.Ordinal),
+            "The requested native business operation reported an unexpected outcome; raw result suppressed.");
+        if (expectReady) await WaitReadyAsync(root, synthetic: true);
+        return result;
+    }
+
+    internal async Task SetCheckedAsync(FrameworkElement root, string id, bool value)
+    {
+        AssertUiThread();
+        var box = Find<CheckBox>(root, id);
+        Require(box.IsEnabled && !box.IsThreeState, "The native consent checkbox is disabled or has an ambiguous state.");
+        if (box.IsChecked == value) return;
+        var provider = new CheckBoxAutomationPeer(box).GetPattern(PatternInterface.Toggle) as IToggleProvider;
+        Require(provider is not null, "The native consent checkbox does not expose its Toggle automation pattern.");
+        provider.Toggle();
+        await WaitUntilAsync(() => box.IsChecked == value);
     }
 
     internal async Task EditAsync(TextBox editor, string value)
@@ -200,7 +216,7 @@ internal sealed class NativeHost
             foreach (var child in Descendants<T>(VisualTreeHelper.GetChild(root, index))) yield return child;
     }
 
-    private static int ReadRevision(string text)
+    internal static int ReadRevision(string text)
     {
         var separator = text.IndexOf(" · ", StringComparison.Ordinal);
         return int.TryParse(separator < 0 ? text : text[..separator], NumberStyles.None, CultureInfo.InvariantCulture, out var value)

@@ -53,11 +53,16 @@ jobs:
         with:
           global-json-file: integrations/project-workbench/reference/global.json
       - run: python -m pip install -r requirements-build.txt
-      - name: Windows DPAPI, profile and core regression with synthetic values
-        run: python -m unittest discover -s tests -v
       - name: Build production and visibly synthetic native plugin packages
         shell: pwsh
         run: ./integrations/project-workbench/build-plugin.ps1 -BuildAcceptance
+      - name: Windows DPAPI, profile and core regression with synthetic values
+        run: python -m unittest discover -s tests -v
+      - name: Publish actual SDK and Core native integration acceptance host
+        shell: pwsh
+        run: |
+          dotnet publish integrations/project-workbench/tests/Acceptance/Workbench.Digest.Acceptance.csproj -c Release -r win-x64 --self-contained true -p:Platform=x64 -o dist/workbench-plugin/acceptance-host
+          if ($LASTEXITCODE -ne 0) { throw 'Native acceptance host publish failed.' }
       - name: Process handshake, timeout, cancellation, singleton and crash cleanup
         shell: pwsh
         run: |
@@ -68,11 +73,6 @@ jobs:
           $result = $LASTEXITCODE
           Get-Content (Join-Path $evidence 'transport.txt')
           if ($result -ne 0) { throw "Process transport regression failed with exit code $result" }
-      - name: Publish actual SDK and Core native integration acceptance host
-        shell: pwsh
-        run: |
-          dotnet publish integrations/project-workbench/tests/Acceptance/Workbench.Digest.Acceptance.csproj -c Release -r win-x64 --self-contained true -p:Platform=x64 -o dist/workbench-plugin/acceptance-host
-          if ($LASTEXITCODE -ne 0) { throw 'Native acceptance host publish failed.' }
       - name: Extract archives and validate actual installed package inventory
         shell: pwsh
         run: |

@@ -5,6 +5,9 @@ This executable uses the **unmodified platform API 1 SDK and Core** from
 It does not reference the plugin project, implement a replacement plugin API, or
 load the plugin assembly directly. `PluginManager.InstallAsync`, `DiscoverAsync`,
 `EnableAsync`, its contribution catalog, and `ExecuteCommandAsync` own that path.
+The actual `PluginWorkerClient.cs` is source linked only to prepare an independent
+owned synthetic profile before plugin activation and compare canonical fixture
+paths. No plugin entry point, session, page or replacement SDK interface is linked.
 
 Build/publish on Windows x64 with .NET 10 and the Windows SDK/WinUI build tools:
 
@@ -62,6 +65,23 @@ The required checks cover:
   has transport-free client/model/DingTalk factories; no enterprise request or
   actual delivery is intended. Read-only SQLite aggregate queries validate
   confirmed history/manual ledger counts without reading report bodies.
+- Detailed export keeps explicit native content consent. An existing owned JSON
+  sentinel forces the real worker's nested `saved:false` result after diagnosis;
+  the operation must show failure with permissions/space guidance, retain the
+  diagnosis and leave the sentinel unchanged. A new filename must report saved
+  success and create a nonempty file while retaining the diagnosis.
+- An explicitly saved synthetic schedule with both run times two hours ahead
+  produces a real successful no-op poll. After at least 16 seconds and an observed
+  completed schedule revision, the same range editor must retain focus, selection,
+  draft and enabled state, and the foreground operation result/revision must stay
+  unchanged, with no new history/delivery rows. Normal native Save
+  turns the fixture's automatic authorization off in `finally`.
+- Native adoption of a second existing synthetic profile keeps each profile's
+  unsaved draft, history and ledger identity separate. A sharing lock on the
+  owned host binding file forces a real persistence failure: the target worker
+  stops, saved binding stays unchanged, and reconnect restores the old draft.
+  Retry, default return and re-adoption use actual controls and preserve both
+  original profiles. No history/ledger copying or real data adoption occurs.
 - Disable revokes all contribution kinds and commands, stops package-owned workers
   and releases the singleton. Re-enable uses the saved exact-package approval.
   Shutdown preserves enabled intent. A newly constructed real manager discovers

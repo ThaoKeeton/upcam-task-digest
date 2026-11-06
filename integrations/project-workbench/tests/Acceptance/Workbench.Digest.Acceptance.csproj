@@ -27,5 +27,8 @@
          The plugin itself is independently built, installed and loaded by PluginManager. -->
     <ProjectReference Include="../../reference/src/Workbench.Core/Workbench.Core.csproj" />
     <ProjectReference Include="../../reference/src/Workbench.WinUI.Sdk/Workbench.WinUI.Sdk.csproj" />
+    <!-- Fixture preparation only: seed a second explicit synthetic profile before plugin activation.
+         No plugin entry point, page, session or replacement SDK contract is compiled into this host. -->
+    <Compile Include="../../../../plugins/UPCAM.Workbench/PluginWorkerClient.cs" Link="FixtureSupport/PluginWorkerClient.cs" />
   </ItemGroup>
 </Project>

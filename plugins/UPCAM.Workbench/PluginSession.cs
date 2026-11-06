@@ -130,7 +130,8 @@ internal sealed class PluginSession : IAsyncDisposable
                     _state.Busy = false;
                     _state.BackgroundActivity = false;
                     _state.Status = _state.Ready ? ReadyStatus : _state.BindingError ?? "工作进程已停止；请重新连接，不会自动重放请求。";
-                    _state.OperationResult = $"{++_state.OperationRevision} · {operation} · {(succeeded ? "succeeded" : "failed")} · {message}";
+                    if (!background)
+                        _state.OperationResult = $"{++_state.OperationRevision} · {operation} · {(succeeded ? "succeeded" : "failed")} · {message}";
                     if (background)
                         _state.ScheduleCheckResult = $"{++_state.ScheduleCheckRevision} · {DateTime.Now:yyyy-MM-dd HH:mm:ss} · {(succeeded ? "succeeded" : "failed")} · {message}";
                 }

@@ -23,6 +23,11 @@ internal static class NativeProbes
 
     internal static IReadOnlyList<int> OwnedWorkers(string packageDirectory)
     {
+        // Windows temp roots may be 8.3 aliases while MainModule reports the physical long path.
+        // Compare canonical owned fixture directories so a live child is never mistaken for absence.
+        var canonicalRoot = Directory.Exists(packageDirectory)
+            ? Upcam.Workbench.PluginWorkerClient.CanonicalizeDirectory(packageDirectory, mustExist: true)
+            : Path.GetFullPath(packageDirectory);
         List<int> ids = [];
         foreach (var process in Process.GetProcessesByName("UPCAMPluginWorker"))
         {
@@ -30,7 +35,7 @@ internal static class NativeProbes
             {
                 try
                 {
-                    if (!process.HasExited && process.MainModule?.FileName is { } file && OwnedStore.IsWithin(packageDirectory, file))
+                    if (!process.HasExited && process.MainModule?.FileName is { } file && OwnedStore.IsWithin(canonicalRoot, file))
                         ids.Add(process.Id);
                 }
                 catch (InvalidOperationException) { /* The enumerated process exited before its module was inspected. */ }

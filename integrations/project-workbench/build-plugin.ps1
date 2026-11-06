@@ -46,15 +46,22 @@ function Write-PackageInventory {
     Invoke-Checked -Tool python -Arguments @((Join-Path $PSScriptRoot 'audit_package.py'), $Directory)
 }
 
+function Build-PluginAssembly {
+    param([bool]$Synthetic)
+    $flavor = if ($Synthetic) { 'acceptance' } else { 'production' }
+    $compiled = Join-Path $outputRoot "compiled-$flavor"
+    New-Item -ItemType Directory -Path $compiled -Force | Out-Null
+    $acceptanceValue = if ($Synthetic) { 'true' } else { 'false' }
+    Invoke-Checked -Tool dotnet -Arguments @('build', $project, '-c', $Configuration,
+        '--no-incremental', '-p:Platform=x64', "-p:AcceptanceBuild=$acceptanceValue", '-o', $compiled)
+}
+
 function Build-Package {
     param([string]$Id, [bool]$Synthetic)
     $flavor = if ($Synthetic) { 'acceptance' } else { 'production' }
     $compiled = Join-Path $outputRoot "compiled-$flavor"
     $package = Join-Path $outputRoot "packages/$Id"
-    New-Item -ItemType Directory -Path $compiled, $package -Force | Out-Null
-    $acceptanceValue = if ($Synthetic) { 'true' } else { 'false' }
-    Invoke-Checked -Tool dotnet -Arguments @('build', $project, '-c', $Configuration,
-        '--no-incremental', '-p:Platform=x64', "-p:AcceptanceBuild=$acceptanceValue", '-o', $compiled)
+    New-Item -ItemType Directory -Path $package -Force | Out-Null
     # The plugin has no private managed dependencies. SDK, WinUI, WinRT and .NET
     # copies in the compiler output belong to the host and must not be shipped.
     foreach ($name in @('UPCAM.Workbench.dll', 'UPCAM.Workbench.deps.json')) {
@@ -79,12 +86,17 @@ try {
     Invoke-Checked -Tool python -Arguments @((Join-Path $PSScriptRoot 'verify_reference.py'))
     if (Test-Path -LiteralPath $outputRoot) { Remove-Item -LiteralPath $outputRoot -Recurse -Force }
     New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
+    # Compile both native variants first so compiler diagnostics are not hidden
+    # behind Python packaging or process-test failures.
+    Build-PluginAssembly -Synthetic $false
+    if ($BuildAcceptance) { Build-PluginAssembly -Synthetic $true }
     Invoke-Checked -Tool pyinstaller -Arguments @('--clean', '--noconfirm', '--onedir', '--console',
         '--name', 'UPCAMPluginWorker', '--collect-all', 'tzdata',
-        '--add-data', 'templates;templates', '--add-data', 'examples;examples',
+        '--add-data', ((Join-Path $repo 'templates') + ';templates'),
+        '--add-data', ((Join-Path $repo 'examples') + ';examples'),
         '--distpath', (Join-Path $outputRoot 'worker-build'),
         '--workpath', (Join-Path $repo 'build/workbench-worker'),
-        '--specpath', (Join-Path $repo 'build'), 'plugin_worker_entry.py')
+        '--specpath', (Join-Path $repo 'build'), (Join-Path $repo 'plugin_worker_entry.py'))
     Build-Package -Id 'com.upcam.task-digest' -Synthetic $false
     if ($BuildAcceptance) { Build-Package -Id 'com.upcam.task-digest.acceptance' -Synthetic $true }
 }

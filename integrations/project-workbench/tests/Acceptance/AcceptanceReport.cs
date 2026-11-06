@@ -87,6 +87,7 @@ internal sealed class AcceptanceReport(string path)
             dotnet = Environment.Version.ToString(),
             windowsAppSdk = "1.8.260921001",
             hostBoundary = "Dedicated native WinUI acceptance host using the actual pinned Workbench.Core/SDK; not the complete production host UI.",
+            fixturePreparationBoundary = "Only the actual PluginWorkerClient transport source is linked to initialize a second owned synthetic profile before plugin activation and compare canonical fixture paths. Plugin entry, session, pages and SDK contracts are not linked; PluginManager still installs, trusts, loads and exposes the independently built plugin.",
             productionNetworkBoundary = "Production performs only unconfigured local setup/status. Empty UI, authorization and SQLite counts are observed; transient network requests are not instrumented or proven absent by this harness. Synthetic business operations use transport-free injected factories; their no-network regression evidence belongs to backend tests.",
             evidenceBoundary = "Only passed checks ran and met assertions. A skipped check is unverified. Screenshots are native RenderTargetBitmap captures and require visual review. Shutdown/restart checks recreate the actual manager in this process; they do not claim a separate full host process launch.",
             isolatedUserRoots = _roots.ToArray(),

@@ -92,6 +92,12 @@ class WorkbenchReferenceTests(unittest.TestCase):
                      "winui/UPCAMTaskDigest/Strings/en-US.json", "THIRD_PARTY_NOTICES.md", "LICENSES/**"):
             self.assertIn("'" + name + "'", workflow)
 
+    def test_worker_data_paths_are_anchored_outside_the_spec_directory(self):
+        script = (INTEGRATION / "build-plugin.ps1").read_text()
+        self.assertIn("(Join-Path $repo 'templates')", script)
+        self.assertIn("(Join-Path $repo 'examples')", script)
+        self.assertNotIn("'--add-data', 'templates;templates'", script)
+
 
 class WorkbenchDistributionTests(unittest.TestCase):
     def make_package(self, root):

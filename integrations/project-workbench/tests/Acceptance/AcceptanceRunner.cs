@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Workbench.Core;
 using Workbench.WinUI.Sdk;
 using static Workbench.Digest.Acceptance.NativeHost;
@@ -19,11 +20,13 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
 
     private static readonly string[] AcceptanceChecks =
     [
-        "acceptance-package-contract", "fresh-catalog", "install-disabled-untrusted", "untrusted-gate-no-code",
+        "acceptance-package-contract", "fresh-catalog", "install-disabled-untrusted", "untrusted-gate-no-code", "synthetic-second-profile-fixture",
         "initial-enable-local-only", "activation-persistence-rollback", "committed-enable", "native-fresh-factories",
         "first-view-activation", "settings-draft-retention", "range-and-tab-retention", "local-preview-command",
         "native-layout-and-focus", "synthetic-project-probe", "synthetic-explicit-save", "synthetic-model-refresh",
-        "synthetic-read-only-diagnose", "synthetic-explicit-manual-send", "synthetic-history", "disable-cleanup",
+        "synthetic-read-only-diagnose", "detailed-export-existing-target-failure", "detailed-export-new-target-success",
+        "synthetic-explicit-manual-send", "synthetic-history", "scheduled-noop-preserves-focused-draft",
+        "profile-binding-persistence-rollback", "profile-adoption-keeps-owned-state", "profile-return-retains-drafts-and-history", "disable-cleanup",
         "trusted-reenable", "shutdown-preserves-enabled-intent", "restart-exact-package-restoration",
         "package-mutation-revokes-trust", "acceptance-host-settings-only-binding", "acceptance-dispose-cleanup"
     ];
@@ -104,6 +107,25 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
                 Require(!OnlyPlugin(manager, AcceptanceId).IsLoaded && !PluginAssemblyLoaded() && ContributionsEmpty(manager),
                     "The trust gate loaded code or committed contributions.");
                 AssertNoBackend(installed);
+            });
+            await RequiredAsync("synthetic-second-profile-fixture", async () =>
+            {
+                // The only source-linked implementation is the real process transport. It prepares an explicit
+                // second synthetic profile before any plugin instance runs, then releases its worker and singleton.
+                await using (var fixture = await Upcam.Workbench.PluginWorkerClient.StartAsync(options.PackageDirectory,
+                    SecondProfile(store), synthetic: true, cancellationToken: lifetime))
+                {
+                    var initialized = await fixture.SendAsync("initialize", cancellationToken: lifetime);
+                    Require(initialized["application_version"]?.GetValue<string>() == "0.4.3" &&
+                        initialized["settings"]?["tenant_id"]?.GetValue<string>() == "demo-org" &&
+                        initialized["settings"]?["auto_send_enabled"]?.GetValue<bool>() == false,
+                        "The fixture worker did not initialize an unconfigured-for-scheduling synthetic second profile.");
+                }
+                await WaitNoBackendAsync(options.PackageDirectory);
+                Require(!PluginAssemblyLoaded() && ContributionsEmpty(manager), "Fixture preparation loaded the plugin entry assembly or contributions.");
+                Require(NativeProbes.SqlCount(Path.Combine(SecondProfile(store), "history.sqlite3"), "SELECT COUNT(*) FROM digest_runs;") == 0 &&
+                    NativeProbes.SqlCount(Path.Combine(SecondProfile(store), "delivery_ledger.sqlite3"), "SELECT COUNT(*) FROM deliveries;") == 0,
+                    "The second synthetic fixture unexpectedly contains a business run or delivery claim.");
             });
             await RequiredAsync("initial-enable-local-only", async () =>
             {
@@ -377,8 +399,9 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
         await host.AttachAsync(_digestRoot);
         await host.WaitReadyAsync(_digestRoot, synthetic: true);
         await host.SelectTabAsync(_digestRoot, "digest-tabs", 1);
+        var diagnosed = false;
         if (saved)
-            await report.CheckAsync("synthetic-read-only-diagnose", async () =>
+            diagnosed = await report.CheckAsync("synthetic-read-only-diagnose", async () =>
             {
                 await host.InvokeAsync(_digestRoot, "diagnose");
                 Require(!string.IsNullOrWhiteSpace(Find<TextBox>(_digestRoot, "diagnostic-output").Text),
@@ -386,6 +409,12 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
                 Require(Find<TextBox>(_digestRoot, "diagnostic-output").IsReadOnly, "The diagnostic output is editable.");
             });
         else report.Skip("synthetic-read-only-diagnose", "The explicit synthetic setup save did not succeed.");
+        if (diagnosed) await VerifyDetailedExportsAsync(store);
+        else
+        {
+            report.Skip("detailed-export-existing-target-failure", "The synthetic read-only diagnosis did not succeed.");
+            report.Skip("detailed-export-new-target-success", "The synthetic read-only diagnosis did not succeed.");
+        }
         var sent = false;
         if (saved && models)
             sent = await report.CheckAsync("synthetic-explicit-manual-send", async () =>
@@ -410,6 +439,266 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
                 "Native history did not show the one explicitly confirmed synthetic manual run.");
         });
         await report.CheckAsync("screenshot-synthetic-history", () => host.CaptureAsync(report, "synthetic-history"), required: false);
+        if (saved && models && sent)
+            await report.CheckAsync("scheduled-noop-preserves-focused-draft", () => VerifyNoOpScheduleAsync(store));
+        else report.Skip("scheduled-noop-preserves-focused-draft", "A completed synthetic setup and manual history baseline are required.");
+        if (saved && sent) await VerifyProfileNavigationAsync(store);
+        else
+        {
+            report.Skip("profile-binding-persistence-rollback", "A saved synthetic default profile and history baseline are required.");
+            report.Skip("profile-adoption-keeps-owned-state", "A saved synthetic default profile and history baseline are required.");
+            report.Skip("profile-return-retains-drafts-and-history", "A saved synthetic default profile and history baseline are required.");
+        }
+    }
+
+    private async Task VerifyProfileNavigationAsync(OwnedStore store)
+    {
+        var defaultProfile = store.Profile(AcceptanceId);
+        var second = SecondProfile(store);
+        var defaultIdentity = SyntheticLedgerIdentity(defaultProfile);
+        var secondIdentity = SyntheticLedgerIdentity(second);
+        Require(defaultIdentity != secondIdentity, "The independently initialized synthetic profiles share a delivery identity.");
+        var history = NativeProbes.SqlCount(Path.Combine(defaultProfile, "history.sqlite3"), "SELECT COUNT(*) FROM digest_runs;");
+        var claims = NativeProbes.SqlCount(Path.Combine(defaultProfile, "delivery_ledger.sqlite3"), "SELECT COUNT(*) FROM manual_attempts;");
+        const string defaultDraft = "default profile unsaved tenant draft";
+        const string secondDraft = "adopted profile unsaved tenant draft";
+        await RequiredAsync("profile-binding-persistence-rollback", async () =>
+        {
+            await OpenProfileSettingsAsync();
+            // A same-path native default action establishes a real binding file for the sharing-failure fixture.
+            await host.InvokeAsync(_settingsRoot, "default-profile", operationId: "bind-profile");
+            AssertProfileBinding(store, defaultProfile);
+            await host.SelectTabAsync(_settingsRoot, "settings-tabs", 2);
+            await host.EditAsync(Find<TextBox>(_settingsRoot, "tenant-id"), defaultDraft);
+            await host.SelectTabAsync(_settingsRoot, "settings-tabs", 0);
+            await host.EditAsync(Find<TextBox>(_settingsRoot, "profile-folder"), second);
+            var binding = Path.Combine(store.Root, "settings", AcceptanceId, "settings.json");
+            var original = await File.ReadAllTextAsync(binding, lifetime);
+            using (var blocked = new FileStream(binding, FileMode.Open, FileAccess.Read, FileShare.None))
+                await host.InvokeAsync(_settingsRoot, "adopt-profile", expectSuccess: false, operationId: "bind-profile", expectReady: false);
+            Require(await File.ReadAllTextAsync(binding, lifetime) == original, "The failed native profile bind changed the saved host binding.");
+            AssertProfileBinding(store, defaultProfile);
+            await WaitNoBackendAsync(Path.Combine(store.PluginsRoot, AcceptanceId));
+            Require(Find<TextBlock>(_settingsRoot, "plugin-status").Text != "Ready · CI synthetic data",
+                "A failed binding commit left the newly selected worker ready.");
+            await host.InvokeAsync(_settingsRoot, "open-backend");
+            await host.SelectTabAsync(_settingsRoot, "settings-tabs", 2);
+            Require(Find<TextBox>(_settingsRoot, "tenant-id").Text == defaultDraft,
+                "Failed binding did not restore the previous profile and unsaved document.");
+            AssertCanonicalContinuity(defaultProfile, history, claims);
+            Require(SyntheticLedgerIdentity(second) == secondIdentity, "Failed binding replaced the existing second profile's ledger identity.");
+        });
+        await RequiredAsync("profile-adoption-keeps-owned-state", async () =>
+        {
+            await host.SelectTabAsync(_settingsRoot, "settings-tabs", 0);
+            await host.EditAsync(Find<TextBox>(_settingsRoot, "profile-folder"), second);
+            await host.InvokeAsync(_settingsRoot, "adopt-profile", operationId: "bind-profile");
+            AssertProfileBinding(store, second);
+            await host.SelectTabAsync(_settingsRoot, "settings-tabs", 2);
+            Require(Find<TextBox>(_settingsRoot, "tenant-id").Text == "demo-org", "Adoption copied the default profile's unsaved document into the second profile.");
+            await host.EditAsync(Find<TextBox>(_settingsRoot, "tenant-id"), secondDraft);
+            _digestRoot = CreateNative(_digest, "digest-page");
+            await host.AttachAsync(_digestRoot);
+            await host.WaitReadyAsync(_digestRoot, synthetic: true);
+            await host.SelectTabAsync(_digestRoot, "digest-tabs", 2);
+            Require(Find<ListView>(_digestRoot, "history-list").Items.Count == 0, "Adoption copied the default profile's history.");
+            AssertCanonicalContinuity(second, 0, 0);
+            Require(NativeProbes.SqlCount(Path.Combine(second, "delivery_ledger.sqlite3"), "SELECT COUNT(*) FROM deliveries;") == 0,
+                "Adoption copied delivery claims into the independent existing profile.");
+            Require(SyntheticLedgerIdentity(second) == secondIdentity && SyntheticLedgerIdentity(defaultProfile) == defaultIdentity,
+                "Adoption replaced a profile's existing delivery ledger identity.");
+        });
+        await RequiredAsync("profile-return-retains-drafts-and-history", async () =>
+        {
+            await OpenProfileSettingsAsync();
+            await host.InvokeAsync(_settingsRoot, "default-profile", operationId: "bind-profile");
+            AssertProfileBinding(store, defaultProfile);
+            await host.SelectTabAsync(_settingsRoot, "settings-tabs", 2);
+            Require(Find<TextBox>(_settingsRoot, "tenant-id").Text == defaultDraft, "Returning to default lost its separate unsaved document.");
+            await host.SelectTabAsync(_settingsRoot, "settings-tabs", 0);
+            await host.EditAsync(Find<TextBox>(_settingsRoot, "profile-folder"), second);
+            await host.InvokeAsync(_settingsRoot, "adopt-profile", operationId: "bind-profile");
+            await host.SelectTabAsync(_settingsRoot, "settings-tabs", 2);
+            Require(Find<TextBox>(_settingsRoot, "tenant-id").Text == secondDraft, "Re-adoption lost the second profile's separate unsaved document.");
+            await host.SelectTabAsync(_settingsRoot, "settings-tabs", 0);
+            await host.InvokeAsync(_settingsRoot, "default-profile", operationId: "bind-profile");
+            AssertProfileBinding(store, defaultProfile);
+            await host.SelectTabAsync(_settingsRoot, "settings-tabs", 2);
+            Require(Find<TextBox>(_settingsRoot, "tenant-id").Text == defaultDraft, "The final default return lost its retained unsaved draft.");
+            // Restore the known synthetic tenant and explicitly save so the pre-existing lifecycle cases keep their setup baseline.
+            await host.EditAsync(Find<TextBox>(_settingsRoot, "tenant-id"), "demo-org");
+            await host.InvokeAsync(_settingsRoot, "save-settings");
+            AssertCanonicalContinuity(defaultProfile, history, claims);
+            AssertCanonicalContinuity(second, 0, 0);
+            Require(NativeProbes.SqlCount(Path.Combine(second, "delivery_ledger.sqlite3"), "SELECT COUNT(*) FROM deliveries;") == 0,
+                "Returning between profiles changed the second profile's original empty delivery ledger.");
+            Require(SyntheticLedgerIdentity(second) == secondIdentity && SyntheticLedgerIdentity(defaultProfile) == defaultIdentity,
+                "Profile navigation changed either existing delivery ledger identity.");
+            _digestRoot = CreateNative(_digest, "digest-page");
+            await host.AttachAsync(_digestRoot);
+            await host.WaitReadyAsync(_digestRoot, synthetic: true);
+            await host.SelectTabAsync(_digestRoot, "digest-tabs", 2);
+            Require(Find<ListView>(_digestRoot, "history-list").Items.Count == history,
+                "Returning to default did not restore its original local history.");
+        });
+    }
+
+    private async Task OpenProfileSettingsAsync()
+    {
+        _settingsRoot = CreateNative(_settings, "settings-page");
+        await host.AttachAsync(_settingsRoot);
+        await host.WaitReadyAsync(_settingsRoot, synthetic: true);
+        await host.SelectTabAsync(_settingsRoot, "settings-tabs", 0);
+    }
+
+    private static string SecondProfile(OwnedStore store) => Path.Combine(store.Root, "existing synthetic standalone profile");
+
+    private static string SyntheticLedgerIdentity(string profile)
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(profile, ".plugin-synthetic.json")));
+        Require(document.RootElement.GetProperty("format").GetString() == "upcam-plugin-synthetic-v1",
+            "Profile identity assertions require an explicit synthetic-only marker.");
+        return document.RootElement.GetProperty("delivery_ledger_id").GetString()
+            ?? throw new AcceptanceFailure("The synthetic profile has no independent delivery ledger identity.");
+    }
+
+    private static void AssertProfileBinding(OwnedStore store, string expected)
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(store.Root, "settings", AcceptanceId, "settings.json")));
+        var value = document.RootElement.GetProperty("profile-directory").GetString();
+        Require(value is not null && string.Equals(Upcam.Workbench.PluginWorkerClient.CanonicalizeDirectory(value, mustExist: true),
+            Upcam.Workbench.PluginWorkerClient.CanonicalizeDirectory(expected, mustExist: true), StringComparison.OrdinalIgnoreCase),
+            "The actual native profile action did not persist the expected canonical directory binding.");
+    }
+
+    private async Task VerifyDetailedExportsAsync(OwnedStore store)
+    {
+        var directory = Path.Combine(store.Root, "explicit synthetic detailed exports");
+        Directory.CreateDirectory(directory);
+        var existing = Path.Combine(directory, "existing sentinel.json");
+        const string sentinel = "{\"owned_acceptance_sentinel\":true}\n";
+        await File.WriteAllTextAsync(existing, sentinel, lifetime);
+        var before = Find<TextBox>(_digestRoot, "diagnostic-output").Text;
+        await report.CheckAsync("detailed-export-existing-target-failure", async () =>
+        {
+            await OpenDetailedExportAsync();
+            await host.EditAsync(Find<TextBox>(_digestRoot, "diagnostic-export-path"), existing);
+            await host.SetCheckedAsync(_digestRoot, "confirm-detailed-export", true);
+            var status = await host.InvokeAsync(_digestRoot, "export-detailed-diagnostic", expectSuccess: false);
+            Require(status.Contains("权限", StringComparison.Ordinal) && status.Contains("空间", StringComparison.Ordinal),
+                "A failed detailed file save did not show the actionable permissions/space message.");
+            Require(await File.ReadAllTextAsync(existing, lifetime) == sentinel,
+                "The detailed export failure replaced the owned existing-target sentinel.");
+            AssertRetainedDiagnosis(before);
+        });
+        await report.CheckAsync("detailed-export-new-target-success", async () =>
+        {
+            // A new name in the same real parent takes the actual successful writer path.
+            var target = Path.Combine(directory, "new synthetic detailed export.json");
+            Require(!File.Exists(target), "The fresh detailed export success target already exists.");
+            await OpenDetailedExportAsync();
+            await host.EditAsync(Find<TextBox>(_digestRoot, "diagnostic-export-path"), target);
+            await host.SetCheckedAsync(_digestRoot, "confirm-detailed-export", true);
+            var status = await host.InvokeAsync(_digestRoot, "export-detailed-diagnostic");
+            Require(status.Contains("详细诊断已保存", StringComparison.Ordinal),
+                "A confirmed detailed export did not show its explicit saved result.");
+            Require(File.Exists(target) && new FileInfo(target).Length > 0,
+                "The confirmed detailed export did not create a nonempty owned output file.");
+            AssertRetainedDiagnosis(before);
+        });
+        // A factory redraw may collapse the expander after either operation; retain ordinary explicit consent semantics.
+        await OpenDetailedExportAsync();
+        await host.SetCheckedAsync(_digestRoot, "confirm-detailed-export", false);
+        Find<Expander>(_digestRoot, "diagnostic-export").IsExpanded = false;
+    }
+
+    private async Task OpenDetailedExportAsync()
+    {
+        Find<Expander>(_digestRoot, "diagnostic-export").IsExpanded = true;
+        _digestRoot.UpdateLayout();
+        await host.WaitUntilAsync(() => TryFind<TextBox>(_digestRoot, "diagnostic-export-path") is not null);
+    }
+
+    private void AssertRetainedDiagnosis(string expected)
+    {
+        var output = Find<TextBox>(_digestRoot, "diagnostic-output");
+        Require(!string.IsNullOrWhiteSpace(expected) && output.IsReadOnly && output.Text == expected,
+            "Detailed export cleared or replaced the successful read-only diagnosis instead of retaining it.");
+    }
+
+    private async Task VerifyNoOpScheduleAsync(OwnedStore store)
+    {
+        var profile = store.Profile(AcceptanceId);
+        var history = NativeProbes.SqlCount(Path.Combine(profile, "history.sqlite3"), "SELECT COUNT(*) FROM digest_runs;");
+        var deliveries = NativeProbes.SqlCount(Path.Combine(profile, "delivery_ledger.sqlite3"), "SELECT COUNT(*) FROM deliveries;");
+        var attempts = NativeProbes.SqlCount(Path.Combine(profile, "delivery_ledger.sqlite3"), "SELECT COUNT(*) FROM manual_attempts;");
+        try
+        {
+            _settingsRoot = CreateNative(_settings, "settings-page");
+            await host.AttachAsync(_settingsRoot);
+            await host.WaitReadyAsync(_settingsRoot, synthetic: true);
+            await host.SelectTabAsync(_settingsRoot, "settings-tabs", 5);
+            // Save explicitly grants only this synthetic fixture authorization. Both slots are two hours ahead;
+            // normal enabled-since handling excludes earlier occurrences, including a clock wrap to tomorrow.
+            var future = DateTime.Now.AddHours(2).ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+            await host.EditAsync(Find<TextBox>(_settingsRoot, "morning-run-at"), future);
+            await host.EditAsync(Find<TextBox>(_settingsRoot, "afternoon-run-at"), future);
+            Find<ToggleSwitch>(_settingsRoot, "auto-run").IsOn = true;
+            await host.InvokeAsync(_settingsRoot, "save-settings");
+            using (var document = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(profile, "settings.json"), lifetime)))
+            {
+                var settings = document.RootElement;
+                Require(settings.GetProperty("auto_send_enabled").GetBoolean() &&
+                    !string.IsNullOrWhiteSpace(settings.GetProperty("auto_send_enabled_since_local").GetString()) &&
+                    settings.GetProperty("morning_run_at").GetString() == future && settings.GetProperty("afternoon_run_at").GetString() == future,
+                    "The normal synthetic save did not persist explicit future-only schedule authorization.");
+            }
+            _digestRoot = CreateNative(_digest, "digest-page");
+            await host.AttachAsync(_digestRoot);
+            await host.WaitReadyAsync(_digestRoot, synthetic: true);
+            await host.SelectTabAsync(_digestRoot, "digest-tabs", 1);
+            var revision = ReadRevision(Find<TextBlock>(_digestRoot, "last-schedule-check").Text);
+            var foregroundResult = Find<TextBlock>(_digestRoot, "operation-result").Text;
+            var editor = Find<TextBox>(_digestRoot, "window-start");
+            var draft = DateTime.Now.AddHours(-3).ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+            await host.EditAsync(editor, draft);
+            Require(editor.Focus(FocusState.Keyboard), "The native schedule regression editor could not receive focus.");
+            editor.Select(5, 4);
+            var selectionStart = editor.SelectionStart;
+            var selectionLength = editor.SelectionLength;
+            Require(ReferenceEquals(FocusManager.GetFocusedElement(_digestRoot.XamlRoot), editor),
+                "The native range editor did not own focus before the scheduled check.");
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            await host.WaitUntilAsync(() =>
+                elapsed.Elapsed >= TimeSpan.FromSeconds(16) &&
+                ReadRevision(Find<TextBlock>(_digestRoot, "last-schedule-check").Text) > revision, TimeSpan.FromSeconds(35));
+            var scheduled = Find<TextBlock>(_digestRoot, "last-schedule-check").Text;
+            Require(scheduled.Contains(" · succeeded · ", StringComparison.Ordinal) && scheduled.Contains("本次没有启动到期任务", StringComparison.Ordinal),
+                "The real schedule poll did not confirm a successful no-op check.");
+            Require(Find<TextBlock>(_digestRoot, "operation-result").Text == foregroundResult,
+                "A background schedule poll changed the foreground operation result or completion revision.");
+            Require(ReferenceEquals(Find<TextBox>(_digestRoot, "window-start"), editor) &&
+                ReferenceEquals(FocusManager.GetFocusedElement(_digestRoot.XamlRoot), editor) &&
+                editor.Text == draft && editor.SelectionStart == selectionStart && editor.SelectionLength == selectionLength && editor.IsEnabled,
+                "A real no-op schedule poll replaced or disabled the editor, or lost its focus, selection or draft.");
+            Require(NativeProbes.SqlCount(Path.Combine(profile, "history.sqlite3"), "SELECT COUNT(*) FROM digest_runs;") == history &&
+                NativeProbes.SqlCount(Path.Combine(profile, "delivery_ledger.sqlite3"), "SELECT COUNT(*) FROM deliveries;") == deliveries &&
+                NativeProbes.SqlCount(Path.Combine(profile, "delivery_ledger.sqlite3"), "SELECT COUNT(*) FROM manual_attempts;") == attempts,
+                "The future-only no-op poll unexpectedly created a run or delivery claim.");
+        }
+        finally
+        {
+            _settingsRoot = CreateNative(_settings, "settings-page");
+            await host.AttachAsync(_settingsRoot);
+            await host.WaitReadyAsync(_settingsRoot, synthetic: true);
+            await host.SelectTabAsync(_settingsRoot, "settings-tabs", 5);
+            Find<ToggleSwitch>(_settingsRoot, "auto-run").IsOn = false;
+            await host.InvokeAsync(_settingsRoot, "save-settings");
+            using var document = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(profile, "settings.json"), lifetime));
+            Require(!document.RootElement.GetProperty("auto_send_enabled").GetBoolean() &&
+                document.RootElement.GetProperty("auto_send_enabled_since_local").GetString() == "",
+                "The regression fixture did not revoke its explicit synthetic schedule authorization.");
+        }
     }
 
     private async Task RunProductionAsync(string packageDirectory)
@@ -626,7 +915,8 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
         using var document = JsonDocument.Parse(File.ReadAllText(file));
         Require(document.RootElement.ValueKind == JsonValueKind.Object && document.RootElement.EnumerateObject().All(property =>
             property.Name == "profile-directory" && property.Value.ValueKind == JsonValueKind.String &&
-            string.Equals(property.Value.GetString(), store.Profile(id), StringComparison.OrdinalIgnoreCase)),
+            string.Equals(Upcam.Workbench.PluginWorkerClient.CanonicalizeDirectory(property.Value.GetString()!, mustExist: true),
+                Upcam.Workbench.PluginWorkerClient.CanonicalizeDirectory(store.Profile(id), mustExist: true), StringComparison.OrdinalIgnoreCase)),
             "The host JSON settings contain data beyond the non-secret canonical profile binding.");
     }
 
