@@ -10,6 +10,10 @@ build/
 *.spec
 winui/**/bin/
 winui/**/obj/
+plugins/**/bin/
+plugins/**/obj/
+integrations/**/bin/
+integrations/**/obj/
 .vs/
 *.user
 teambition-detailed-diagnostic-*.json

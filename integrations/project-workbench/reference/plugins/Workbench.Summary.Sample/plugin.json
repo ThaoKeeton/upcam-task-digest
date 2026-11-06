@@ -1,0 +1,16 @@
+{
+  "id": "com.projectworkbench.summary",
+  "name": "工作摘要 · 示例",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "minimumHostVersion": "0.1.0",
+  "entryAssembly": "Workbench.Summary.Sample.dll",
+  "entryType": "Workbench.Summary.Sample.SummaryPlugin",
+  "description": "本地演示数据生成可编辑草稿；未接入钉钉、Teambition 或 AI。",
+  "capabilities": [
+    "native-views",
+    "local-commands",
+    "settings",
+    "local-files"
+  ]
+}

@@ -1,0 +1,131 @@
+name: Workbench native digest plugin
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'plugins/UPCAM.Workbench/**'
+      - 'integrations/project-workbench/**'
+      - 'plugin_worker_entry.py'
+      - 'upcam_app/**'
+      - '*.py'
+      - 'tests/**'
+      - 'templates/**'
+      - 'examples/**'
+      - 'requirements-build.txt'
+      - 'THIRD_PARTY_NOTICES.md'
+      - 'LICENSES/**'
+      - 'winui/UPCAMTaskDigest/DesktopState.cs'
+      - 'winui/UPCAMTaskDigest/UiStrings.cs'
+      - 'winui/UPCAMTaskDigest/Strings/en-US.json'
+      - '.gitattributes'
+      - '.github/workflows/workbench-plugin.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify immutable actual host SDK inputs
+        run: python integrations/project-workbench/verify_reference.py
+      - name: Synthetic core, adapter and packaging regression
+        run: python -m unittest discover -s tests -v
+
+  windows-native:
+    needs: portable
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: integrations/project-workbench/reference/global.json
+      - run: python -m pip install -r requirements-build.txt
+      - name: Windows DPAPI, profile and core regression with synthetic values
+        run: python -m unittest discover -s tests -v
+      - name: Build production and visibly synthetic native plugin packages
+        shell: pwsh
+        run: ./integrations/project-workbench/build-plugin.ps1 -BuildAcceptance
+      - name: Process handshake, timeout, cancellation, singleton and crash cleanup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidence = Join-Path (Get-Location) 'dist/workbench-plugin/evidence'
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          dotnet run --project integrations/project-workbench/tests/Transport/UPCAM.Workbench.TransportTests.csproj -c Release -- --report (Join-Path $evidence 'transport-report.json') *> (Join-Path $evidence 'transport.txt')
+          $result = $LASTEXITCODE
+          Get-Content (Join-Path $evidence 'transport.txt')
+          if ($result -ne 0) { throw "Process transport regression failed with exit code $result" }
+      - name: Publish actual SDK and Core native integration acceptance host
+        shell: pwsh
+        run: |
+          dotnet publish integrations/project-workbench/tests/Acceptance/Workbench.Digest.Acceptance.csproj -c Release -r win-x64 --self-contained true -p:Platform=x64 -o dist/workbench-plugin/acceptance-host
+          if ($LASTEXITCODE -ne 0) { throw 'Native acceptance host publish failed.' }
+      - name: Extract archives and validate actual installed package inventory
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path (Get-Location) 'dist/workbench-plugin/extracted installation with spaces'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+          Expand-Archive dist/workbench-plugin/UPCAMTaskDigest-workbench-production-0.1.0-win-x64.zip -DestinationPath $root
+          Expand-Archive dist/workbench-plugin/UPCAMTaskDigest-workbench-acceptance-0.1.0-win-x64.zip -DestinationPath $root
+          python integrations/project-workbench/audit_package.py (Join-Path $root 'com.upcam.task-digest')
+          if ($LASTEXITCODE -ne 0) { throw 'Extracted production package validation failed.' }
+          python integrations/project-workbench/audit_package.py (Join-Path $root 'com.upcam.task-digest.acceptance')
+          if ($LASTEXITCODE -ne 0) { throw 'Extracted acceptance package validation failed.' }
+      - name: Native install, trust, view, business parity, shutdown and restoration acceptance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path (Get-Location) 'dist/workbench-plugin'
+          $packageRoot = Join-Path $root 'extracted installation with spaces'
+          $report = Join-Path $root 'evidence/native-report.json'
+          $exe = Join-Path $root 'acceptance-host/Workbench.Digest.Acceptance.exe'
+          $arguments = @('--package-directory', ('"' + (Join-Path $packageRoot 'com.upcam.task-digest.acceptance') + '"'),
+            '--production-package-directory', ('"' + (Join-Path $packageRoot 'com.upcam.task-digest') + '"'),
+            '--report', ('"' + $report + '"'))
+          $process = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru
+          try {
+            if (-not $process.WaitForExit(900000)) {
+              try { $process.Kill($true) } catch { }
+              throw 'Native integration acceptance exceeded fifteen minutes; owned process was stopped.'
+            }
+            if (Test-Path -LiteralPath $report -PathType Leaf) { Get-Content -LiteralPath $report }
+            if ($process.ExitCode -ne 0) { throw "Native acceptance exited with $($process.ExitCode)." }
+            if (-not (Test-Path -LiteralPath $report -PathType Leaf)) { throw 'Native acceptance report is missing.' }
+            $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+            if (-not $result.succeeded) { throw 'Native acceptance reported failure.' }
+          }
+          finally { $process.Dispose() }
+      - name: Recheck immutable host source after native build
+        run: python integrations/project-workbench/verify_reference.py
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: UPCAMTaskDigest-workbench-plugin-0.1.0-windows
+          path: |
+            dist/workbench-plugin/UPCAMTaskDigest-workbench-production-0.1.0-win-x64.zip
+            dist/workbench-plugin/UPCAMTaskDigest-workbench-production-0.1.0-win-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: UPCAMTaskDigest-workbench-plugin-validation
+          path: |
+            dist/workbench-plugin/evidence/
+            dist/workbench-plugin/packages/*/plugin-package.json
+          if-no-files-found: warn
+          retention-days: 14
