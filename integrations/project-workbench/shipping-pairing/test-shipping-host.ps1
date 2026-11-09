@@ -506,7 +506,8 @@ public sealed class UpcamRealHostRun : IDisposable
             if (id == (uint)HostId && IsWindowVisible(window))
             {
                 var text = new StringBuilder(256); GetWindowTextW(window, text, text.Capacity);
-                if (text.ToString() == "Project Workbench · 原生插件工作台") found = window;
+                // Workbench 0.4 normal mode replaces its startup title after the fresh Default workspace is ready.
+                if (text.ToString() == "Default · Project Workbench") found = window;
             }
             return true;
         }, IntPtr.Zero);
@@ -657,9 +658,14 @@ public sealed class UpcamRealHostRun : IDisposable
     $script:owned = [UpcamRealHostRun]::Start($hostFile)
     $script:result.cleanup = 'pending'
     $handle = Wait-For { $candidate = $script:owned.FindHostWindow(); if ($candidate -ne [IntPtr]::Zero) { $candidate } } 60
-    $script:window = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+    # Only the same owned HWND, after its exact fresh Default workspace title is ready.
+    $script:window = Wait-For {
+        $candidateWindow = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+        if ($candidateWindow.Current.ProcessId -eq $script:owned.HostId -and
+            $candidateWindow.Current.Name -ceq 'Default · Project Workbench') { $candidateWindow }
+    } 30
     Assert-Check 'normalHostWindow' ($script:window.Current.ProcessId -eq $script:owned.HostId -and
-        $script:window.Current.Name -ceq 'Project Workbench · 原生插件工作台')
+        $script:window.Current.Name -ceq 'Default · Project Workbench')
 
     Set-Phase 'plugin-discovery' 'initial-production-plugin-state-invalid'
     Select-Exact '插件'
