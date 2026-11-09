@@ -24,8 +24,12 @@ class StandaloneCollectionIntegrationTests(unittest.TestCase):
                      'plugins/UPCAM.Workbench/DigestPage.Settings.cs'):
             with self.subTest(path=path):
                 source = (ROOT / path).read_text()
-                self.assertTrue('if (concurrent.Value != count) { concurrent.Value = count; return; }' in source,
+                start = source.index('concurrent.ValueChanged')
+                handler = source[start:source.index('\n        };', start)]
+                self.assertTrue('concurrent.Value = count;' in handler,
                                 f'Concurrency input is not normalized in {path}')
+                self.assertLess(handler.index('"max_concurrent_tasks"'), handler.index('concurrent.Value = count;'),
+                                'Persist the normalized count before a setter whose reentrant event can be suppressed')
 
     def test_standalone_ci_is_enabled_only_for_the_authorized_test_branch(self):
         workflow = (ROOT / '.github/workflows/windows-build.yml').read_text()

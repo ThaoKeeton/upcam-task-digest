@@ -385,8 +385,8 @@ public sealed partial class MainWindow
         {
             if (double.IsNaN(concurrent.Value)) return;
             int count = (int)Math.Clamp(concurrent.Value, 1, 4);
-            if (concurrent.Value != count) { concurrent.Value = count; return; }
             _state.Set("max_concurrent_tasks", count);
+            if (concurrent.Value != count) concurrent.Value = count;
         };
         FrameworkElement Slot(string label, string prefix) => Card(Column(Paragraph(UiStrings.T(label), size: 18),
             SettingText("运行时间", prefix + "_run_at", prefix + "-run-at", "HH:MM"),

@@ -318,8 +318,8 @@ internal sealed partial class DigestPage
         {
             if (double.IsNaN(concurrent.Value)) return;
             int count = (int)Math.Clamp(concurrent.Value, 1, 4);
-            if (concurrent.Value != count) { concurrent.Value = count; return; }
             _state.Edit(profile, data => data.Set("max_concurrent_tasks", count));
+            if (concurrent.Value != count) concurrent.Value = count;
         };
         FrameworkElement Slot(string name, string prefix)
         {
