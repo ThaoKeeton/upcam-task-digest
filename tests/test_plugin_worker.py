@@ -31,7 +31,7 @@ from report_contract import updated_selection
 REPOSITORY = Path(__file__).resolve().parents[1]
 HANDSHAKE = {
     "protocol_version": 1,
-    "backend_version": "0.4.3",
+    "backend_version": "0.4.4",
     "nonce": "0123456789abcdef0123456789abcdef",
 }
 WINDOW = {"start": "2026-11-03 16:50", "end": "2026-11-04 08:50"}
@@ -871,7 +871,7 @@ class PluginWorkerTests(unittest.TestCase):
         self.assertIs(result["authorized"], True)
         self.assertRegex(result["authorization_fingerprint"], r"^[0-9a-f]{64}$")
         self.assertEqual(result["data_directory"], str(directory.resolve()))
-        self.assertEqual(result["application_version"], "0.4.3")
+        self.assertEqual(result["application_version"], "0.4.4")
         self.assertEqual(result["ruleset_revision"], RULESET_REVISION)
         self.assertEqual({name: (directory / name).read_bytes() for name in files}, before)
         self.assertEqual(service.secret_store.load(), credentials)

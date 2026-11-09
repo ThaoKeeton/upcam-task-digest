@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Upcam.Workbench;
+using Upcam.Desktop;
 
 // This executable is also the offline worker fixture. Tests run real Windows
 // processes, pipes, Job Objects and the same named singleton as standalone.
@@ -48,6 +49,7 @@ internal static class Program
             ("package and profile reparse components are rejected", ReparsePaths),
             ("worker failures never expose protocol or stderr", SafeErrors),
             ("UTF-8, JSON, correlation and framing failures terminate the worker", BadResponses),
+            ("opt-in numeric diagnosis progress is framed before one final response", DiagnosticProgress),
             ("response bytes above 32 MiB are rejected", OversizedResponse),
             ("requests above 2 MiB never reach the worker", OversizedRequest),
             ("concurrent callers produce serialized correlated requests", SerializedCalls),
@@ -252,6 +254,24 @@ internal static class Program
             await ExpectFailure(() => client.SendAsync("echo", null, CancellationToken.None));
             Check(fixture.Operations().Count(operation => operation == "probe") == 1, "A failed request was replayed.");
         }
+    }
+
+    private static async Task DiagnosticProgress()
+    {
+        using var fixture = new Fixture("progress");
+        await using var client = await fixture.Start();
+        var capture = new CaptureProgress();
+        await client.SendAsync("diagnose", null, CancellationToken.None, capture);
+        Check(capture.Values.Count == 2 && capture.Values.All(value => value.Completed == 1 && value.Total == 3),
+            "Numeric coalesced progress was not delivered before the final result.");
+        Check(client.IsUsable, "A valid progress stream broke the connection.");
+        await client.SendAsync("echo", null, CancellationToken.None);
+    }
+
+    private sealed class CaptureProgress : IProgress<CollectionProgress>
+    {
+        internal List<CollectionProgress> Values { get; } = new();
+        public void Report(CollectionProgress value) => Values.Add(value);
     }
 
     private static async Task OversizedResponse()
@@ -461,7 +481,7 @@ internal static class Program
                 JsonObject result = request["payload"]!.DeepClone().AsObject();
                 string nonce = result["nonce"]!.GetValue<string>();
                 Check(result.Count == 3 && result["protocol_version"]!.GetValue<int>() == 1 &&
-                    result["backend_version"]!.GetValue<string>() == "0.4.3" && nonce.Length == 32 &&
+                    result["backend_version"]!.GetValue<string>() == "0.4.4" && nonce.Length == 32 &&
                     nonce.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f'),
                     "Client emitted an invalid handshake request.");
                 result["mode"] = "project-workbench";
@@ -528,6 +548,15 @@ internal static class Program
                 await File.WriteAllTextAsync(Path.Combine(profile, "request-active"), "active");
                 await Task.Delay(Timeout.Infinite);
                 return 0;
+            }
+            if (mode == "progress" && operation == "diagnose")
+            {
+                Check(request["progress"]?.GetValue<bool>() == true, "Diagnosis did not opt in to progress.");
+                string frame = new JsonObject { ["id"] = id, ["kind"] = "progress", ["progress"] = new JsonObject {
+                    ["phase"] = "collecting", ["completed"] = 1, ["total"] = 3, ["requests"] = 2, ["batches"] = 1, ["passes"] = 0 } }.ToJsonString() + "\n";
+                await output.WriteAsync(Encoding.UTF8.GetBytes(frame + frame));
+                await WriteResponse(output, id, new JsonObject { ["done"] = true });
+                continue;
             }
             switch (mode)
             {

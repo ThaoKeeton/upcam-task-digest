@@ -1,5 +1,7 @@
 name: Windows desktop build
 on:
+  push:
+    branches: [fix/diagnostic-progress-cancel]
   workflow_dispatch:
     inputs:
       publish_stable:

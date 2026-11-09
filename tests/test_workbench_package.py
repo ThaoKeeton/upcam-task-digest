@@ -80,7 +80,7 @@ class WorkbenchReferenceTests(unittest.TestCase):
                 verifier.verify_reference(reference)
 
     def test_standalone_version_and_default_entry_remain_separate(self):
-        self.assertIn("<Version>0.4.3</Version>",
+        self.assertIn("<Version>0.4.4</Version>",
                       (ROOT / "winui/UPCAMTaskDigest/UPCAMTaskDigest.csproj").read_text())
         source = (ROOT / "worker_entry.py").read_text()
         self.assertNotIn("plugin_handshake", source)
@@ -88,7 +88,7 @@ class WorkbenchReferenceTests(unittest.TestCase):
 
     def test_ci_watches_each_source_linked_standalone_input(self):
         workflow = (ROOT / ".github/workflows/workbench-plugin.yml").read_text()
-        for name in ("winui/UPCAMTaskDigest/DesktopState.cs", "winui/UPCAMTaskDigest/UiStrings.cs",
+        for name in ("winui/UPCAMTaskDigest/DesktopState.cs", "winui/UPCAMTaskDigest/UiStrings.cs", "winui/UPCAMTaskDigest/WorkerProtocol.cs",
                      "winui/UPCAMTaskDigest/Strings/en-US.json", "THIRD_PARTY_NOTICES.md", "LICENSES/**"):
             self.assertIn("'" + name + "'", workflow)
 
@@ -112,15 +112,15 @@ class WorkbenchReferenceTests(unittest.TestCase):
 
     def test_acceptance_artifact_is_uploaded_separately_only_after_success(self):
         workflow = (ROOT / ".github/workflows/workbench-plugin.yml").read_text()
-        marker = "name: UPCAMTaskDigest-workbench-acceptance-0.1.0-windows"
+        marker = "name: UPCAMTaskDigest-workbench-acceptance-0.1.1-windows"
         self.assertIn(marker, workflow)
         position = workflow.index(marker)
         start = workflow.rfind("- uses: actions/upload-artifact@v4", 0, position)
         finish = workflow.index("retention-days:", position)
         upload = workflow[start:finish]
         self.assertIn("if: success()", upload)
-        for path in ("UPCAMTaskDigest-workbench-acceptance-0.1.0-win-x64.zip",
-                     "UPCAMTaskDigest-workbench-acceptance-0.1.0-win-x64.zip.sha256",
+        for path in ("UPCAMTaskDigest-workbench-acceptance-0.1.1-win-x64.zip",
+                     "UPCAMTaskDigest-workbench-acceptance-0.1.1-win-x64.zip.sha256",
                      "acceptance-handoff.json", "ACCEPTANCE.zh-CN.md"):
             self.assertIn("dist/workbench-plugin/" + path, upload)
         self.assertNotIn("workbench-production-", upload)
@@ -155,7 +155,7 @@ class WorkbenchDistributionTests(unittest.TestCase):
             "UPCAM.Workbench.deps.json": b"{}",
             "worker/UPCAMPluginWorker.exe": b"synthetic worker placeholder, not executable",
             "plugin.json": json.dumps({
-                "id": "com.upcam.task-digest", "version": "0.1.0", "apiVersion": 1,
+                "id": "com.upcam.task-digest", "version": "0.1.1", "apiVersion": 1,
                 "minimumHostVersion": "0.2.0",
                 "entryAssembly": "UPCAM.Workbench.dll", "entryType": "Upcam.Workbench.DigestPlugin",
             }).encode(),
@@ -165,7 +165,7 @@ class WorkbenchDistributionTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         metadata = {"schemaVersion": 1, "pluginId": "com.upcam.task-digest",
-                    "pluginVersion": "0.1.0", "backendVersion": "0.4.3",
+                    "pluginVersion": "0.1.1", "backendVersion": "0.4.4",
                     "protocolVersion": 1, "syntheticAcceptance": False,
                     "hostReferenceCommit": "d2005d469aef6a385c134b6914fb6dfa9cff20b2",
                     "runtimeServicesVersion": 1,

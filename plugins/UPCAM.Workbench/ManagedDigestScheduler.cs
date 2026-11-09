@@ -225,7 +225,7 @@ internal sealed class ManagedDigestScheduler(IPluginRuntimeContext context, Plug
         JsonObject result = await worker.SendAsync("plugin_auto_authorization", null, token);
         string fingerprint = PluginSession.JsonText(result, "authorization_fingerprint");
         if (result["authorized"]?.GetValue<bool>() != true || !IsHex(fingerprint) ||
-            PluginSession.JsonText(result, "application_version") != "0.4.3" ||
+            PluginSession.JsonText(result, "application_version") != "0.4.4" ||
             PluginSession.JsonText(result, "ruleset_revision") != profile.Data.RulesetRevision ||
             !string.Equals(ProfileBinding.Canonicalize(PluginSession.JsonText(result, "data_directory")), profile.Directory, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("本机自动授权证明无效；没有开始采集、模型调用或发送。" );

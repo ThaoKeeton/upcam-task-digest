@@ -62,7 +62,7 @@ def audit_package(root: Path) -> dict:
                 or metadata.get("hostReferenceCommit") != "d2005d469aef6a385c134b6914fb6dfa9cff20b2"
                 or plugin.get("entryAssembly") != "UPCAM.Workbench.dll"
                 or plugin.get("entryType") != "Upcam.Workbench.DigestPlugin"
-                or metadata.get("backendVersion") != "0.4.3"
+                or metadata.get("backendVersion") != "0.4.4"
                 or metadata.get("protocolVersion") != 1
                 or metadata.get("windowsAppSdk") != "1.8.260921001"):
             raise PackageError("Plugin identity, host target or backend contract is inconsistent.")

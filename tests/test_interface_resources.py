@@ -121,7 +121,7 @@ class InterfaceResourceTests(unittest.TestCase):
         resources = _resources()
         expected = set()
         for name in ("Ui.cs", "DesktopState.cs", "NativeDesktop.cs", "WorkerClient.cs",
-                     "MainWindow.xaml.cs", "MainWindow.Pages.cs", "MainWindow.General.cs", "ProcessHandoff.cs"):
+                     "MainWindow.xaml.cs", "MainWindow.Pages.cs", "MainWindow.General.cs", "MainWindow.Diagnostics.cs", "WorkerProtocol.cs", "ProcessHandoff.cs"):
             expected.update(text for text in _csharp_literals((NATIVE / name).read_text(encoding="utf-8"))
                             if CJK.search(text))
         import xml.etree.ElementTree as ET

@@ -412,14 +412,12 @@ public sealed partial class MainWindow
         var toolbar = Toolbar(
             ActionButton("只读诊断", "diagnose", async () =>
             {
-                await EnsureSavedAsync();
+                RequireDiagnosticSaved();
                 _state.ExportAvailable = false;
                 _state.DiagnosticFileStem = "";
                 _state.DiagnosticText = "";
                 Navigate("run");
-                var result = await Worker.SendAsync("diagnose", _state.WindowPayload());
-                ApplyDiagnosticResult(result);
-                Navigate("run"); SetStatus(Value(result, "safety", "未调用 OpenAI；未发送钉钉。"));
+                await DiagnoseWithProgressAsync();
             }, accent: true),
             ActionButton("生成并自动发送", "run-manual", async () =>
             {

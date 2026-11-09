@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import uuid
+import time
+
+from collection_progress import report_collection
 
 from report_contract import updated_selection
 from render_digest import BLOCK_SEPARATOR
@@ -129,7 +132,7 @@ class SyntheticSummarizer:
         return {row["task_key"]: "CI 虚构摘要" for row in rows}
 
 
-def make_smoke_service(directory: Path) -> WorkerService:
+def make_smoke_service(directory: Path, *, slow_diagnostic=False) -> WorkerService:
     """Never read an actual user profile, credentials, registry, or environment secrets."""
     directory = Path(directory)
     settings = deepcopy(DEFAULT_SETTINGS)
@@ -163,9 +166,15 @@ def make_smoke_service(directory: Path) -> WorkerService:
                               summarizer=SyntheticSummarizer(),
                               ding_sender=SyntheticDingTalk(settings), **kwargs)
 
+    class SlowSyntheticClient(SyntheticClient):
+        def collect(self, *args, **kwargs):
+            report_collection("collecting", completed=1, total=3, requests=2, batches=1)
+            time.sleep(10)  # Isolated fixture: enough time to exercise the real Cancel control.
+            return super().collect(*args, **kwargs)
+
     return WorkerService(
         directory, settings_store=store, secret_store=secret_store,
-        model_catalog=catalog, client_factory=SyntheticClient,
+        model_catalog=catalog, client_factory=SlowSyntheticClient if slow_diagnostic else SyntheticClient,
         workflow_factory=workflow,
         startup_configurer=lambda *_args, **_kwargs: None,
         update_manager=synthetic_update_manager(directory, APP_VERSION),

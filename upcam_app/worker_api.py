@@ -10,10 +10,12 @@ from pathlib import Path
 import re
 import sys
 import threading
+import time
 import uuid
 from urllib.parse import parse_qsl, urlsplit
 
 from automated_digest import collection_validation_message, diagnose_automatic_source
+from collection_progress import observe_collection, report_collection
 from delivery_guard import DeliveryBlocked, DeliveryGuard, initialize_ledger, validate_manual_delivery_options
 from openai_summarizer import KNOWN_FAST_MODELS
 from render_digest import render_digest
@@ -563,9 +565,12 @@ class WorkerService:
             start, end = start_local.astimezone(SHANGHAI), end_local.astimezone(SHANGHAI)
             day = end.date().isoformat()
             config = runtime_config(settings)
+            report_collection("starting")
             collection = self._collect_source(
                 settings, secrets, day=day, window=(start, end),
                 include_archived=settings["include_archived"])
+            report_collection("validating", completed=len(collection.get("records", [])),
+                              total=len(collection.get("records", [])))
             diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
             self._last_diagnostic_shape = safe_structure_export(collection, config, day, (start, end))
             self._last_diagnostic_context = _diagnostic_context(settings, secrets, payload)
@@ -968,7 +973,24 @@ def serve(input_stream=None, output_stream=None, *, service=None) -> None:
             if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", request_id):
                 request_id = None
                 raise ValueError("request id invalid")
-            result = service.dispatch(request)
+            # Only the native read-only operation opts in. Existing clients keep
+            # exactly one final response and never receive unsolicited frames.
+            observer = None
+            if request.get("progress") is True and request.get("op") in {"diagnose", "save"}:
+                previous_phase, last_emit = None, -float("inf")
+
+                def observer(progress):
+                    nonlocal previous_phase, last_emit
+                    now = time.monotonic()
+                    if progress["phase"] == previous_phase and now - last_emit < 0.5:
+                        return
+                    previous_phase, last_emit = progress["phase"], now
+                    output_stream.write(json.dumps({"id": request_id, "kind": "progress",
+                                                    "progress": progress}, separators=(",", ":")) + "\n")
+                    output_stream.flush()
+
+            with observe_collection(observer):
+                result = service.dispatch(request)
             _write_response(output_stream, request_id, True, result=result)
             if getattr(service, "_shutdown", False):
                 return

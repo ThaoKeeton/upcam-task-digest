@@ -187,7 +187,13 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
 
     private async Task SaveCoreAsync()
     {
-        JsonObject result = await Worker.SendAsync("save", _state.SavePayload());
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var progress = new Progress<CollectionProgress>(value =>
+        {
+            if (_busy) SetStatus(UiStrings.F("保存前只读核验 · 已耗时 {0}:{1} · 完整任务 {2}/{3} · 请求 {4}",
+                (int)elapsed.Elapsed.TotalMinutes, elapsed.Elapsed.Seconds.ToString("00"), value.Completed, value.Total, value.Requests));
+        });
+        JsonObject result = await Worker.SendAsync("save", _state.SavePayload(), progress);
         _state.Apply(result);
         _state.Apply(await Worker.SendAsync("initialize"));
         _savedAuto = _state.Flag("auto_send_enabled");

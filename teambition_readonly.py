@@ -14,6 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from report_contract import task_updated_timestamp, updated_selection
+from collection_progress import refresh_collection_progress
 
 
 class CollectionError(RuntimeError):
@@ -149,6 +150,8 @@ class Client:
                     # start the rate interval at the actual transport boundary.
                     timeout = min(30, self._remaining())
                     self.last_request = self.clock()
+                refresh_collection_progress(requests=self.shared_budget.counters["requests"]
+                                            if self.shared_budget is not None else self.request_count)
                 with self.transport(request, timeout=timeout) as response:
                     if response.status != 200:
                         raise CollectionError("Unexpected HTTP status")
@@ -162,6 +165,8 @@ class Client:
                         # Settle both charges atomically before __exit__ can fail.
                         # An uncertain read/parse retains the write-ahead reservation.
                         self.shared_budget.finish_response(reservation, len(body), count)
+                refresh_collection_progress(requests=self.shared_budget.counters["requests"]
+                                            if self.shared_budget is not None else self.request_count)
                 if self.shared_budget is None:
                     self._remaining()
                 if len(body) > body_limit:

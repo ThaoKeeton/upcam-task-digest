@@ -1,4 +1,6 @@
 using System.Text.Json.Nodes;
+using System.Diagnostics;
+using Upcam.Desktop;
 using Workbench.Sdk;
 
 namespace Upcam.Workbench;
@@ -228,7 +230,7 @@ internal sealed class PluginSession : IAsyncDisposable
             {
                 JsonObject payload;
                 lock (_state.Sync) payload = profile.Data.SavePayload();
-                JsonObject result = await worker.SendAsync("save", payload, cancellation);
+                JsonObject result = await DiagnoseWithProgressAsync(worker, profile, "save-settings", "save", payload, cancellation);
                 lock (_state.Sync)
                 {
                     profile.Data.Apply(result);
@@ -283,10 +285,56 @@ internal sealed class PluginSession : IAsyncDisposable
                 if (requireSaved) RequireSaved(profile);
                 captured = payload(profile);
             }
-            JsonObject result = await worker.SendAsync(operation, captured, cancellation);
+            JsonObject result = operation == "diagnose"
+                ? await DiagnoseWithProgressAsync(worker, profile, name, "diagnose", captured, cancellation)
+                : await worker.SendAsync(operation, captured, cancellation);
             lock (_state.Sync) apply?.Invoke(profile, result);
             return JsonText(result, "status", JsonText(result, "safety", "Operation completed."));
         }, token);
+
+    private async Task<JsonObject> DiagnoseWithProgressAsync(PluginWorkerClient worker, ProfileDraft profile,
+        string operation, string workerOperation, JsonObject? payload, CancellationToken cancellation)
+    {
+        var elapsed = Stopwatch.StartNew();
+        CollectionProgress current = new("starting", 0, 0, 0, 0, 0);
+        using var timerStop = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        var progress = new InlineProgress(value => Volatile.Write(ref current, value));
+        async Task PublishAsync()
+        {
+            try
+            {
+                while (true)
+                {
+                    timerStop.Token.ThrowIfCancellationRequested();
+                    var value = Volatile.Read(ref current);
+                    string phase = UiStrings.T(value.Phase switch
+                    {
+                        "listing" => "列出项目任务", "loading_cache" => "恢复完整任务进度",
+                        "collecting" => "读取任务及动态", "reconciling" => "重新核对项目变化",
+                        "validating" => "校验诊断结果", _ => "准备只读采集"
+                    });
+                    lock (_state.Sync)
+                    {
+                        if (!_state.Busy || _state.ActiveOperation != operation || !ReferenceEquals(profile, _state.Current)) return;
+                        _state.Status = UiStrings.F("{0} · 已耗时 {1}:{2} · 完整任务 {3}/{4} · 请求 {5}", phase,
+                            (int)elapsed.Elapsed.TotalMinutes, elapsed.Elapsed.Seconds.ToString("00"),
+                            value.Completed, value.Total, value.Requests);
+                    }
+                    _state.Notify(false);
+                    await Task.Delay(TimeSpan.FromSeconds(1), timerStop.Token);
+                }
+            }
+            catch (OperationCanceledException) when (timerStop.IsCancellationRequested) { }
+        }
+        Task publish = PublishAsync();
+        try { return await worker.SendAsync(workerOperation, payload, cancellation, progress); }
+        finally { timerStop.Cancel(); await publish; }
+    }
+
+    private sealed class InlineProgress(Action<CollectionProgress> report) : IProgress<CollectionProgress>
+    {
+        public void Report(CollectionProgress value) => report(value);
+    }
 
     internal static void RequireSaved(ProfileDraft profile)
     {

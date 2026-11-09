@@ -121,7 +121,7 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
                     SecondProfile(store), synthetic: true, cancellationToken: lifetime))
                 {
                     var initialized = await fixture.SendAsync("initialize", cancellationToken: lifetime);
-                    Require(initialized["application_version"]?.GetValue<string>() == "0.4.3" &&
+                    Require(initialized["application_version"]?.GetValue<string>() == "0.4.4" &&
                         initialized["settings"]?["tenant_id"]?.GetValue<string>() == "demo-org" &&
                         initialized["settings"]?["auto_send_enabled"]?.GetValue<bool>() == false,
                         "The fixture worker did not initialize an unconfigured-for-scheduling synthetic second profile.");
@@ -857,7 +857,7 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
         OwnedStore.RejectLinks(package);
         using var document = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(package, "plugin.json")));
         var manifest = document.RootElement;
-        Require(manifest.GetProperty("id").GetString() == expectedId && manifest.GetProperty("version").GetString() == "0.1.0" &&
+        Require(manifest.GetProperty("id").GetString() == expectedId && manifest.GetProperty("version").GetString() == "0.1.1" &&
             manifest.GetProperty("apiVersion").GetInt32() == 1 && manifest.GetProperty("minimumHostVersion").GetString() == "0.2.0" &&
             manifest.GetProperty("entryType").GetString() == "Upcam.Workbench.DigestPlugin",
             "The supplied package does not match the expected independent build ID/version/API/entry point.");

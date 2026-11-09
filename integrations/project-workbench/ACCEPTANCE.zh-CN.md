@@ -1,12 +1,12 @@
 # UPCAM 合成数据验收包
 
-供 project-workbench 联合验收使用。插件 ID 为 `com.upcam.task-digest.acceptance`，版本 0.1.0；它是使用 `AcceptanceBuild=true` 编译的独立变体，不能通过重命名正式包来获得。
+供 project-workbench 联合验收使用。插件 ID 为 `com.upcam.task-digest.acceptance`，版本 0.1.1；它是使用 `AcceptanceBuild=true` 编译的独立变体，不能通过重命名正式包来获得。
 
 ## 下载内容与兼容范围
 
-下载 CI 产物 `UPCAMTaskDigest-workbench-acceptance-0.1.0-windows` 并解压，得到：
+下载 CI 产物 `UPCAMTaskDigest-workbench-acceptance-0.1.1-windows` 并解压，得到：
 
-- `UPCAMTaskDigest-workbench-acceptance-0.1.0-win-x64.zip`：可安装插件。
+- `UPCAMTaskDigest-workbench-acceptance-0.1.1-win-x64.zip`：可安装插件。
 - 同名 `.sha256`：内层插件 ZIP 的 SHA-256。
 - `acceptance-handoff.json`：实际 ZIP 哈希、字节数、构建提交、源码头提交、源码树和 SDK 版本。
 - 本说明文件。

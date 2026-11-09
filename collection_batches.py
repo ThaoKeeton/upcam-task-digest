@@ -16,6 +16,7 @@ import math
 import time
 import uuid
 
+from collection_progress import report_collection
 from report_contract import task_updated_timestamp
 from teambition_readonly import (BatchBudgetExceeded, Client, CollectionError,
                                 identifier, record_id, validate_binding)
@@ -252,6 +253,13 @@ class _Coordinator:
         self.initial_resumed = False
         self.credentials = None
 
+    def _progress(self, phase, *, total=None):
+        counters = self.budget.counters if self.budget is not None else {}
+        report_collection(phase, completed=len(self.completed),
+                          total=len(self.candidates) if total is None else total,
+                          requests=counters.get("requests", 0),
+                          batches=counters.get("batches", 0), passes=counters.get("passes", 0))
+
     def _store(self, action, *args, **kwargs):
         try:
             return getattr(self.store, action)(*args, **kwargs)
@@ -338,6 +346,8 @@ class _Coordinator:
         return self.candidate_bytes + self.record_bytes
 
     def _scan(self):
+        phase = "reconciling" if self.budget is not None and self.budget.counters.get("passes", 0) else "listing"
+        self._progress(phase)
         params = {"pageSize": self.page_size, "includeArchived": str(self.include_archived).lower()}
         # Restart an interrupted local scan at its first page, with bounded retry.
         for attempt in range(2):
@@ -353,6 +363,9 @@ class _Coordinator:
                     used += _size(row) + (1 if candidates else 0)
                     self.budget.retained(self._live_bytes() + used)
                     candidates[task_id] = row
+                    if len(candidates) % self.page_size == 0:
+                        self._progress(phase, total=len(candidates))
+                self._progress(phase, total=len(candidates))
                 return candidates, used
             except BatchBudgetExceeded:
                 if attempt:
@@ -373,6 +386,7 @@ class _Coordinator:
         self._store("prune", list(candidates))
 
     def _load_completed(self):
+        self._progress("loading_cache")
         for task_id, candidate in self.candidates.items():
             if task_id in self.completed:
                 continue
@@ -390,6 +404,7 @@ class _Coordinator:
                 if self.initial_resumed:
                     self.resumed_ids.add(task_id)
             self.budget.retained(self._live_bytes())
+            self._progress("loading_cache")
 
     def _read_task(self, task_id, candidate):
         detail = self.worker.get("/api/v3/task/query", {"taskId": task_id}).get("result")
@@ -421,8 +436,10 @@ class _Coordinator:
         self._store("save_task", task_id, candidate, record)
         self.completed[task_id] = {"candidate": candidate, "record": record}
         self.record_bytes += used
+        self._progress("collecting")
 
     def _collect_tasks(self):
+        self._progress("collecting")
         for task_id, candidate in self.candidates.items():
             if task_id in self.completed:
                 continue
@@ -444,6 +461,7 @@ class _Coordinator:
 
     def run(self):
         try:
+            self._progress("starting")
             self._start()
             candidates, used = self._scan()
             while True:

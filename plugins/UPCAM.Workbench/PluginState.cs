@@ -84,7 +84,7 @@ internal sealed class ProfileDraft(string directory)
 
     internal void ApplyInitialization(JsonObject result)
     {
-        if (result["application_version"]?.GetValue<string>() != "0.4.3")
+        if (result["application_version"]?.GetValue<string>() != "0.4.4")
             throw new InvalidOperationException("The backend version does not match this plugin. Reinstall the complete package.");
         // Reopening a profile restores fresh disk metadata without overwriting its unsaved document.
         bool preserve = Loaded && (Data.Dirty || Data.SecretDrafts.Any(x => x.Value.Length > 0));

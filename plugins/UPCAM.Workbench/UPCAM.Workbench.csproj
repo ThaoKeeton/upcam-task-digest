@@ -14,7 +14,7 @@
     <Deterministic>true</Deterministic>
     <AssemblyName>UPCAM.Workbench</AssemblyName>
     <RootNamespace>Upcam.Workbench</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <AcceptanceBuild Condition="'$(AcceptanceBuild)' == ''">false</AcceptanceBuild>
     <DefineConstants Condition="'$(AcceptanceBuild)' == 'true'">$(DefineConstants);UPCAM_ACCEPTANCE_BUILD</DefineConstants>
   </PropertyGroup>
@@ -25,6 +25,7 @@
     <!-- These two source files use only BCL/JSON; the standalone window assembly is never referenced. -->
     <Compile Include="../../winui/UPCAMTaskDigest/DesktopState.cs" Link="Shared/DesktopState.cs" />
     <Compile Include="../../winui/UPCAMTaskDigest/UiStrings.cs" Link="Shared/UiStrings.cs" />
+    <Compile Include="../../winui/UPCAMTaskDigest/WorkerProtocol.cs" Link="Shared/WorkerProtocol.cs" />
     <EmbeddedResource Include="../../winui/UPCAMTaskDigest/Strings/en-US.json" LogicalName="Upcam.Desktop.Strings.en-US.json" />
     <None Update="plugin.json" CopyToOutputDirectory="PreserveNewest" Condition="'$(AcceptanceBuild)' != 'true'" />
     <None Update="plugin.acceptance.json" CopyToOutputDirectory="Never" />
