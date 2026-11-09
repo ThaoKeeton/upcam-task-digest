@@ -42,7 +42,7 @@ class UpdatedSelectionTests(unittest.TestCase):
         self.assertEqual(result['selection'],updated_selection(self.day))
         self.assertEqual(result['selection']['mode'],'v3-project-activities-half-open')
         self.assertEqual(result['selection']['basis'],'activity-createTime')
-        self.assertEqual(result['selection']['candidate_scope'],'current-visible-project-tasks')
+        self.assertEqual(result['selection']['candidate_scope'],'current-visible-project-tasks-updated-since')
         self.assertIsNone(result['selection']['q'])
         self.assertFalse(result['selection']['view_equivalent'])
         self.assertFalse(result['selection']['historical_event_coverage'])
@@ -57,7 +57,7 @@ class UpdatedSelectionTests(unittest.TestCase):
         self.assertEqual(len(t.requests),28)
         self.assertTrue(all(req.method=='GET' for req in t.requests))
 
-    def test_task_updated_is_validated_as_a_version_without_window_membership(self):
+    def test_full_project_audit_validates_versions_without_window_membership(self):
         accepted=['2026-01-02T00:00:00.000+08:00','2026-01-02T23:59:59.999+08:00',
                   '2026-01-01T16:00:00.000Z','2026-01-02T15:59:59.999Z',
                   '2026-01-01T23:59:59.999+08:00','2026-01-03T00:00:00.000+08:00',
@@ -67,7 +67,8 @@ class UpdatedSelectionTests(unittest.TestCase):
             with self.subTest(updated=updated):
                 task=dict(self.task,updated=updated)
                 t=self.transport(task)
-                self.assertEqual(len(client(t).collect('demo-project',day=self.day)['records']),1)
+                self.assertEqual(len(client(t).collect('demo-project',day=self.day,
+                                                      candidate_mode='full_project')['records']),1)
                 self.assertEqual(len(t.requests),4)
         rejected=['2026-01-02T00:00:00',None,'invalid',123,True]
         for updated in rejected:
@@ -162,7 +163,8 @@ class UpdatedSelectionTests(unittest.TestCase):
                                'boundToObjectId':task['id'],'boundToObjectType':'task'}]):
             with self.subTest(history_empty=not activities):
                 t=self.transport(task,activities)
-                report=build_digest(client(t).collect('demo-project',day=self.day),self.config,self.day)
+                report=build_digest(client(t).collect('demo-project',day=self.day,
+                                                     candidate_mode='full_project'),self.config,self.day)
                 self.assertEqual(report['digest']['tasks'],[])
                 self.assertEqual(report['audit'],[])
                 self.assertEqual(report['summary_inputs'],[])

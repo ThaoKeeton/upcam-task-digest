@@ -376,6 +376,18 @@ public sealed partial class MainWindow
         {
             if (!double.IsNaN(limit.Value)) _state.Set("max_tasks_per_run", (int)limit.Value);
         };
+        var concurrent = Identify(new NumberBox
+        {
+            Header = UiStrings.T("并行读取任务数（1–4）"), Minimum = 1, Maximum = 4,
+            Value = _state.Number("max_concurrent_tasks", 4), SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact
+        }, "task-concurrency");
+        concurrent.ValueChanged += (_, _) =>
+        {
+            if (double.IsNaN(concurrent.Value)) return;
+            int count = (int)Math.Clamp(concurrent.Value, 1, 4);
+            if (concurrent.Value != count) { concurrent.Value = count; return; }
+            _state.Set("max_concurrent_tasks", count);
+        };
         FrameworkElement Slot(string label, string prefix) => Card(Column(Paragraph(UiStrings.T(label), size: 18),
             SettingText("运行时间", prefix + "_run_at", prefix + "-run-at", "HH:MM"),
             Pair(SettingText(prefix == "morning" ? "采集开始（前一日）" : "采集开始", prefix + "_start_at", prefix + "-start-at", "HH:MM"),
@@ -384,7 +396,8 @@ public sealed partial class MainWindow
             Card(Column(Toggle("应用运行期间自动采集、校验、摘要并发送", "auto_send_enabled", "auto-run"),
                 Paragraph(UiStrings.T("保存后生效。电脑关机、休眠、未登录或断网时无法执行；重开后只补跑最近 24 小时内、自动执行启用期间且没有本机记录的时段。"), true))),
             Pair(Slot("上午日报", "morning"), Slot("下午日报", "afternoon")),
-            Card(Column(limit,
+            Card(Column(limit, concurrent,
+                Paragraph(UiStrings.T("默认并行读取 4 个任务；所有线程共用至少 0.25 秒的请求间隔，遇到 429 会共同退避。可降到 1；不提高程序原有请求速率上限，实际速度取决于候选数量与接口延迟。"), true),
                 Paragraph(UiStrings.T("默认每批 300 个任务；这不是项目总数限制，全项目最多 10,000 个当前可读任务。缩短时间窗不会减少基础扫描。"), true),
                 Paragraph(UiStrings.T("整次采集最多 50,000 次请求、1,000,000 条返回记录、512 MiB 响应、128 MiB 保留数据及两小时（含进度缓存年龄），最多进行 3 轮来源重核；各批仍受分页、请求、记录、响应体和时间预算约束。超过任一限制会阻断摘要与发送，不会截断采集。"), true),
                 Paragraph(UiStrings.T("完整读取任务及全部动态分页后才保存短期进度。取消或断电保留未完成进度，自本次采集开始最多两小时；下次会重列任务并刷新变更。这不是历史快照。"), true),

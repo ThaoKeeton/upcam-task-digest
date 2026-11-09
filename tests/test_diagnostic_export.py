@@ -124,6 +124,12 @@ class SafeStructureExportTests(unittest.TestCase):
         self.assertTrue(safe_structure_export(collection, {}, "2026-01-02", window)
                         ["selection_check"]["matches_report_window"])
 
+    def test_previous_full_project_audit_contract_still_matches_report_window(self):
+        collection = self.collection([])
+        collection["selection"] = updated_selection("2026-01-02", candidate_mode="full_project")
+        result = safe_structure_export(collection, {}, "2026-01-02")
+        self.assertTrue(result["selection_check"]["matches_report_window"])
+
     def test_executor_id_fields_are_allowlisted_and_hidden_fields_remain_counted(self):
         private_name = "SYNTHETIC_PRIVATE_EXECUTOR_NAME"
         collection = self.collection([self.event("update_executor", {

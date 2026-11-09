@@ -32,15 +32,7 @@ public sealed partial class MainWindow
         void UpdateProgress()
         {
             if (generation != _diagnosticGeneration || cancellation.IsCancellationRequested) return;
-            string phase = UiStrings.T(current.Phase switch
-            {
-                "listing" => "列出项目任务", "loading_cache" => "恢复完整任务进度",
-                "collecting" => "读取任务及动态", "reconciling" => "重新核对项目变化",
-                "validating" => "校验诊断结果", _ => "准备只读采集"
-            });
-            SetStatus(UiStrings.F("{0} · 已耗时 {1}:{2} · 完整任务 {3}/{4} · 请求 {5}",
-                phase, (int)elapsed.Elapsed.TotalMinutes, elapsed.Elapsed.Seconds.ToString("00"),
-                current.Completed, current.Total, current.Requests));
+            SetStatus(CollectionProgressText.Format(current, elapsed.Elapsed));
         }
         var progress = new Progress<CollectionProgress>(value => { current = value; UpdateProgress(); });
         var timer = DispatcherQueue.CreateTimer();

@@ -190,8 +190,7 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
         var progress = new Progress<CollectionProgress>(value =>
         {
-            if (_busy) SetStatus(UiStrings.F("保存前只读核验 · 已耗时 {0}:{1} · 完整任务 {2}/{3} · 请求 {4}",
-                (int)elapsed.Elapsed.TotalMinutes, elapsed.Elapsed.Seconds.ToString("00"), value.Completed, value.Total, value.Requests));
+            if (_busy) SetStatus(CollectionProgressText.Format(value, elapsed.Elapsed, "保存前只读核验"));
         });
         JsonObject result = await Worker.SendAsync("save", _state.SavePayload(), progress);
         _state.Apply(result);

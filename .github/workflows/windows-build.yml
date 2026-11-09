@@ -1,7 +1,7 @@
 name: Windows desktop build
 on:
   push:
-    branches: [fix/diagnostic-progress-cancel]
+    branches: [fix/diagnostic-progress-cancel, fix/standalone-filter-concurrency]
   workflow_dispatch:
     inputs:
       publish_stable:

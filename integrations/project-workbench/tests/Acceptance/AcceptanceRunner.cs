@@ -121,7 +121,7 @@ internal sealed class AcceptanceRunner(NativeHost host, RunOptions options, Acce
                     SecondProfile(store), synthetic: true, cancellationToken: lifetime))
                 {
                     var initialized = await fixture.SendAsync("initialize", cancellationToken: lifetime);
-                    Require(initialized["application_version"]?.GetValue<string>() == "0.4.4" &&
+                    Require(initialized["application_version"]?.GetValue<string>() == "0.4.5" &&
                         initialized["settings"]?["tenant_id"]?.GetValue<string>() == "demo-org" &&
                         initialized["settings"]?["auto_send_enabled"]?.GetValue<bool>() == false,
                         "The fixture worker did not initialize an unconfigured-for-scheduling synthetic second profile.");

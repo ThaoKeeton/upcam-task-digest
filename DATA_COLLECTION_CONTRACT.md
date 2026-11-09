@@ -28,25 +28,27 @@
 ## 采集与归类契约
 
 显式采集入口：`python digest_pipeline.py --config /受控目录/config.json --collect`（本轮未执行）。
-生产采集从 `/api/v3/project/{projectId}/task/query` 遍历指定项目当前可读任务，省略可选的 `q` 参数。不得用 `updated < 截止时间` 或其他任务更新时间谓词替代活动历史选择：窗口内有动态的任务可能在窗口结束后继续更新；活动时间也可能比任务更新时间略晚，接口未承诺二者的单调关系。
+生产采集从 `/api/v3/project/{projectId}/task/query` 遍历指定项目当前可读任务，省略可选的 `q` 参数。默认先在本机选择 `updated >= 窗口开始 - 24 小时` 的任务，之后只读取候选任务的详情及全部动态页。24 小时重叠用于保守覆盖已观察到的毫秒级任务/动态时间偏差，不是接口完整性保证。**不设 `updated < 窗口结束` 上界**，避免任务在截止后再次更新而被漏掉。动态 `createTime` 仍独立决定最终窗口归属。
+
+官方资料未证明每种动态都推进任务 `updated`，因此旧任务若有新动态但 `updated` 未进入候选下界，快速模式可能漏掉该任务，不能宣称完整历史覆盖。显式 `Client.collect(..., candidate_mode="full_project")` 保留不按更新时间排除任务的全量复核；原生“详细诊断导出…”采用该模式，不调用模型或发送钉钉。普通诊断和日报使用快速候选模式。两种模式均保持当前权限、项目和归档范围，均不保证历史快照。
 
 日期及可选起止时间在采集前固定为 Asia/Shanghai 的原有半开区间 `[开始, 结束)`，显式日期必须是 `YYYY-MM-DD`。上午、下午和手动窗口不变。任务详情和全部活动页读取后，只有动态 `createTime` 决定日报窗口归属。缺失时区或无效动态时间仍阻断，不用任务 `created`、`updated` 或当前状态猜测。
 
 所有请求固定至 `https://open.teambition.com`，只允许以下 GET，禁止重定向，不提供通用写接口：
 
 - `/api/v3/project/{projectId}/task/query`：遍历所有页，省略 `q`；每页保持用户的 includeArchived 选项，默认 false，pageSize 默认 100（1–100）。
-- `/api/v3/task/query`：逐任务详情，校验项目、任务身份、归档标记和带时区的 updated 版本。版本与初始任务列表不符时阻断。
+- `/api/v3/task/query`：逐候选任务详情，校验项目、任务身份、归档标记和带时区的 updated 版本。版本与初始任务列表不符时重新核对或阻断。
 - `/api/v3/task/{taskId}/activity/list`：读取全部活动页，不依赖顺序，不遇到旧事件就提前停止，不以当前成员名单过滤历史作者。
 
-初次任务遍历和各任务活动读取完成后，再完整读取项目任务列表；成员集合或返回记录版本不一致即阻断。本地稳定字段条件在完整读取后过滤，不缩减基础 API 扫描量。`nextPageToken` 只有明确空值才结束；空页带 token 继续，循环/缺失 token、超页数、同 ID 不同内容、跨任务绑定或详情不一致均失败，不输出部分日报。相同 ID 同内容仅做原始身份去重。
+初次任务遍历和各候选活动读取完成后，再完整读取项目任务列表并重新选择候选；新增、退出或变化的候选重新核对，最多三轮仍不稳定就阻断。非批次入口仍要求整个前后列表一致。本地稳定字段条件在候选读取后过滤，不缩减基础列表扫描量。`nextPageToken` 只有明确空值才结束；空页带 token 继续，循环/缺失 token、超页数、同 ID 不同内容、跨任务绑定或详情不一致均失败，不输出部分日报。相同 ID 同内容仅做原始身份去重。所有列表行均先校验项目、归档和更新时间，再决定是否跳过历史；被跳过的列表数据仍计入请求、响应和保留内存预算。
 
 请求至少间隔 250ms；GET 超时/连接失败、429 及特定 5xx 最多尝试 3 次，遵守有界 Retry-After。桌面路径按批推进，沿用 schema 1 的 `max_tasks_per_run`（默认 300、整数 1–700）作为每批任务数，不再作为项目总数上限。项目任务列表独立最多 100 页。每批保留现有请求、分页、返回记录、响应大小和时长预算：每个动态分页流最多 50 页、最多 50,000 条返回记录、单页 8 MiB、累计 128 MiB；请求/时间预算随批次大小计算，最多 1,800 次请求及 600 秒。
 
-桌面全项目最多 10,000 个当前可读任务；整次采集最多 50,000 次请求尝试（包括重试）、1,000,000 条返回记录、512 MiB 响应、128 MiB 保留 JSON 和两小时（含进度缓存年龄），来源重核最多三轮。既有非批次入口保留各自原预算。任何项目、批次或整次预算耗尽、页面不完整或版本无法核验都会阻断后续摘要与发送，不能截断任务或分页、降级或当成零更新。缩短日报时间窗及本机额外筛选不会减少基础历史扫描量。
+桌面全项目最多 10,000 个当前可读任务；整次采集最多 50,000 次请求尝试（包括重试）、1,000,000 条返回记录、512 MiB 响应、128 MiB 保留 JSON 和两小时（含进度缓存年龄），来源重核最多三轮。既有非批次入口保留各自原预算。任何项目、批次或整次预算耗尽、页面不完整或版本无法核验都会阻断后续摘要与发送，不能截断任务或分页、降级或当成零更新。缩短时间窗可缩小快速模式的候选量，但完整项目列表成本不变；本机额外字段筛选不减少候选历史请求。
 
-selection.mode 为 `v3-project-activities-half-open`，basis 为 `activity-createTime`，candidate_scope 为 `current-visible-project-tasks`，q 为 null，view_equivalent、historical_event_coverage、snapshot_guaranteed 均为 false，另记录固定日期、起止时间和 window_kind。报告与发送重算必须匹配新合同；旧版更新时间选择结果不能直接发送。`_collect_bounded_fixture` 仍仅用于注入合成传输的离线测试，不是生产回退路径。
+selection.mode 保持 `v3-project-activities-half-open`、basis 保持 `activity-createTime`，q 为 null，view_equivalent、historical_event_coverage、snapshot_guaranteed 均为 false。快速模式 candidate_scope 为 `current-visible-project-tasks-updated-since`，另记录 candidate_updated_since、candidate_overlap_seconds=86400、activity_updated_index_guaranteed=false。全量复核仍使用旧合同 candidate_scope=`current-visible-project-tasks`，不加候选下界。两种合同均记录固定日期、起止时间和 window_kind，报告与发送重算只接受其完整规范形式；v0.4.1 的 updated 双边界合同仍不能直接发送。进度绑定整个 selection，不能跨快速/全量策略复用。既有历史记录不迁移、不删除。`_collect_bounded_fixture` 仍仅用于注入合成传输的离线测试，不是生产回退路径。
 
-恢复开始和每轮结束都重新完整列出项目任务；仅候选对象仍一致的完整任务可复用，新增或变化任务重新读详情及全部动态页，已不属于当前集合的任务从临时缓存移除。最终任务列表必须与完整任务记录匹配，最多三轮仍在变化时阻断。此重核是可观察的一致性检查，API 不保证每条活动都改变 `task.updated`，也不保证分页游标形成原子快照。当前权限不可见、永久删除、已移出项目的任务和历史项目成员关系无法由这些接口恢复；用户不纳入归档时也不覆盖该范围。`snapshot_guaranteed` 和 `historical_event_coverage` 均保持 false。
+恢复开始和每轮结束都重新完整列出项目任务；仅候选对象仍一致的完整任务可复用，新增或变化任务重新读详情及全部动态页，已不属于当前集合的任务从临时缓存移除。最终候选集合必须与已完整读取的任务记录匹配，最多三轮仍在变化时阻断。此重核是可观察的一致性检查，API 不保证每条活动都改变 `task.updated`，也不保证分页游标形成原子快照。当前权限不可见、永久删除、已移出项目的任务和历史项目成员关系无法由这些接口恢复；用户不纳入归档时也不覆盖该范围。`snapshot_guaranteed` 和 `historical_event_coverage` 均保持 false。
 
 ### 短期加密进度
 

@@ -51,7 +51,8 @@ class HistoricalCollectionTests(unittest.TestCase):
 
     def test_inactive_old_project_task_does_not_become_empty_evidence_failure(self):
         task = dict(self.record["task"], updated="2020-01-01T00:00:00Z")
-        collection = client(self.transport(task)).collect("demo-project", day=self.day)
+        collection = client(self.transport(task)).collect("demo-project", day=self.day,
+                                                        candidate_mode="full_project")
         report = build_digest(collection, self.config, self.day)
         self.assertEqual(report["digest"]["tasks"], [])
         self.assertTrue(report["ready_to_send"])

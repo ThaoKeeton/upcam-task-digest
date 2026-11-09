@@ -29,6 +29,7 @@ DEFAULT_SETTINGS = {
     "task_display_scope": None,
     "include_archived": False,
     "max_tasks_per_run": 300,
+    "max_concurrent_tasks": 4,
     "api_contract_verified": False,
     "view": {"verified": False, "evidence": "", "task_equals": {}},
     "owner_names": {},
@@ -96,6 +97,9 @@ def validate_settings(settings: dict) -> dict:
     max_tasks = merged.get("max_tasks_per_run")
     if type(max_tasks) is not int or not 1 <= max_tasks <= 700:
         raise SettingsError("Collection batch size must be an integer from 1 to 700")
+    concurrent_tasks = merged.get("max_concurrent_tasks")
+    if type(concurrent_tasks) is not int or not 1 <= concurrent_tasks <= 4:
+        raise SettingsError("Concurrent task count must be an integer from 1 to 4")
     if not isinstance(merged.get("auto_send_enabled"), bool):
         raise SettingsError("Automatic run and send setting must be true or false")
     if not isinstance(merged.get("start_with_windows"), bool):
@@ -137,11 +141,13 @@ def validate_settings(settings: dict) -> dict:
 
 def collection_client_limits(settings: dict) -> dict:
     """Preserve per-batch budgets while enabling bounded project collection."""
-    maximum = validate_settings(settings)["max_tasks_per_run"]
+    clean = validate_settings(settings)
+    maximum = clean["max_tasks_per_run"]
     max_requests = min(1800, max(1000, maximum * 2 + 400))
     max_seconds = min(600, max(300, (max_requests + 3) // 4 + 60))
     return {
         "max_tasks": maximum,
+        "concurrent_tasks": clean["max_concurrent_tasks"],
         "max_requests": max_requests,
         "max_pages": 50,
         "max_records": 50000,

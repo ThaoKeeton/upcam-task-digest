@@ -13,7 +13,7 @@ from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
-from report_contract import task_updated_timestamp, updated_selection
+from report_contract import task_is_candidate, task_updated_timestamp, updated_selection
 from collection_progress import refresh_collection_progress
 
 
@@ -75,8 +75,13 @@ class Client:
                  max_requests=1000, max_tasks=300, max_records=50000, max_seconds=310,
                  max_response_bytes=128 * 1024 * 1024, batch_mode=False,
                  max_project_tasks=10000, checkpoint=None, shared_budget=None,
-                 batch_policy=None):
+                 batch_policy=None, concurrent_tasks=1, request_gate=None, cancel_event=None):
         self.tenant_id = identifier(tenant_id)
+        if type(concurrent_tasks) is not int or not 1 <= concurrent_tasks <= 4:
+            raise CollectionError("Invalid concurrent task limit")
+        if cancel_event is not None and not callable(getattr(cancel_event, 'is_set', None)):
+            raise CollectionError("Invalid collection cancellation signal")
+        self.concurrent_tasks, self.request_gate, self.cancel_event = concurrent_tasks, request_gate, cancel_event
         self.injected_transport = transport is not None
         self.transport = transport or build_opener(NoRedirect()).open
         self.sleep, self.clock = sleep, clock
@@ -104,6 +109,8 @@ class Client:
         self.last_request = None
 
     def _remaining(self):
+        if self.request_gate is not None:
+            self.request_gate.check_cancelled()
         if self.shared_budget is not None:
             self.shared_budget.check_time()
         if self.started is None:
@@ -118,7 +125,10 @@ class Client:
             self.shared_budget.before_wait(delay)
         if delay >= self._remaining():
             raise BatchBudgetExceeded("Wait would exceed collection time budget")
-        self.sleep(delay)
+        if self.request_gate is not None:
+            self.request_gate.wait(delay, check=self._remaining)
+        else:
+            self.sleep(delay)
 
     def get(self, path, params):
         if not self.PATH.fullmatch(path):
@@ -127,7 +137,7 @@ class Client:
             if self.request_count >= self.max_requests:
                 raise BatchBudgetExceeded("Collection request budget exhausted")
             self._remaining()
-            if self.last_request is not None:
+            if self.request_gate is None and self.last_request is not None:
                 self._wait(max(0, self.interval - (self.clock() - self.last_request)))
             reservation = None
             request_params, body_limit = params, 8 * 1024 * 1024
@@ -152,6 +162,14 @@ class Client:
                     self.last_request = self.clock()
                 refresh_collection_progress(requests=self.shared_budget.counters["requests"]
                                             if self.shared_budget is not None else self.request_count)
+                if self.request_gate is not None:
+                    self.request_gate.acquire(check=self._remaining)
+                    # No owner-thread RPC or durable I/O between admission and
+                    # transport: delayed bookkeeping must not bunch requests.
+                    timeout = min(30, self.max_seconds - (self.clock() - self.started))
+                    if timeout <= 0:
+                        raise BatchBudgetExceeded("Collection time budget exhausted")
+                    self.last_request = self.clock()
                 with self.transport(request, timeout=timeout) as response:
                     if response.status != 200:
                         raise CollectionError("Unexpected HTTP status")
@@ -197,10 +215,18 @@ class Client:
                             raise CollectionError("Invalid Retry-After") from None
                     if not 0 <= delay <= 60:
                         raise CollectionError("Retry-After exceeds bounded retry budget") from None
+                if status == 429 and self.request_gate is not None:
+                    self.request_gate.defer(delay)
             except (URLError, TimeoutError, OSError):
                 pass  # Retrying GET is safe; sending has a separate no-retry boundary.
             except (ValueError, UnicodeError):
                 raise CollectionError("Malformed JSON response") from None
+            finally:
+                # Concurrent reservations remain charged on uncertain outcomes,
+                # but no longer occupy an active-response slot after this attempt.
+                end_request = getattr(self.shared_budget, 'end_request', None)
+                if reservation is not None and end_request is not None:
+                    end_request(reservation)
             if attempt + 1 < self.attempts:
                 self._wait(delay)
         raise CollectionError("GET retry budget exhausted")
@@ -236,11 +262,11 @@ class Client:
         raise CollectionError("Pagination limit exceeded; incomplete collection")
 
     def collect(self, project_id, *, include_archived=False, day=None, page_size=100, window=None,
-                batch_mode=None):
+                batch_mode=None, candidate_mode="updated_since_start"):
         # Caller freezes the Shanghai report date and optional half-open window
-        # before any request. Task updated timestamps never select candidates.
+        # before any request. Candidate time never changes the activity window.
         try:
-            selection = updated_selection(day, *(window or (None, None)))
+            selection = updated_selection(day, *(window or (None, None)), candidate_mode=candidate_mode)
         except (ValueError, TypeError):
             raise CollectionError('Canonical report day and timezone-aware window must be fixed before collection') from None
         if type(page_size) is not int or not 1 <= page_size <= 100:
@@ -265,10 +291,11 @@ class Client:
         if type(include_archived) is not bool:
             raise CollectionError("include_archived must be boolean")
         params = {'pageSize': page_size, 'includeArchived': str(include_archived).lower()}
-        full_project = selection['mode'] == 'v3-project-activities-half-open'
+        activity_scope = selection['mode'] == 'v3-project-activities-half-open'
         tasks = list(self.pages(f"/api/v3/project/{project_id}/task/query", params, max_items=self.max_tasks))
+        project_tasks = tasks
         selected_updates = {}
-        if full_project:
+        if activity_scope:
             try:
                 for task in tasks:
                     if task.get('projectId') != project_id or type(task.get('isArchived')) is not bool:
@@ -276,6 +303,8 @@ class Client:
                     if task['isArchived'] and not include_archived:
                         raise CollectionError('Candidate identity or archive scope mismatch')
                     selected_updates[record_id(task)] = task_updated_timestamp(task.get('updated'))
+                # Validate the complete listing before skipping any histories.
+                tasks = [task for task in tasks if task_is_candidate(task.get('updated'), selection)]
             except ValueError:
                 raise CollectionError('Invalid task updated timestamp') from None
         output = []
@@ -286,7 +315,7 @@ class Client:
                 detail = detail[0]
             if record_id(detail) != task_id or detail.get("projectId") != project_id:
                 raise CollectionError("Detail identity or project mismatch")
-            if full_project:
+            if activity_scope:
                 try:
                     current_update = task_updated_timestamp(detail.get('updated'))
                 except ValueError:
@@ -304,10 +333,10 @@ class Client:
             for activity in activities:
                 validate_binding(activity, task_id)
             output.append({"task": detail, "activities": activities})
-        if full_project:
+        if activity_scope:
             closing = list(self.pages(f"/api/v3/project/{project_id}/task/query", params,
                                       max_items=self.max_tasks))
-            if {record_id(row): row for row in tasks} != {record_id(row): row for row in closing}:
+            if {record_id(row): row for row in project_tasks} != {record_id(row): row for row in closing}:
                 # The API has no snapshot token. This detects observable drift,
                 # but cannot attest deleted/inaccessible tasks or an atomic read.
                 raise CollectionError('Task changed during collection; retry a fresh bounded run')

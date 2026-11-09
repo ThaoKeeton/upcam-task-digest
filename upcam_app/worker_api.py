@@ -568,7 +568,8 @@ class WorkerService:
             report_collection("starting")
             collection = self._collect_source(
                 settings, secrets, day=day, window=(start, end),
-                include_archived=settings["include_archived"])
+                include_archived=settings["include_archived"],
+                candidate_mode="full_project" if detailed_target is not None else "updated_since_start")
             report_collection("validating", completed=len(collection.get("records", [])),
                               total=len(collection.get("records", [])))
             diagnostic = diagnose_automatic_source(collection, config, day, (start, end))

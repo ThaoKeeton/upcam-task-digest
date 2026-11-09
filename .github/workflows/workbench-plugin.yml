@@ -21,6 +21,7 @@ on:
       - 'winui/UPCAMTaskDigest/DesktopState.cs'
       - 'winui/UPCAMTaskDigest/UiStrings.cs'
       - 'winui/UPCAMTaskDigest/WorkerProtocol.cs'
+      - 'winui/UPCAMTaskDigest/CollectionProgressText.cs'
       - 'winui/UPCAMTaskDigest/Strings/en-US.json'
       - '.gitattributes'
       - '.github/workflows/workbench-plugin.yml'
@@ -292,7 +293,7 @@ jobs:
           python integrations/project-workbench/audit_package.py 'pairing-package with spaces/com.upcam.task-digest'
           if ($LASTEXITCODE -ne 0) { throw 'Production package inventory failed.' }
           $metadata = Get-Content 'pairing-package with spaces/com.upcam.task-digest/plugin-package.json' -Raw | ConvertFrom-Json
-          if ($metadata.pluginId -cne 'com.upcam.task-digest' -or $metadata.pluginVersion -cne '0.1.1' -or $metadata.backendVersion -cne '0.4.4' -or $metadata.syntheticAcceptance -ne $false) { throw 'Production package identity mismatch.' }
+          if ($metadata.pluginId -cne 'com.upcam.task-digest' -or $metadata.pluginVersion -cne '0.1.1' -or $metadata.backendVersion -cne '0.4.5' -or $metadata.syntheticAcceptance -ne $false) { throw 'Production package identity mismatch.' }
           $inputs = Get-Content pairing-evidence/inputs.json -Raw | ConvertFrom-Json -AsHashtable
           if ($metadata.sourceCommit -cne $inputs.pluginBuildCommit) { throw 'Plugin artifact source commit does not match this workflow checkout.' }
           $inputs.pluginArchiveSha256 = $hash

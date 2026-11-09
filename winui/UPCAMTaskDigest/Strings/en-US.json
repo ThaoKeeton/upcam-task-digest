@@ -569,5 +569,12 @@
   "本机采集进度格式无效；未自动重试。": "The local collection progress format is invalid. No automatic retry.",
   "工作进程等待超时，已停止本次操作；未自动重试。若操作涉及发送，请先检查运行记录。": "The worker timed out and this operation stopped. No automatic retry. Check local run history before retrying any operation involving delivery.",
   "请先保存本机配置和凭据，再执行只读诊断；诊断不会代为保存。": "Save local settings and credentials before read-only diagnosis. Diagnosis does not save them for you.",
-  "保存前只读核验 · 已耗时 {0}:{1} · 完整任务 {2}/{3} · 请求 {4}": "Read-only check before saving · elapsed {0}:{1} · complete tasks {2}/{3} · requests {4}"
+  "保存前只读核验 · 已耗时 {0}:{1} · 完整任务 {2}/{3} · 请求 {4}": "Read-only check before saving · elapsed {0}:{1} · complete tasks {2}/{3} · requests {4}",
+  "并行读取任务数（1–4）": "Concurrent task readers (1–4)",
+  "默认并行读取 4 个任务；所有线程共用至少 0.25 秒的请求间隔，遇到 429 会共同退避。可降到 1；不提高程序原有请求速率上限，实际速度取决于候选数量与接口延迟。": "Read up to four tasks concurrently by default. All workers share a minimum 0.25-second request interval and a common 429 cooldown. Lower to one if needed. This does not raise the current request-rate ceiling; speed depends on candidate count and API latency.",
+  "恢复已读取任务进度": "Restoring read-task progress",
+  "{0} · 已耗时 {1}:{2} · {3} · 请求 {4}": "{0} · elapsed {1}:{2} · {3} · requests {4}",
+  "已列出候选任务 {0} 项（非时段内更新数）": "candidate tasks listed: {0} (not updates in the selected window)",
+  "候选任务读取进度 {0}/{1} 项（非时段内更新数）": "candidate-task read progress: {0}/{1} tasks (not updates in the selected window)",
+  "保存前只读核验": "Read-only check before saving"
 }

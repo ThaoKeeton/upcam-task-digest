@@ -80,7 +80,7 @@ class WorkbenchReferenceTests(unittest.TestCase):
                 verifier.verify_reference(reference)
 
     def test_standalone_version_and_default_entry_remain_separate(self):
-        self.assertIn("<Version>0.4.4</Version>",
+        self.assertIn("<Version>0.4.5</Version>",
                       (ROOT / "winui/UPCAMTaskDigest/UPCAMTaskDigest.csproj").read_text())
         source = (ROOT / "worker_entry.py").read_text()
         self.assertNotIn("plugin_handshake", source)
@@ -88,7 +88,7 @@ class WorkbenchReferenceTests(unittest.TestCase):
 
     def test_ci_watches_each_source_linked_standalone_input(self):
         workflow = (ROOT / ".github/workflows/workbench-plugin.yml").read_text()
-        for name in ("winui/UPCAMTaskDigest/DesktopState.cs", "winui/UPCAMTaskDigest/UiStrings.cs", "winui/UPCAMTaskDigest/WorkerProtocol.cs",
+        for name in ("winui/UPCAMTaskDigest/DesktopState.cs", "winui/UPCAMTaskDigest/UiStrings.cs", "winui/UPCAMTaskDigest/WorkerProtocol.cs", "winui/UPCAMTaskDigest/CollectionProgressText.cs",
                      "winui/UPCAMTaskDigest/Strings/en-US.json", "THIRD_PARTY_NOTICES.md", "LICENSES/**"):
             self.assertIn("'" + name + "'", workflow)
 
@@ -165,7 +165,7 @@ class WorkbenchDistributionTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         metadata = {"schemaVersion": 1, "pluginId": "com.upcam.task-digest",
-                    "pluginVersion": "0.1.1", "backendVersion": "0.4.4",
+                    "pluginVersion": "0.1.1", "backendVersion": "0.4.5",
                     "protocolVersion": 1, "syntheticAcceptance": False,
                     "hostReferenceCommit": "d2005d469aef6a385c134b6914fb6dfa9cff20b2",
                     "runtimeServicesVersion": 1,

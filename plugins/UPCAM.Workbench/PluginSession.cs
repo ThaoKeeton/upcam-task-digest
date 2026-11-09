@@ -307,18 +307,10 @@ internal sealed class PluginSession : IAsyncDisposable
                 {
                     timerStop.Token.ThrowIfCancellationRequested();
                     var value = Volatile.Read(ref current);
-                    string phase = UiStrings.T(value.Phase switch
-                    {
-                        "listing" => "列出项目任务", "loading_cache" => "恢复完整任务进度",
-                        "collecting" => "读取任务及动态", "reconciling" => "重新核对项目变化",
-                        "validating" => "校验诊断结果", _ => "准备只读采集"
-                    });
                     lock (_state.Sync)
                     {
                         if (!_state.Busy || _state.ActiveOperation != operation || !ReferenceEquals(profile, _state.Current)) return;
-                        _state.Status = UiStrings.F("{0} · 已耗时 {1}:{2} · 完整任务 {3}/{4} · 请求 {5}", phase,
-                            (int)elapsed.Elapsed.TotalMinutes, elapsed.Elapsed.Seconds.ToString("00"),
-                            value.Completed, value.Total, value.Requests);
+                        _state.Status = CollectionProgressText.Format(value, elapsed.Elapsed);
                     }
                     _state.Notify(false);
                     await Task.Delay(TimeSpan.FromSeconds(1), timerStop.Token);

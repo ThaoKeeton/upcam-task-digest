@@ -13,6 +13,26 @@ from upcam_app.smoke_data import make_smoke_service, SyntheticClient
 
 
 class DetailedWorkerTests(unittest.TestCase):
+    def test_detailed_export_uses_full_project_audit_instead_of_updated_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service, window, _calls = self.fixture(directory)
+            modes = []
+            previous = service.client_factory
+
+            class RecordingMode(previous):
+                def collect(self, *args, **kwargs):
+                    modes.append(kwargs.get("candidate_mode", "updated_since_start"))
+                    return super().collect(*args, **kwargs)
+
+            service.client_factory = RecordingMode
+            target = Path(directory) / "full-audit.json"
+            result = service.dispatch({"op": "export_detailed_diagnostic_to_file", "payload": {
+                **window, "path": str(target), "include_project_content": True}})
+            self.assertEqual(modes, ["full_project"])
+            self.assertTrue(result["detailed_export"]["saved"])
+            snapshot = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["scope"]["selection"]["candidate_scope"], "current-visible-project-tasks")
+
     def test_parent_replaced_at_writer_entry_is_not_followed(self):
         from upcam_app.diagnostic_files import write_private_diagnostic
         with tempfile.TemporaryDirectory() as directory:

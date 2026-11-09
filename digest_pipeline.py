@@ -8,7 +8,8 @@ from pathlib import Path
 import sys
 
 from render_digest import render_digest, text
-from report_contract import SHANGHAI, canonical_window, report_window, strict_day, updated_selection, task_updated_timestamp
+from report_contract import (SHANGHAI, canonical_window, report_window, strict_day,
+                             validate_selection, task_updated_timestamp)
 from teambition_readonly import Client, CollectionError, identifier, record_id
 from activity_adapter import (comment_input, parse_activity, validate_binding, status_transition,
                               executor_change, standard_commit_candidate, stage_movement,
@@ -106,8 +107,10 @@ def build_digest(collection, config, day, window=None):
         issues.append("API 字段及事件规则尚未核验")
     activity_selection = isinstance(selection, dict) and selection.get('mode') == ACTIVITY_SELECTION_MODE
     if activity_selection:
-        if selection != updated_selection(report_day, start, end):
-            raise CollectionError('Selection contract differs from report window')
+        try:
+            validate_selection(selection, report_day, start, end)
+        except (TypeError, ValueError):
+            raise CollectionError('Selection contract differs from report window') from None
     elif isinstance(selection, dict) and selection.get('mode') == 'v3-project-updated-half-open':
         raise CollectionError('Selection contract differs from report window')
     else:

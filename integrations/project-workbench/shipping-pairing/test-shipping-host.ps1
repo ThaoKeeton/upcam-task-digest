@@ -69,7 +69,7 @@ $script:result = [ordered]@{
     test = 'shipping-0.4.0-production-0.1.1-pairing'
     hostSourceCommit = '655d7b6496067daad7c5e4cefb1f1da1b8379536'
     pluginVersion = '0.1.1'
-    backendVersion = '0.4.4'
+    backendVersion = '0.4.5'
     syntheticAcceptance = $false
     activeDiagnosticCancellation = 'not-executed; unconfigured production rejects before collection'
     installMethod = 'shipping Core PackageStore; native folder-picker not exercised'
@@ -591,7 +591,7 @@ public sealed class UpcamRealHostRun : IDisposable
     [UpcamRealHostRun]::RejectLinks($workerExe)
     Assert-Check 'productionInstalledPackage' ($manifest.id -ceq 'com.upcam.task-digest' -and $manifest.name -ceq 'UPCAM Task Digest' -and
         $manifest.entryAssembly -ceq 'UPCAM.Workbench.dll' -and $manifest.entryType -ceq 'Upcam.Workbench.DigestPlugin' -and
-        $manifest.version -ceq '0.1.1' -and $inventory.backendVersion -ceq '0.4.4' -and
+        $manifest.version -ceq '0.1.1' -and $inventory.backendVersion -ceq '0.4.5' -and
         $inventory.pluginId -ceq 'com.upcam.task-digest' -and $inventory.syntheticAcceptance -is [bool] -and
         $inventory.syntheticAcceptance -eq $false -and [IO.File]::Exists($workerExe))
     Set-Phase 'singleton-preflight' 'preexisting-upcam-session'

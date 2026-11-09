@@ -481,7 +481,7 @@ internal static class Program
                 JsonObject result = request["payload"]!.DeepClone().AsObject();
                 string nonce = result["nonce"]!.GetValue<string>();
                 Check(result.Count == 3 && result["protocol_version"]!.GetValue<int>() == 1 &&
-                    result["backend_version"]!.GetValue<string>() == "0.4.4" && nonce.Length == 32 &&
+                    result["backend_version"]!.GetValue<string>() == "0.4.5" && nonce.Length == 32 &&
                     nonce.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f'),
                     "Client emitted an invalid handshake request.");
                 result["mode"] = "project-workbench";

@@ -32,7 +32,7 @@ function Write-PackageInventory {
         pluginId = $Id
         pluginVersion = '0.1.1'
         sourceCommit = $sourceCommit
-        backendVersion = '0.4.4'
+        backendVersion = '0.4.5'
         protocolVersion = 1
         hostReferenceCommit = 'd2005d469aef6a385c134b6914fb6dfa9cff20b2'
         minimumHostVersion = '0.2.0'

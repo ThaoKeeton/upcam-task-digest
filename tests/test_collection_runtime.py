@@ -119,6 +119,7 @@ class CollectionRuntimeTests(unittest.TestCase):
         self.assertEqual(client.kwargs["credentials"](),
                          ("fictional-desktop-app", "fictional-desktop-secret"))
         self.assertTrue(client.kwargs["batch_mode"])
+        self.assertEqual(client.kwargs["concurrent_tasks"], 4)
         self.assertEqual(client.kwargs["max_tasks"], 123)
         self.assertEqual(client.kwargs["max_project_tasks"], 10000)
         self.assertIs(client.kwargs["checkpoint"], checkpoints[0])
@@ -204,7 +205,7 @@ class CollectionRuntimeTests(unittest.TestCase):
                 result = {"code": 200, "result": [], "nextPageToken": ""}
             return Response(json.dumps(result).encode("utf-8"))
 
-        settings = dict(DEFAULT_SETTINGS, tenant_id="demo-org", project_id="demo-project")
+        settings = dict(DEFAULT_SETTINGS, tenant_id="demo-org", project_id="demo-project", max_concurrent_tasks=1)
         with patch("teambition_readonly.build_opener", return_value=SimpleNamespace(open=transport)):
             first = runtime.make_collection_client(settings, EXPLICIT_CREDENTIALS, self.directory,
                                                    checkpoint_factory=synthetic_checkpoint)

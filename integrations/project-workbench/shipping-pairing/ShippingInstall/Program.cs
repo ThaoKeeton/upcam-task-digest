@@ -25,7 +25,7 @@ using (var metadata = JsonDocument.Parse(File.ReadAllText(Path.Combine(package, 
     var value = metadata.RootElement;
     if (value.GetProperty("pluginId").GetString() != "com.upcam.task-digest" ||
         value.GetProperty("pluginVersion").GetString() != "0.1.1" ||
-        value.GetProperty("backendVersion").GetString() != "0.4.4" ||
+        value.GetProperty("backendVersion").GetString() != "0.4.5" ||
         value.GetProperty("syntheticAcceptance").ValueKind != JsonValueKind.False)
         throw new InvalidOperationException("Only the new production package is allowed.");
 }
@@ -50,7 +50,7 @@ await using (var lease = new FileStream(Path.Combine(root, "host.lock"), FileMod
     Directory.CreateDirectory(Path.GetDirectoryName(report)!);
     await using var stream = new FileStream(report, FileMode.CreateNew, FileAccess.Write, FileShare.None);
     await JsonSerializer.SerializeAsync(stream, new { succeeded = true, method = "shipping-Core-PluginPackageStore.InstallAsync-folder", coreSha256 = coreHash,
-        pluginId = "com.upcam.task-digest", pluginVersion = "0.1.1", backendVersion = "0.4.4", syntheticAcceptance = false,
+        pluginId = "com.upcam.task-digest", pluginVersion = "0.1.1", backendVersion = "0.4.5", syntheticAcceptance = false,
         installedFiles = sourceFiles.Length, installedBytesMatch = true, disabled = true, trusted = false, loaded = false, desiredEnabled = false });
 }
 Console.WriteLine("Shipping PackageStore installed the production package, disabled and untrusted.");

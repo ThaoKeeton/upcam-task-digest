@@ -14,7 +14,7 @@ from activity_adapter import (
     executor_change, standard_commit_candidate, unsafe_controls, stage_movement,
     standard_association_notification,
 )
-from report_contract import report_window, updated_selection
+from report_contract import report_window, validate_selection
 from teambition_readonly import CollectionError, identifier, validate_binding
 from . import APP_VERSION, RULESET_REVISION
 from .diagnostic_protocol import _counter_labels, action_fingerprint
@@ -529,6 +529,14 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
         shaped_task["truncated_activity_count"] = len(activities) - len(shaped_task["activities"])
         shaped_task["detail_truncated"] = shaped_task["truncated_activity_count"] > 0
         tasks.append(shaped_task)
+    matches_selection = None
+    if bounds is not None and isinstance(collection, dict):
+        try:
+            validate_selection(collection.get("selection"), day, *bounds)
+        except (TypeError, ValueError):
+            matches_selection = False
+        else:
+            matches_selection = True
     result = {
         "format": "upcam-teambition-safe-shape-v5",
         "diagnostic": {
@@ -546,8 +554,7 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
         "pagination_complete": collection.get("pagination_complete") is True if isinstance(collection, dict) else False,
         "window_evaluation_available": bounds is not None,
         "selection_check": {
-            "matches_report_window": (collection.get("selection") == updated_selection(day, *bounds)
-                                       if bounds is not None and isinstance(collection, dict) else None),
+            "matches_report_window": matches_selection,
         },
         "task_count": len(records),
         "activity_count": total_events,

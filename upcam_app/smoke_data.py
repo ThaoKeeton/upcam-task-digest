@@ -35,7 +35,8 @@ class SyntheticClient:
         return {
             "tenant_id": self.tenant_id, "project_id": project_id,
             "include_archived": include_archived, "pagination_complete": True,
-            "selection": updated_selection(day, start, end),
+            "selection": updated_selection(day, start, end,
+                                           candidate_mode=_kwargs.get("candidate_mode", "updated_since_start")),
             "batch_id": str(uuid.uuid4()),
             "collected_at": datetime.now(timezone.utc).isoformat(),
             "records": [{

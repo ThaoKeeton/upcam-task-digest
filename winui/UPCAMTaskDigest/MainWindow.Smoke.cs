@@ -439,6 +439,14 @@ public sealed partial class MainWindow
         Assert(batchSize.Header.ToString() == "每批采集任务数（1–700）" && batchSize.Value == 300 &&
             batchSize.Minimum == 1 && batchSize.Maximum == 700,
             "Native schedule exposes the legacy default as a bounded collection batch size");
+        var concurrent = Find<NumberBox>("task-concurrency")!;
+        Assert(concurrent.Header.ToString() == "并行读取任务数（1–4）" && concurrent.Value == 4 &&
+            concurrent.Minimum == 1 && concurrent.Maximum == 4,
+            "Native schedule exposes bounded task concurrency without increasing aggregate API rate");
+        concurrent.Value = 2.5;
+        await WaitForAsync(() => _state.Number("max_concurrent_tasks", 0) == 2 && concurrent.Value == 2);
+        concurrent.Value = 4;
+        await WaitForAsync(() => _state.Number("max_concurrent_tasks", 0) == 4);
         batchSize.Value = 700;
         await WaitForAsync(() => _state.Number("max_tasks_per_run", 0) == 700);
         _state.SetSecretDraft("openai_api_key", "ci-unsaved-cache-clear-draft");

@@ -35,7 +35,8 @@ class SenderBoundary:
 
 class BatchedWorkflowTests(unittest.TestCase):
     def setup_workflow(self, directory, *, policy=None):
-        tasks = [samples.task(i, updated="2020-01-01T00:00:00Z", uniqueId=i + 1,
+        # In the one-day candidate overlap, but before the actual report window.
+        tasks = [samples.task(i, updated="2026-01-01T12:00:00+08:00", uniqueId=i + 1,
                     executorId="fictional-owner", tfsId="fictional-open", isDone=False,
                     project={"_id": "fictional-project", "uniqueIdPrefix": "SYNTH"})
                  for i in range(1201)]

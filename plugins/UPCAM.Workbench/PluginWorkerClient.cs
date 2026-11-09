@@ -128,7 +128,7 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
         PluginWorkerClient? client = null;
         try
         {
-            // Standalone 0.4.4 uses the existence of this named kernel object,
+            // Standalone 0.4.5 uses the existence of this named kernel object,
             // rather than thread-affine WaitOne/ReleaseMutex ownership.
             singleton = new Mutex(false, SingletonName, out bool createdNew);
             if (!createdNew)
@@ -141,7 +141,7 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
             string nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
             JsonObject handshake = await client.SendAsync("plugin_handshake", new JsonObject
             {
-                ["protocol_version"] = 1, ["backend_version"] = "0.4.4", ["nonce"] = nonce
+                ["protocol_version"] = 1, ["backend_version"] = "0.4.5", ["nonce"] = nonce
             }, cancellationToken).ConfigureAwait(false);
             if (!ValidHandshake(handshake, nonce, profile, synthetic))
                 throw new InvalidOperationException("The UPCAM backend handshake did not match the requested session.");
@@ -283,7 +283,7 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
         {
             string? revision = response["ruleset_revision"]?.GetValue<string>();
             return response["protocol_version"]?.GetValue<int>() == 1 &&
-                response["backend_version"]?.GetValue<string>() == "0.4.4" &&
+                response["backend_version"]?.GetValue<string>() == "0.4.5" &&
                 response["nonce"]?.GetValue<string>() == nonce &&
                 response["mode"]?.GetValue<string>() == "project-workbench" &&
                 string.Equals(response["data_directory"]?.GetValue<string>(), profile, StringComparison.OrdinalIgnoreCase) &&

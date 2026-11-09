@@ -17,7 +17,7 @@ import time
 import uuid
 
 from collection_progress import report_collection
-from report_contract import task_updated_timestamp
+from report_contract import task_is_candidate, task_updated_timestamp
 from teambition_readonly import (BatchBudgetExceeded, Client, CollectionError,
                                 identifier, record_id, validate_binding)
 
@@ -249,9 +249,19 @@ class _Coordinator:
         self.worker, self.worker_tasks, self.budget = None, 0, None
         self.candidates, self.completed = {}, {}
         self.candidate_bytes, self.record_bytes = 0, 0
+        self.project_tasks_listed = 0
         self.resumed_ids = set()
         self.initial_resumed = False
         self.credentials = None
+        self.request_gate = None
+        if client.concurrent_tasks > 1 or client.cancel_event is not None:
+            from collection_concurrency import RequestGate
+            self.request_gate = RequestGate(interval=client.interval, clock=client.clock,
+                                            sleep=client.sleep, cancel_event=client.cancel_event)
+            not_before = getattr(client, '_next_collection_request', 0.0)
+            if client.last_request is not None:
+                not_before = max(not_before, client.last_request + client.interval)
+            self.request_gate.defer(max(0.0, not_before - client.clock()))
 
     def _progress(self, phase, *, total=None):
         counters = self.budget.counters if self.budget is not None else {}
@@ -277,7 +287,7 @@ class _Coordinator:
             raise CollectionError("Missing or invalid collection credentials") from None
         batch = {key: getattr(self.client, key) for key in
                  ("max_tasks", "max_requests", "max_records", "max_response_bytes",
-                  "max_seconds", "max_pages", "attempts", "interval")}
+                  "max_seconds", "max_pages", "attempts", "interval", "concurrent_tasks")}
         policy = asdict(self.policy)
         policy.update(max_project_tasks=self.max_tasks, batch=batch)
         context = {"policy": policy, "tenant_id": self.client.tenant_id,
@@ -310,6 +320,7 @@ class _Coordinator:
         self.worker = Client(self.client.tenant_id, transport=self.client.transport,
                              sleep=self.client.sleep, clock=self.client.clock,
                              credentials=lambda: self.credentials, shared_budget=self.budget,
+                             request_gate=self.request_gate,
                              **limits)
         self.worker.last_request = last_request
         self.worker_tasks = 0
@@ -355,17 +366,24 @@ class _Coordinator:
                 self._new_batch()
             old_pages = self.worker.max_pages
             self.worker.max_pages = 100
-            candidates, used = {}, 2
+            candidates, used, listed, listing_bytes = {}, 2, 0, 2
             try:
                 for row in self.worker.pages(f"/api/v3/project/{self.project_id}/task/query", params,
                                              max_items=self.max_tasks):
                     task_id = self._validate_task(row)
+                    listed += 1
+                    # pages() retains its duplicate-detection rows until the
+                    # iterator ends, including rows excluded from history reads.
+                    listing_bytes += _size(row) + (1 if listed > 1 else 0)
+                    self.budget.retained(self._live_bytes() + listing_bytes)
+                    if not task_is_candidate(row["updated"], self.selection):
+                        continue
                     used += _size(row) + (1 if candidates else 0)
-                    self.budget.retained(self._live_bytes() + used)
                     candidates[task_id] = row
                     if len(candidates) % self.page_size == 0:
                         self._progress(phase, total=len(candidates))
                 self._progress(phase, total=len(candidates))
+                self.project_tasks_listed = listed
                 return candidates, used
             except BatchBudgetExceeded:
                 if attempt:
@@ -439,6 +457,13 @@ class _Coordinator:
         self._progress("collecting")
 
     def _collect_tasks(self):
+        if self.client.concurrent_tasks > 1:
+            from collection_concurrency import collect_tasks
+            self._progress("collecting")
+            return collect_tasks(self)
+        return self._collect_tasks_serial()
+
+    def _collect_tasks_serial(self):
         self._progress("collecting")
         for task_id, candidate in self.candidates.items():
             if task_id in self.completed:
@@ -470,6 +495,8 @@ class _Coordinator:
                 self._collect_tasks()
                 self.budget.before_closing_scan()
                 closing, closing_bytes = self._scan()
+                if self.request_gate is not None:
+                    self.request_gate.check_cancelled()
                 if {key: value["candidate"] for key, value in self.completed.items()} == closing:
                     output = {"tenant_id": self.client.tenant_id, "project_id": self.project_id,
                               "include_archived": self.include_archived, "selection": self.selection,
@@ -479,6 +506,7 @@ class _Coordinator:
                               "records": [self.completed[key]["record"] for key in closing],
                               "collection_stats": dict(self.budget.counters,
                                                        tasks_scanned=len(closing),
+                                                       project_tasks_listed=self.project_tasks_listed,
                                                        resumed_tasks=len(self.resumed_ids))}
                     self._store("clear")
                     return output
@@ -492,6 +520,10 @@ class _Coordinator:
                 self.client.response_bytes = self.budget.counters["response_bytes"]
             if self.worker is not None:
                 self.client.last_request = self.worker.last_request
+            if self.request_gate is not None:
+                self.client._next_collection_request = self.request_gate.next_allowed
+                if self.request_gate.last_admission is not None:
+                    self.client.last_request = self.request_gate.last_admission
             self._store("close")
 
 

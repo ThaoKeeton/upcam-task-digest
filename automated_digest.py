@@ -160,6 +160,7 @@ _COLLECTION_ERROR_MESSAGES = {
     "Comment evidence exceeds review size budget": "评论动态超过本机安全读取上限；未调用 OpenAI、未发送钉钉。需要先核对该动态结构及仓库规则。",
     "HTTP request rejected": "Teambition 只读请求失败；检查网络、App 凭据及项目读取权限。没有发送日报。",
     "API rejected request or malformed envelope": "Teambition API 拒绝请求或返回结构不完整；检查凭据、权限和接口状态。没有发送日报。",
+    "Collection cancelled": "本次采集已取消，未生成或发送不完整结果。",
     "GET retry budget exhausted": "Teambition 只读请求多次失败；检查网络和项目权限后再试。",
     "Collection time budget exhausted": "Teambition 查询超过本机时间上限，采集不完整；请检查网络及项目任务和历史动态量后重新只读诊断。",
     "Response size limit exceeded": "Teambition 单页响应超过本机读取上限，采集不完整；请检查接口分页及历史动态量后重新只读诊断。",
@@ -510,10 +511,16 @@ def diagnose_automatic_source(collection: dict, config: dict, day, window=None) 
         return {"ok": False, "message": str(exc), "task_count": None}
     except (CollectionError, ValueError, TypeError, KeyError) as exc:
         return {"ok": False, "message": collection_validation_message(exc), "task_count": None}
+    prefiltered = collection.get("selection", {}).get("candidate_scope") == "current-visible-project-tasks-updated-since"
+    task_scope = (f"读取 {len(collection.get('records', []))} 个候选任务" if prefiltered else
+                  f"扫描当前项目范围内 {len(collection.get('records', []))} 个可读任务")
+    candidate_notice = ("已按任务更新时间预选，未推进更新时间的旧任务动态可能漏采；"
+                        "可用“详细诊断导出…”进行全量复核。" if prefiltered else "")
     return {"ok": True,
-            "message": (f"只读校验通过：扫描当前项目范围内 {len(collection.get('records', []))} 个可读任务，"
+            "message": (f"只读校验通过：{task_scope}，"
                         f"其中 {len(base.get('digest', {}).get('tasks', []))} 个任务有窗口内动态；"
                         "本地字段、动态时间窗、成员/状态映射及动态规则通过。"
+                        f"{candidate_notice}"
                         "已完成接口分页；不代表已删除、已不可见任务或历史项目成员关系的完整快照。"
                         "未调用 OpenAI，未发送钉钉。"),
             "task_count": len(base.get("digest", {}).get("tasks", []))}
