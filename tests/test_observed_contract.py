@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from activity_adapter import MAX_CONTENT, status_transition
 from digest_pipeline import build_digest, main
 from teambition_readonly import Client, CollectionError
-from test_collection import FakeTransport, client, page
+from test_collection import FakeTransport, activity, client, page
 
 FIXTURES=Path(__file__).parent/'fixtures'
 
@@ -139,10 +139,10 @@ class CollectionBudgetTests(unittest.TestCase):
     def test_cli_rejects_invalid_date_before_request(self):
         stderr=io.StringIO()
         with patch('sys.argv',['digest_pipeline.py','--config',str(FIXTURES/'config.json'),'--collect','--date','20260102']), \
-             patch('teambition_readonly.app_jwt') as jwt, patch('sys.stderr',stderr):
+             patch('teambition_mcp.MCPTransport') as mcp, patch('sys.stderr',stderr):
             self.assertEqual(main(),1)
             self.assertIn('Digest failed',stderr.getvalue())
-            jwt.assert_not_called()
+            mcp.assert_not_called()
 
     def test_foreign_bound_activity_rejected_by_offline_collector(self):
         task=json.loads((FIXTURES/'collection.json').read_text())['records'][0]['task']
@@ -150,34 +150,36 @@ class CollectionBudgetTests(unittest.TestCase):
         with self.assertRaises(CollectionError):client(t)._collect_bounded_fixture('demo-project')
 
     def test_task_budget_exceeded_before_any_details(self):
-        t=FakeTransport(page([{'id':'a'},{'id':'b'}]))
-        with self.assertRaises(CollectionError): client(t,max_tasks=1)._collect_bounded_fixture('demo-project')
+        base=json.loads((FIXTURES/'collection.json').read_text())['records'][0]['task']
+        t=FakeTransport(page([dict(base,id='a'),dict(base,id='b')]))
+        with self.assertRaisesRegex(CollectionError, 'Task selection exceeds'):
+            client(t,max_tasks=1)._collect_bounded_fixture('demo-project')
         self.assertEqual(len(t.requests),1)
 
     def test_request_and_record_budgets_fail_without_partial_result(self):
         t=FakeTransport(page([], 'next'),page())
-        with self.assertRaises(CollectionError): list(client(t,max_requests=1).pages('/api/v3/task/query',{}))
+        with self.assertRaises(CollectionError): list(client(t,max_requests=4).pages('task.activities',{'taskId':'demo'}))
         self.assertEqual(len(t.requests),1)
-        t=FakeTransport(page([{'id':'a'}],'next'),page([{'id':'b'}]))
-        with self.assertRaises(CollectionError): list(client(t,max_records=1).pages('/api/v3/task/query',{}))
+        t=FakeTransport(page([activity('a')],'next'),page([activity('b')]))
+        with self.assertRaises(CollectionError): list(client(t,max_records=1).pages('task.activities',{'taskId':'demo'}))
 
     def test_deadline_includes_wait_and_response_time(self):
         clock=[0.0]
         t=FakeTransport(page(),page())
-        c=Client('demo-org',transport=t,credentials=lambda:('fictional','fictional'),clock=lambda:clock[0],
-                 sleep=lambda delay:clock.__setitem__(0,clock[0]+delay),max_seconds=1,interval=2)
-        c.get('/api/v3/task/query',{})
-        with self.assertRaises(CollectionError): c.get('/api/v3/task/query',{})
+        c=client(t, clock=lambda:clock[0],
+                 sleep=lambda delay:clock.__setitem__(0,clock[0]+delay),max_seconds=7,interval=2)
+        c.get('task.activities',{'taskId':'demo'})
+        with self.assertRaises(CollectionError): c.get('task.activities',{'taskId':'demo'})
         self.assertEqual(len(t.requests),1)
         def slow(req,timeout):
             clock[0]+=2
             return FakeTransport(page())(req,timeout)
-        c=Client('demo-org',transport=slow,credentials=lambda:('fictional','fictional'),clock=lambda:clock[0],max_seconds=1)
-        with self.assertRaises(CollectionError):c.get('/api/v3/task/query',{})
+        c=client(slow, clock=lambda:clock[0], max_seconds=1)
+        with self.assertRaises(CollectionError):c.get('task.activities',{'taskId':'demo'})
 
     def test_exact_page_task_and_record_limits_succeed_when_terminal(self):
-        t=FakeTransport(page([{'id':'a'}],'next'),page([{'id':'b'}]))
-        result=list(client(t,max_pages=2,max_requests=2,max_records=2).pages('/api/v3/task/query',{},max_items=2))
+        t=FakeTransport(page([activity('a')],'next'),page([activity('b')]))
+        result=list(client(t,max_pages=2,max_requests=5,max_records=2).pages('task.activities',{'taskId':'demo'},max_items=2))
         self.assertEqual(len(result),2)
 
 

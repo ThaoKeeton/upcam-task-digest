@@ -26,7 +26,7 @@ public sealed partial class MainWindow
             "light" => ElementTheme.Light,
             _ => ElementTheme.Default
         };
-        Title = UiStrings.T("UPCAM 站会日报") + " · v" + typeof(MainWindow).Assembly.GetName().Version?.ToString(3) +
+        Title = UiStrings.T("UPCAM · Teambition 工作助手") + " · v" + typeof(MainWindow).Assembly.GetName().Version?.ToString(3) +
             (_smoke ? " · " + UiStrings.T("CI 虚构数据") : "");
         AppTitleBar.Title = Title;
         foreach (NavigationViewItem item in Navigation.MenuItems.OfType<NavigationViewItem>())

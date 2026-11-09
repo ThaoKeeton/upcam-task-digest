@@ -22,12 +22,12 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
     private string _page = "home";
     private readonly Dictionary<string, (string Title, string Description)> _routes = new()
     {
-        ["home"] = ("主页", "站会日报 · 本机自动化"),
+        ["home"] = ("主页", "Teambition 工作助手 · 固定日报"),
         ["general"] = ("常规", "管理应用更新、语言、主题、启动和系统托盘。"),
         ["accounts"] = ("账户与模型", "连接服务、保管凭据，选择 API 模型与请求设置。"),
         ["project"] = ("项目范围", "读取当前项目任务动态，按发生时间筛选，并核验只读接口。"),
-        ["members"] = ("成员映射", "核对 API 成员 ID 与姓名，支持 JSON / 制表符批量导入。"),
-        ["statuses"] = ("状态映射", "核对状态名称，并明确哪些状态代表已解决。"),
+        ["members"] = ("高级：成员覆盖", "成员姓名自动读取；仅未解析时使用已核对的本机覆盖。"),
+        ["statuses"] = ("高级：状态覆盖", "任务状态自动读取；仅未解析时使用已核对的本机覆盖。"),
         ["schedule"] = ("自动运行", "设置日报运行时间和采集窗口；应用启动选项位于常规页。"),
         ["run"] = ("运行与诊断", "手动可再次发送同一时段；定时任务防重，结果不明时停止。"),
         ["history"] = ("运行记录", "查看本机运行状态、诊断说明和已生成日报。")
@@ -39,7 +39,7 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
         _background = background;
         _afterUpdate = afterUpdate;
         InitializeComponent();
-        Title = "UPCAM 站会日报 · v" + typeof(MainWindow).Assembly.GetName().Version?.ToString(3) +
+        Title = "UPCAM · Teambition 工作助手 · v" + typeof(MainWindow).Assembly.GetName().Version?.ToString(3) +
             (smoke ? " · CI 虚构数据" : "");
         AppTitleBar.Title = Title;
         ExtendsContentIntoTitleBar = true;
@@ -178,7 +178,7 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
             _ => BuildHome()
         };
         _navigating = true;
-        Navigation.SelectedItem = Navigation.MenuItems.OfType<NavigationViewItem>().FirstOrDefault(x => (string?)x.Tag == route);
+        Navigation.SelectedItem = Navigation.MenuItems.OfType<NavigationViewItem>().FirstOrDefault(x => (string?)x.Tag == (route is "members" or "statuses" ? "project" : route));
         _navigating = false;
     }
 
@@ -187,7 +187,24 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
 
     private async Task SaveCoreAsync()
     {
-        JsonObject result = await Worker.SendAsync("save", _state.SavePayload());
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var progress = new Progress<CollectionProgress>(value =>
+        {
+            if (_busy) SetStatus(CollectionProgressText.Format(value, elapsed.Elapsed, "保存前只读核验"));
+        });
+        JsonObject payload = _state.SavePayload();
+        bool hasTokenDraft = _state.SecretDrafts.TryGetValue("teambition_mcp_token", out var tokenDraft) && !string.IsNullOrWhiteSpace(tokenDraft);
+        bool hasSavedToken = _state.SecretPresence["teambition_mcp_token"]?.GetValue<bool>() == true;
+        bool mcpAuthorized = _state.SecretPresence["teambition_mcp_authorized"]?.GetValue<bool>() == true;
+        if ((hasTokenDraft || hasSavedToken) && (hasTokenDraft || !mcpAuthorized))
+        {
+            var consent = EditorDialog("授权本机连接 Teambition 官方 MCP", Column(Paragraph(UiStrings.T(
+                "个人 Token 将作为认证信息发送给 Teambition 官方 MCP 服务，用于只读获取项目、任务、动态、成员姓名和任务状态。允许后会按你的主动操作、保存时核验或已启用的定时运行连接。Token 泄露可能使他人取得账号权限，请勿分享；清除服务密钥可撤销本机授权。仅保存 Token 不会连接。"))), "允许连接");
+            consent.CloseButtonText = UiStrings.T("仅保存本机");
+            consent.DefaultButton = ContentDialogButton.Close;
+            payload["authorize_teambition_mcp"] = await ShowDialogAsync(consent) == ContentDialogResult.Primary;
+        }
+        JsonObject result = await Worker.SendAsync("save", payload, progress);
         _state.Apply(result);
         _state.Apply(await Worker.SendAsync("initialize"));
         _savedAuto = _state.Flag("auto_send_enabled");

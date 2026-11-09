@@ -10,8 +10,8 @@ from desktop_app import DigestDesktopApp, verify_desktop_smoke
 _EXPECTED_TABS = (
     "账户与模型",
     "项目范围",
-    "成员映射",
-    "状态映射",
+    "高级：成员覆盖",
+    "高级：状态覆盖",
     "自动运行",
     "运行与诊断",
     "运行记录",

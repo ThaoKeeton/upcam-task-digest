@@ -50,6 +50,7 @@ public sealed partial class MainWindow
             Assert(_ready && Navigation.IsEnabled && PageHost.IsEnabled && SaveButton.IsEnabled,
                 "Compatible synthetic worker restores native operation state");
             ApplyGeneralAppearance();
+            await VerifyDiagnosticCancellationAsync();
             await VerifyGeneralSettingsAsync(output);
             await VerifyCollectionProgressControlsAsync();
             var titleBar = Find<TitleBar>("app-titlebar");
@@ -214,7 +215,7 @@ public sealed partial class MainWindow
                 var detailResult = await Worker.SendAsync("export_detailed_diagnostic_to_file", detailPayload);
                 string detailText = File.ReadAllText(detailPath);
                 Assert(detailResult["detailed_export"]?["saved"]?.GetValue<bool>() == true &&
-                    detailText.Contains("CI 虚构") && !detailText.Contains("synthetic-app-secret") &&
+                    detailText.Contains("CI 虚构") && !detailText.Contains("synthetic-mcp-token") &&
                     !detailText.Contains("synthetic-key-cannot-call-openai") && !detailText.Contains("access_token=synthetic-only"),
                     "Packaged worker exports synthetic project evidence without configured credentials");
                 Assert(detailResult["diagnostic_summary"]?["unknown_events_in_report_window"]?.GetValue<int>() == 0 &&
@@ -396,6 +397,40 @@ public sealed partial class MainWindow
         _smokeSteps.Add(description);
     }
 
+    private async Task VerifyDiagnosticCancellationAsync()
+    {
+        await _worker!.StopAsync();
+        _worker.Dispose();
+        var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "worker", "UPCAMWorker.exe"))
+        {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
+            RedirectStandardOutput = true, RedirectStandardError = true,
+            StandardInputEncoding = new System.Text.UTF8Encoding(false), StandardOutputEncoding = new System.Text.UTF8Encoding(false),
+            WorkingDirectory = AppContext.BaseDirectory
+        };
+        start.ArgumentList.Add("--smoke-test-slow-diagnostic");
+        _worker = new WorkerClient(start, TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(125), TimeSpan.FromMinutes(11));
+        ApplyInitializationResult(await _worker.SendAsync("initialize"));
+        Navigate("run");
+        await InvokeWhenReadyAsync("diagnose");
+        await WaitForAsync(() => _busy && CancelDiagnosticButton.Visibility == Visibility.Visible && StatusText.Text.Contains("1/3"));
+        Assert(!PageHost.IsEnabled && CancelDiagnosticButton.IsEnabled,
+            "Read-only diagnosis shows real numeric progress while the separate Cancel control stays enabled");
+        string earlierProgress = StatusText.Text;
+        await Task.Delay(1100);
+        Assert(StatusText.Text != earlierProgress && StatusText.Text.Contains("1/3"),
+            "Read-only diagnosis elapsed time advances while its worker is still busy");
+        Invoke(CancelDiagnosticButton);
+        await WaitForAsync(() => !_busy);
+        Assert(_ready && PageHost.IsEnabled && CancelDiagnosticButton.Visibility == Visibility.Collapsed && !_state.ExportAvailable,
+            "Cancel stops diagnosis, reopens a compatible worker and leaves no stale export");
+        Assert(_state.Output.Contains("已停止") && _state.History.Count == 0,
+            "Canceled read-only diagnosis is not replayed or converted into a digest run");
+        await InvokeWhenReadyAsync("diagnose");
+        await WaitForAsync(() => !_busy);
+        Assert(_state.ExportAvailable, "A fresh read-only diagnosis works after cancellation without restarting the app");
+    }
+
     private async Task VerifyCollectionProgressControlsAsync()
     {
         var savedBefore = await Worker.SendAsync("initialize");
@@ -404,6 +439,14 @@ public sealed partial class MainWindow
         Assert(batchSize.Header.ToString() == "每批采集任务数（1–700）" && batchSize.Value == 300 &&
             batchSize.Minimum == 1 && batchSize.Maximum == 700,
             "Native schedule exposes the legacy default as a bounded collection batch size");
+        var concurrent = Find<NumberBox>("task-concurrency")!;
+        Assert(concurrent.Header.ToString() == "并行读取任务数（1–4）" && concurrent.Value == 4 &&
+            concurrent.Minimum == 1 && concurrent.Maximum == 4,
+            "Native schedule exposes bounded task concurrency without increasing aggregate API rate");
+        concurrent.Value = 2.5;
+        await WaitForAsync(() => _state.Number("max_concurrent_tasks", 0) == 2 && concurrent.Value == 2);
+        concurrent.Value = 4;
+        await WaitForAsync(() => _state.Number("max_concurrent_tasks", 0) == 4);
         batchSize.Value = 700;
         await WaitForAsync(() => _state.Number("max_tasks_per_run", 0) == 700);
         _state.SetSecretDraft("openai_api_key", "ci-unsaved-cache-clear-draft");
@@ -628,7 +671,7 @@ public sealed partial class MainWindow
             const string suffix = "\"}}\n";
             int padding = length - System.Text.Encoding.UTF8.GetByteCount(prefix + suffix);
             byte[] bytes = System.Text.Encoding.UTF8.GetBytes(prefix + new string('x', padding) + suffix);
-            Task<string?> read = WorkerClient.ReadBoundedLineAsync(client);
+            Task<string?> read = new WorkerLineReader(client).ReadAsync(default);
             await server.WriteAsync(bytes);
             await server.FlushAsync();
             string? line = await read.WaitAsync(TimeSpan.FromSeconds(3));

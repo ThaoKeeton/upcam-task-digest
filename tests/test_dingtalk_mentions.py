@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from delivery_guard import DeliveryGuard, initialize_ledger
 from report_contract import SHANGHAI, updated_selection
+from upcam_app.secrets import teambition_mcp_identity, MCP_AUTHORIZATION_FIELD
 from upcam_app.config import DEFAULT_SETTINGS, SettingsError, SettingsStore, runtime_config, validate_settings
 from upcam_app.diagnostic_export import safe_structure_export
 from upcam_app.dingtalk import DingTalkSender
@@ -179,12 +180,13 @@ class MentionWorkflowTests(unittest.TestCase):
         self.collection = json.loads((fixture_dir / "collection.json").read_text(encoding="utf-8"))
         self.settings = deepcopy(DEFAULT_SETTINGS)
         self.settings.update(tenant_id="demo-org", project_id="demo-project", api_contract_verified=True,
-            view={"verified": True, "evidence": "synthetic-only", "task_equals": {}},
+            view={"verified": True, "evidence": "fictional-view-check", "task_equals": {}},
             owner_names={"demo-person": "虚构成员"}, status_names={"demo-done": "已解决", "demo-open": "待处理"},
             resolved_status_ids=["demo-done"])
-        self.secrets = {"teambition_app_id": "synthetic-app", "teambition_app_secret": "synthetic-secret",
+        self.secrets = {"teambition_mcp_token": "synthetic-secret",
             "dingtalk_webhook": WEBHOOK, "dingtalk_signing_secret": "synthetic-signing-secret",
             "openai_api_key": "synthetic-key", "delivery_ledger_id": initialize_ledger(self.directory / "delivery_ledger.sqlite3")}
+        self.secrets[MCP_AUTHORIZATION_FIELD] = teambition_mcp_identity(self.secrets)
         self.catalog = OpenAIModelCatalog(self.directory / "models.json",
             transport=lambda *_: b'{"data":[{"id":"gpt-6-luna"}]}')
         self.catalog.refresh(self.secrets["openai_api_key"])
@@ -301,8 +303,7 @@ class MentionWorkflowTests(unittest.TestCase):
 
 class MentionWorkerTests(unittest.TestCase):
     def test_saved_new_rotated_and_cleared_credentials_cannot_persist_as_plaintext_targets(self):
-        previous = {"dingtalk_signing_secret": "SEC_ci_previous_secret", "teambition_app_id": "ci-app-id",
-                    "teambition_app_secret": "ci-app-secret", "dingtalk_webhook": WEBHOOK}
+        previous = {"dingtalk_signing_secret": "SEC_ci_previous_secret", "teambition_mcp_token": "ci-app-secret", "dingtalk_webhook": WEBHOOK}
         cases = [
             ("SEC_ci_previous_secret", {}, []),
             ("SEC_ci_new_secret", {"dingtalk_signing_secret": "SEC_ci_new_secret"}, []),

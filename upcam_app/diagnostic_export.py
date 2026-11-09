@@ -14,7 +14,7 @@ from activity_adapter import (
     executor_change, standard_commit_candidate, unsafe_controls, stage_movement,
     standard_association_notification,
 )
-from report_contract import report_window, updated_selection
+from report_contract import report_window, validate_selection
 from teambition_readonly import CollectionError, identifier, validate_binding
 from . import APP_VERSION, RULESET_REVISION
 from .diagnostic_protocol import _counter_labels, action_fingerprint
@@ -460,7 +460,7 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
     # sendability do not change. Catalog/detail truncation stays explicit.
     diagnostic_records = sorted(records, key=lambda record: _task_diagnostic_priority(record, bounds))
     catalog = _protocol_catalog(diagnostic_records, bounds, total_events)
-    tasks, reasons = [], set()
+    tasks, detail_sources, reasons = [], [], set()
     metadata_bytes = detail_bytes = included_events = 0
     detail_budget_exhausted = False
     if len(records) > _MAX_TASKS:
@@ -507,28 +507,57 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
         metadata_bytes += metadata_cost
         if len(activities) > _MAX_ACTIVITIES_PER_TASK:
             reasons.add("activity_count_limit")
-        for activity in activities[:_MAX_ACTIVITIES_PER_TASK]:
+        tasks.append(shaped_task)
+        detail_sources.append((shaped_task, activities))
+
+    # Spend both the per-task count limit and the shared byte budget on window
+    # evidence (including unknown times) before historical background. Two
+    # passes avoid sorting/copying complete histories. Source records and order
+    # within each priority stay unchanged; missing scope makes all times unknown.
+    considered_counts = [0] * len(detail_sources)
+    for outside_window in (False, True):
+        if detail_budget_exhausted:
+            break
+        for index, (shaped_task, activities) in enumerate(detail_sources):
             if detail_budget_exhausted:
                 break
-            if not isinstance(activity, dict):
-                reasons.add("invalid_activity_record")
+            if considered_counts[index] >= _MAX_ACTIVITIES_PER_TASK:
                 continue
-            if detail_bytes >= _MAX_EVENT_DETAIL_BYTES:
-                detail_budget_exhausted = True
-                reasons.add("event_detail_byte_budget")
-                break
-            shaped = _activity_shape(activity, task_id, owner_names, status_names, bounds)
-            detail_cost = _embedded_json_cost(shaped, 4)
-            if detail_bytes + detail_cost > _MAX_EVENT_DETAIL_BYTES:
-                detail_budget_exhausted = True
-                reasons.add("event_detail_byte_budget")
-                break
-            detail_bytes += detail_cost
-            shaped_task["activities"].append(shaped)
-            included_events += 1
+            for activity in activities:
+                if considered_counts[index] >= _MAX_ACTIVITIES_PER_TASK:
+                    break
+                is_outside = (isinstance(activity, dict)
+                              and _in_report_window(activity.get("createTime"), bounds) is False)
+                if is_outside != outside_window:
+                    continue
+                considered_counts[index] += 1
+                if not isinstance(activity, dict):
+                    reasons.add("invalid_activity_record")
+                    continue
+                if detail_bytes >= _MAX_EVENT_DETAIL_BYTES:
+                    detail_budget_exhausted = True
+                    reasons.add("event_detail_byte_budget")
+                    break
+                shaped = _activity_shape(activity, shaped_task["task_id"], owner_names, status_names, bounds)
+                detail_cost = _embedded_json_cost(shaped, 4)
+                if detail_bytes + detail_cost > _MAX_EVENT_DETAIL_BYTES:
+                    detail_budget_exhausted = True
+                    reasons.add("event_detail_byte_budget")
+                    break
+                detail_bytes += detail_cost
+                shaped_task["activities"].append(shaped)
+                included_events += 1
+    for shaped_task, activities in detail_sources:
         shaped_task["truncated_activity_count"] = len(activities) - len(shaped_task["activities"])
         shaped_task["detail_truncated"] = shaped_task["truncated_activity_count"] > 0
-        tasks.append(shaped_task)
+    matches_selection = None
+    if bounds is not None and isinstance(collection, dict):
+        try:
+            validate_selection(collection.get("selection"), day, *bounds)
+        except (TypeError, ValueError):
+            matches_selection = False
+        else:
+            matches_selection = True
     result = {
         "format": "upcam-teambition-safe-shape-v5",
         "diagnostic": {
@@ -546,8 +575,7 @@ def safe_structure_export(collection: dict, config: dict, day=None, window=None)
         "pagination_complete": collection.get("pagination_complete") is True if isinstance(collection, dict) else False,
         "window_evaluation_available": bounds is not None,
         "selection_check": {
-            "matches_report_window": (collection.get("selection") == updated_selection(day, *bounds)
-                                       if bounds is not None and isinstance(collection, dict) else None),
+            "matches_report_window": matches_selection,
         },
         "task_count": len(records),
         "activity_count": total_events,

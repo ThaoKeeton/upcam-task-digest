@@ -87,7 +87,7 @@ class DiagnosticExportContextTests(unittest.TestCase):
             target = Path(directory) / (stem + ".json")
             service.dispatch({"op": "export_diagnostic_to_file", "payload": {**window, "path": str(target)}})
             self.assertEqual(json.loads(target.read_text(encoding="utf-8")), shape)
-            self.assertNotIn("synthetic-app-secret", target.read_text(encoding="utf-8"))
+            self.assertNotIn("synthetic-mcp-token", target.read_text(encoding="utf-8"))
 
     def test_changed_window_cannot_export_old_diagnostic_or_write_a_file(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -115,7 +115,7 @@ class DiagnosticExportContextTests(unittest.TestCase):
                     settings["view"]["task_equals"] = {"executorId": "demo-person"}
                 else:
                     credentials = service.secret_store.load()
-                    credentials["teambition_app_secret"] = "another-synthetic-secret"
+                    credentials["teambition_mcp_token"] = "another-synthetic-secret"
                     service.secret_store.save(credentials)
                 service.settings_store.save(settings)
                 with self.assertRaisesRegex(ValueError, "重新运行只读诊断"):
@@ -125,7 +125,7 @@ class DiagnosticExportContextTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             service, window, _ = self.prepare(directory)
             credentials = service.secret_store.load()
-            credentials.pop("teambition_app_secret")
+            credentials.pop("teambition_mcp_token")
             service.secret_store.save(credentials)
             with self.assertRaisesRegex(ValueError, "只读诊断需要"):
                 service.dispatch({"op": "diagnose", "payload": window})

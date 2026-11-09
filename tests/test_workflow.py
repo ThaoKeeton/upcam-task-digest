@@ -4,10 +4,13 @@ from datetime import datetime
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from urllib.parse import quote
 
 from delivery_guard import initialize_ledger
 from report_contract import SHANGHAI, updated_selection
 from upcam_app.config import DEFAULT_SETTINGS
+from upcam_app.secrets import teambition_mcp_identity, MCP_AUTHORIZATION_FIELD
 from upcam_app.openai_models import OpenAIModelCatalog
 from upcam_app.workflow import DigestWorkflow, WorkflowBlocked
 
@@ -15,9 +18,11 @@ from upcam_app.workflow import DigestWorkflow, WorkflowBlocked
 class FakeSummarizer:
     def __init__(self):
         self.calls = 0
+        self.inputs = []
 
     def summarize(self, _key, _model, _effort, rows, _rules, service_tier="default"):
         self.calls += 1
+        self.inputs.append(deepcopy((rows, _rules)))
         return {row["task_key"]: "虚构：已定位导出异常，仍待修复。" for row in rows}
 
 
@@ -69,13 +74,13 @@ class WorkflowTests(unittest.TestCase):
         })
         self.key = "synthetic-api-key-for-tests"
         self.secret = {
-            "teambition_app_id": "synthetic-app-id",
-            "teambition_app_secret": "synthetic-app-secret",
-            "dingtalk_webhook": "https://oapi.dingtalk.com/robot/send?access_token=synthetic",
+            "teambition_mcp_token": "synthetic-mcp-token",
+            "dingtalk_webhook": "https://oapi.dingtalk.com/robot/send?access_token=synthetic-webhook-access-token-for-tests",
             "dingtalk_signing_secret": "synthetic-signing-secret",
             "openai_api_key": self.key,
             "delivery_ledger_id": initialize_ledger(self.data_dir / "delivery_ledger.sqlite3"),
         }
+        self.secret[MCP_AUTHORIZATION_FIELD] = teambition_mcp_identity(self.secret)
         OpenAIModelCatalog(self.data_dir / "openai_models.json",
                            transport=lambda *_: b'{"data":[{"id":"gpt-6-luna"}]}').refresh(self.key)
         self.fake_client = None
@@ -109,6 +114,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.ding.calls[0][0], self.secret["dingtalk_webhook"])
         self.assertEqual(self.fake_client.calls[0][1]["day"], "2026-01-02")
         self.assertEqual(workflow.history.get(result["run_id"])["state"], "sent")
+        model_content = json.dumps(self.summarizer.inputs, ensure_ascii=False)
+        for credential in self.secret.values():
+            self.assertNotIn(credential, model_content)
 
     def test_duplicate_schedule_key_is_stopped_before_second_collection(self):
         workflow = self.workflow()
@@ -212,6 +220,123 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(runs[0]["state"], "blocked")
         self.assertIn("future.unknown.action", runs[0]["delivery_note"])
         self.assertNotIn("synthetic-private-payload", runs[0]["delivery_note"])
+
+    def assert_credential_blocked(self, workflow, *, model_calls=0):
+        with self.assertRaises(WorkflowBlocked) as raised:
+            workflow.run(datetime(2026, 1, 1, 16, 50, tzinfo=SHANGHAI),
+                         datetime(2026, 1, 2, 8, 50, tzinfo=SHANGHAI),
+                         schedule_key="2026-01-02:morning")
+        self.assertEqual(self.summarizer.calls, model_calls)
+        self.assertEqual(self.ding.calls, [])
+        runs = workflow.history.list_runs()
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["state"], "blocked")
+        persisted = json.dumps(workflow.history.get(runs[0]["run_id"]), ensure_ascii=False)
+        for value in self.secret.values():
+            self.assertNotIn(value, str(raised.exception))
+            self.assertNotIn(value, persisted)
+        self.assertNotIn("private-evidence-marker", persisted)
+
+    def test_credential_in_task_title_blocks_before_model_and_preserves_evidence(self):
+        self.collection["records"][0]["task"]["content"] = (
+            "private-evidence-marker " + self.secret["teambition_mcp_token"])
+        evidence = deepcopy(self.collection)
+        self.assert_credential_blocked(self.workflow())
+        self.assertEqual(self.collection, evidence)
+
+    def test_credential_in_comment_blocks_before_model(self):
+        comment = {"comment": "private-evidence-marker " + self.secret["openai_api_key"],
+                   "attachments": [], "dingFiles": [], "files": [], "renderMode": "text",
+                   "isOnlyNotifyMentions": False, "mentions": {}}
+        self.collection["records"][0]["activities"][0]["content"] = json.dumps(comment)
+        self.assert_credential_blocked(self.workflow())
+
+    def test_encoded_credential_in_unrendered_link_blocks_before_model(self):
+        token = self.secret["teambition_mcp_token"]
+        escaped = "".join("%{:02x}".format(byte) for byte in token.encode())
+        self.collection["records"][0]["task"]["url"] = "https://example.invalid/" + quote(escaped)
+        self.assert_credential_blocked(self.workflow())
+
+    def test_credential_in_discovered_owner_name_blocks_before_model(self):
+        self.collection["metadata"] = {
+            "owner_names": {"new-owner": self.secret["dingtalk_signing_secret"]}}
+        self.assert_credential_blocked(self.workflow())
+
+    def test_credential_in_saved_status_name_blocks_before_model(self):
+        self.settings["status_names"]["demo-open"] = self.secret["teambition_mcp_token"]
+        self.assert_credential_blocked(self.workflow())
+
+    def test_dingtalk_access_token_component_is_also_blocked(self):
+        self.secret["dingtalk_webhook"] = (
+            "https://oapi.dingtalk.com/robot/send?access_token=synthetic-robot-credential")
+        self.collection["records"][0]["task"]["content"] = "synthetic-robot-credential"
+        self.assert_credential_blocked(self.workflow())
+
+    def test_credential_in_model_editorial_rules_blocks_before_model(self):
+        with patch("automated_digest.load_editorial_rules",
+                   return_value=[self.secret["teambition_mcp_token"]]):
+            self.assert_credential_blocked(self.workflow())
+
+    def test_credential_in_model_output_blocks_before_history_draft_or_sender(self):
+        token = self.secret["teambition_mcp_token"]
+
+        class LeakingSummarizer(FakeSummarizer):
+            def summarize(self, *args, **kwargs):
+                result = super().summarize(*args, **kwargs)
+                return {key: "private-evidence-marker " + token for key in result}
+
+        self.summarizer = LeakingSummarizer()
+        self.assert_credential_blocked(self.workflow(), model_calls=1)
+
+    def test_credential_in_model_exception_is_not_returned_or_persisted(self):
+        from openai_summarizer import SummaryError
+        token = self.secret["teambition_mcp_token"]
+
+        class LeakingSummarizer(FakeSummarizer):
+            def summarize(self, *args, **kwargs):
+                super().summarize(*args, **kwargs)
+                raise SummaryError("private-evidence-marker " + token)
+
+        self.summarizer = LeakingSummarizer()
+        self.assert_credential_blocked(self.workflow(), model_calls=1)
+
+    def test_uninspectable_source_blocks_before_model(self):
+        self.collection["unrecognized_metadata"] = b"must-not-be-stringified"
+        self.assert_credential_blocked(self.workflow())
+
+    def test_credential_detection_failure_blocks_before_model(self):
+        self.secret["github_update_token"] = "x" * (129 * 1024)
+        self.assert_credential_blocked(self.workflow())
+
+    def test_credential_in_final_markdown_blocks_even_without_model(self):
+        from automated_digest import build_automated_digest
+        self.collection["records"] = []
+
+        def unsafe_render(*args, **kwargs):
+            report = build_automated_digest(*args, **kwargs)
+            report["markdown"] += self.secret["teambition_mcp_token"]
+            return report
+
+        with patch("upcam_app.workflow.build_automated_digest", side_effect=unsafe_render):
+            self.assert_credential_blocked(self.workflow())
+
+    def test_actual_send_callback_checks_markdown_again(self):
+        self.collection["records"] = []
+        token = self.secret["teambition_mcp_token"]
+
+        class ChangedMarkdownGuard:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def attempt(self, report, *, send, **kwargs):
+                send(report["markdown"] + token)
+
+            def close(self):
+                pass
+
+        workflow = self.workflow()
+        workflow.guard_factory = ChangedMarkdownGuard
+        self.assert_credential_blocked(workflow)
 
 
 if __name__ == "__main__":

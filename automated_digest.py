@@ -90,7 +90,7 @@ _GLOBAL_SOURCE_ISSUES = {
     "项目范围尚未核验": "项目范围尚未核验：打开“项目映射与范围”，完成只读验证并确认当前 Project ID、归档选项和筛选条件，然后保存。",
     "API 字段及事件规则尚未核验": "Teambition 字段尚未核验：在“项目映射与范围”选择含真实任务动态的时间窗，完成只读验证并保存。",
     "任务当前更新时间筛选口径尚未核验": "采集方式仍是旧版任务更新时间筛选；请用新版重新只读采集，不能直接发送旧数据。",
-    "项目动态时间窗采集口径尚未核验": "任务动态采集范围未核验：请用新版按当前项目完整翻页读取任务和动态，再执行只读诊断。",
+    "项目动态时间窗采集口径尚未核验": "任务动态采集范围未核验：请用新版完整翻页读取候选任务和动态，再执行只读诊断。",
 }
 
 _COLLECTION_ERROR_MESSAGES = {
@@ -100,7 +100,7 @@ _COLLECTION_ERROR_MESSAGES = {
     "View evidence must be a string": "本机项目范围验证记录无效；重新执行只读项目验证并保存。",
     "View equality values must be strings": "项目筛选条件值无效；核对字段 ID/值后重新保存。",
     "Cannot render incomplete collection": "Teambition 分页不完整；未调用 OpenAI、未发送钉钉。检查项目权限和查询范围后，重新采集并确认完整翻页。",
-    "Pagination limit exceeded; incomplete collection": "Teambition 查询超过分页上限，结果不完整；请检查项目任务及历史动态量。仅缩短日报时间窗不会减少基础扫描量，未发送部分结果。",
+    "Pagination limit exceeded; incomplete collection": "Teambition 查询超过分页上限，结果不完整；请检查候选任务及其历史动态量，未发送部分结果。",
     "Invalid or repeated pagination token": "Teambition 分页标记无效或重复，结果不完整；稍后重新只读检查。",
     "Collection source differs from configuration": "返回的企业或 Project ID 与本机配置不一致；检查 Tenant ID、Project ID 后重新验证。",
     "Unsupported activity schema override": "任务动态字段配置不受当前仓库规则支持；恢复仓库默认 createTime/action 字段并重新验证。",
@@ -126,7 +126,7 @@ _COLLECTION_ERROR_MESSAGES = {
     "Detail identity or project mismatch": "任务详情 ID 或 Project ID 与查询结果不一致；停止发送并核对项目权限和接口响应。",
     "Invalid page size": "本机分页参数无效；恢复仓库默认设置后重新只读诊断。",
     "Collection record budget exhausted": "Teambition 返回的任务与动态总记录超过 50,000 条的硬上限；为保护本机资源，结果未完成，不能发送。",
-    "Task selection exceeds bounded collection budget": "项目任务查询达到数量安全上限；新版桌面分批采集最多支持 10,000 个任务，每批大小不是项目总量上限。不能用缩短时间窗或增大每批任务数绕过整次上限；本次不发送部分结果。",
+    "Task selection exceeds bounded collection budget": "任务查询达到数量安全上限；桌面分批采集单次最多支持 10,000 个候选，每批大小不是单次总量上限。本次不发送部分结果。",
     "Collection session budget exhausted": "本次采集会话的累计资源预算已耗尽；已停止摘要和发送。可查看保存的进度，确认需要重新采集后清除未完成进度；该操作不清除发送账本。",
     "Collection session request budget exhausted": "本次采集会话已达到 50,000 次请求尝试的安全上限，含重试及未确认响应的预留额度；未发送部分结果。",
     "Collection session record budget exhausted": "本次采集会话已达到 1,000,000 条记录预算，重复、详情、重读和未确认响应的预留额度均计入；未发送部分结果。",
@@ -137,7 +137,8 @@ _COLLECTION_ERROR_MESSAGES = {
     "Wait would exceed collection session time budget": "继续等待将超过本次采集会话两小时上限；已停止后续摘要和发送。",
     "Collection reconciliation limit exhausted": "本次会话已用完三轮来源核对，尚未确认完整一致范围；未发送日报。请待项目变化较少时重新采集。",
     "Project changed during collection; reconciliation limit exhausted": "项目任务或版本持续变化，三轮重读核对后仍未稳定；保留可核验进度，停止摘要和发送。",
-    "Project scan exceeds a single collection batch": "完整项目列表无法在单批资源预算内读取；未接受缺页列表，也未发送日报。请检查网络、项目返回数据量和批次设置。",
+    "Project scan exceeds a single collection batch": "任务列表无法在单批资源预算内读取；未接受缺页列表，也未发送日报。请检查网络、返回数据量和批次设置。",
+    "Server returned task outside requested updated candidate range": "Teambition 返回了更新时间早于筛选下界的任务，无法确认服务端筛选生效。已停止采集，未退回全项目扫描；请检查接口。",
     "Task exceeds a single collection batch": "有任务的全部动态无法在单批资源预算内读取；该任务没有按部分结果缓存，未调用模型或发送日报。",
     "Incomplete project scan": "项目任务列表未完成全部分页，不能恢复为可发送来源；请重新只读采集。",
     "Local collection checkpoint is unavailable": "本机加密采集进度无法安全使用；请检查磁盘空间及是否有其他采集进程，确认没有正在采集后可清除未完成进度并重试。配置和发送账本不受影响。",
@@ -148,10 +149,11 @@ _COLLECTION_ERROR_MESSAGES = {
     "Invalid complete task checkpoint": "缓存任务的完整性、身份或绑定无法核验，已停止后续摘要和发送；请清除未完成进度后重采。",
     "Invalid complete task checkpoint version": "缓存任务的版本与候选任务不一致，不能继续复用；请清除未完成进度后重新只读采集。",
     "Conflicting checkpoint activity identity": "缓存内同一动态 ID 存在内容冲突，未发送日报；请清除未完成进度并核对接口后重采。",
-    "Missing or invalid collection credentials": "Teambition App 凭据缺失或格式无效；请在本机保存 App ID 和 App Secret 后重新只读采集。",
+    "Missing or invalid collection credentials": "Teambition MCP 凭据缺失或格式无效；请在本机保存个人 Token 后重新只读采集。",
+    "Teambition MCP authorization expired or denied": "Teambition MCP 授权失效或项目权限不足；请在本机重新配置个人 Token，并确认项目读取权限。未调用 OpenAI，未发送钉钉。",
     "Invalid batch collection policy": "本机分批采集预算设置无效；请恢复本版支持的每批任务数并保存。",
     "Invalid collection JSON": "采集或进度数据不是受支持的标准 JSON；已停止后续摘要和发送，请重新只读诊断。",
-    "Collection request budget exhausted": "Teambition 分页和详情请求达到本机请求预算，结果不完整，不能发送。本版扫描当前项目任务及其历史动态，仅缩短日报时间窗不能保证减少请求；需要减少实际项目范围或改进受支持的采集策略。",
+    "Collection request budget exhausted": "Teambition 分页和详情请求达到本机请求预算，结果不完整，不能发送。候选任务的全部历史动态仍需分页读取，缩短窗口不保证减少请求。",
     "Collection response byte budget exhausted": "本次 Teambition 响应数据总量超过 128 MiB 的硬上限；结果不完整，不能发送。",
     "Unexpected HTTP status": "Teambition API 返回了未预期的 HTTP 状态；检查凭据、读取权限或稍后重试。",
     "Missing or conflicting record identity": "任务或动态缺少唯一 ID 或同一对象的 ID 字段互相冲突；核对 API 字段后再运行。",
@@ -160,6 +162,7 @@ _COLLECTION_ERROR_MESSAGES = {
     "Comment evidence exceeds review size budget": "评论动态超过本机安全读取上限；未调用 OpenAI、未发送钉钉。需要先核对该动态结构及仓库规则。",
     "HTTP request rejected": "Teambition 只读请求失败；检查网络、App 凭据及项目读取权限。没有发送日报。",
     "API rejected request or malformed envelope": "Teambition API 拒绝请求或返回结构不完整；检查凭据、权限和接口状态。没有发送日报。",
+    "Collection cancelled": "本次采集已取消，未生成或发送不完整结果。",
     "GET retry budget exhausted": "Teambition 只读请求多次失败；检查网络和项目权限后再试。",
     "Collection time budget exhausted": "Teambition 查询超过本机时间上限，采集不完整；请检查网络及项目任务和历史动态量后重新只读诊断。",
     "Response size limit exceeded": "Teambition 单页响应超过本机读取上限，采集不完整；请检查接口分页及历史动态量后重新只读诊断。",
@@ -510,10 +513,16 @@ def diagnose_automatic_source(collection: dict, config: dict, day, window=None) 
         return {"ok": False, "message": str(exc), "task_count": None}
     except (CollectionError, ValueError, TypeError, KeyError) as exc:
         return {"ok": False, "message": collection_validation_message(exc), "task_count": None}
+    prefiltered = collection.get("selection", {}).get("candidate_scope") == "current-visible-project-tasks-updated-since"
+    task_scope = (f"读取 {len(collection.get('records', []))} 个候选任务" if prefiltered else
+                  f"扫描当前项目范围内 {len(collection.get('records', []))} 个可读任务")
+    candidate_notice = ("已按任务更新时间预选，未推进更新时间的旧任务动态可能漏采；"
+                        "可用“详细诊断导出…”进行全量复核。" if prefiltered else "")
     return {"ok": True,
-            "message": (f"只读校验通过：扫描当前项目范围内 {len(collection.get('records', []))} 个可读任务，"
+            "message": (f"只读校验通过：{task_scope}，"
                         f"其中 {len(base.get('digest', {}).get('tasks', []))} 个任务有窗口内动态；"
                         "本地字段、动态时间窗、成员/状态映射及动态规则通过。"
+                        f"{candidate_notice}"
                         "已完成接口分页；不代表已删除、已不可见任务或历史项目成员关系的完整快照。"
                         "未调用 OpenAI，未发送钉钉。"),
             "task_count": len(base.get("digest", {}).get("tasks", []))}

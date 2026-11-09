@@ -51,6 +51,7 @@ _SCOPE_FIELDS = frozenset({
 _SELECTION_FIELDS = frozenset({
     "mode", "view_equivalent", "date", "start", "end_exclusive", "q", "basis",
     "historical_event_coverage", "snapshot_guaranteed", "candidate_scope", "window_kind",
+    "candidate_updated_since", "candidate_overlap_seconds", "activity_updated_index_guaranteed",
 })
 _DIAGNOSTIC_FIELDS = frozenset({
     "id", "created_at_utc", "application_version", "ruleset_revision", "capabilities",

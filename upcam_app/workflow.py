@@ -11,17 +11,19 @@ from automated_digest import (
 )
 from delivery_guard import DeliveryBlocked, DeliveryGuard, validate_manual_delivery_options
 from digest_pipeline import validate_view
+from openai_summarizer import OpenAIResponsesClient
 from report_contract import SHANGHAI
-from runtime_mappings import validate_mappings
+from runtime_mappings import validate_mappings, merge_discovered
 from teambition_readonly import Client, CollectionError
 
 from .dingtalk import DingTalkSender
 from .dingtalk_mentions import MentionConfigError, mention_options, reject_credential_mentions
 from .history import HistoryError, HistoryStore
 from .openai_models import ModelCatalogError, OpenAIModelCatalog, cache_matches_key
-from .secrets import SECRET_FIELDS, INTERNAL_SECRET_FIELDS
+from .secrets import SECRET_FIELDS, INTERNAL_SECRET_FIELDS, mcp_connection_authorized
 from .config import runtime_config, user_data_dir
 from .collection_runtime import make_collection_client
+from .report_credentials import CredentialExposureBlocked, GuardedSummarizer, ReportCredentialGuard
 
 
 class WorkflowBlocked(RuntimeError):
@@ -73,8 +75,7 @@ class DigestWorkflow:
         missing = [name for name in required if not self.secrets.get(name)]
         if missing:
             labels = {
-                "teambition_app_id": "Teambition App ID",
-                "teambition_app_secret": "Teambition App Secret",
+                "teambition_mcp_token": "Teambition MCP personal Token",
                 "dingtalk_webhook": "DingTalk webhook",
                 "dingtalk_signing_secret": "DingTalk signing secret",
                 "openai_api_key": "OpenAI API Key",
@@ -83,12 +84,22 @@ class DigestWorkflow:
             human_labels = [labels.get(name, "required credential") for name in missing]
             raise WorkflowBlocked("Missing local configuration: " + ", ".join(human_labels))
 
+        if not mcp_connection_authorized(self.secrets):
+            raise WorkflowBlocked("请先在账户页保存并确认授权本机连接 Teambition 官方 MCP；仅保存 Token 不会授权连接。")
+
         start_shanghai = start_local.astimezone(SHANGHAI)
         end_shanghai = end_local.astimezone(SHANGHAI)
         report_day = end_shanghai.date().isoformat()
         window = (start_shanghai, end_shanghai)
         if schedule_key and any(run.get("schedule_key") == schedule_key for run in self.history.list_runs(1000)):
             raise WorkflowBlocked("This scheduled run slot already has a local history record")
+
+        try:
+            credential_guard = ReportCredentialGuard(self.secrets)
+            credential_guard.require_safe(self.settings)
+        except CredentialExposureBlocked as exc:
+            self._record_blocked_attempt(start_local, end_local, schedule_key, str(exc))
+            raise WorkflowBlocked(str(exc)) from None
 
         try:
             client = make_collection_client(
@@ -99,6 +110,12 @@ class DigestWorkflow:
                 config["project_id"], include_archived=config["include_archived"],
                 day=report_day, window=window,
             )
+            credential_guard.require_safe(collection)
+            config = merge_discovered(config, collection.get("metadata", {}))
+            credential_guard.require_safe(config)
+        except CredentialExposureBlocked as exc:
+            self._record_blocked_attempt(start_local, end_local, schedule_key, str(exc))
+            raise WorkflowBlocked(str(exc)) from None
         except CollectionError as exc:
             message = collection_validation_message(exc)
             self._record_blocked_attempt(start_local, end_local, schedule_key, message)
@@ -137,8 +154,15 @@ class DigestWorkflow:
         try:
             report = build_automated_digest(
                 collection, config, report_day, api_key, model, effort,
-                client=self.summarizer, window=window, service_tier=service_tier,
+                client=GuardedSummarizer(self.summarizer or OpenAIResponsesClient(), credential_guard),
+                window=window, service_tier=service_tier,
             )
+            # Inspect before a draft is persisted, including provenance and any
+            # future fields as well as the final rendered message.
+            credential_guard.require_safe(report)
+        except CredentialExposureBlocked as exc:
+            self._record_blocked_attempt(start_local, end_local, schedule_key, str(exc))
+            raise WorkflowBlocked(str(exc)) from None
         except AutomatedDigestBlocked as exc:
             self._record_blocked_attempt(start_local, end_local, schedule_key, str(exc))
             raise WorkflowBlocked(str(exc)) from None
@@ -161,6 +185,15 @@ class DigestWorkflow:
 
         guard = None
         try:
+            def send_checked(markdown):
+                # Recheck the exact callback argument immediately before the
+                # transport. No assumption that the rendered value stayed fixed.
+                credential_guard.require_safe(markdown)
+                credential_guard.require_safe(dict(sender_options))
+                return self.ding_sender.send_markdown(
+                    self.secrets["dingtalk_webhook"], self.secrets["dingtalk_signing_secret"], markdown,
+                    **sender_options)
+
             guard = self.guard_factory(
                 self.data_dir / "delivery_ledger.sqlite3",
                 self.secrets["delivery_ledger_id"],
@@ -169,9 +202,7 @@ class DigestWorkflow:
             guard.attempt(
                 report, tenant=config["tenant_id"], project=config["project_id"],
                 destination=self.secrets["dingtalk_webhook"],
-                send=lambda markdown: self.ding_sender.send_markdown(
-                    self.secrets["dingtalk_webhook"], self.secrets["dingtalk_signing_secret"], markdown,
-                    **sender_options),
+                send=send_checked,
                 current_collection=collection, current_config=config,
                 current_model=model, current_effort=effort, current_service_tier=service_tier,
                 allow_confirmed_repeat=allow_confirmed_repeat, manual_request_id=manual_request_id,

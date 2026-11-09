@@ -30,9 +30,9 @@ function Write-PackageInventory {
     $metadata = @{
         schemaVersion = 1
         pluginId = $Id
-        pluginVersion = '0.1.0'
+        pluginVersion = '0.1.1'
         sourceCommit = $sourceCommit
-        backendVersion = '0.4.3'
+        backendVersion = '0.4.6'
         protocolVersion = 1
         hostReferenceCommit = 'd2005d469aef6a385c134b6914fb6dfa9cff20b2'
         minimumHostVersion = '0.2.0'
@@ -76,7 +76,7 @@ function Build-Package {
     Copy-Item -LiteralPath (Join-Path $repo 'THIRD_PARTY_NOTICES.md') -Destination $package
     Copy-Item -LiteralPath (Join-Path $repo 'LICENSES') -Destination $package -Recurse
     Write-PackageInventory -Directory $package -Id $Id -Synthetic $Synthetic
-    $archive = Join-Path $outputRoot "UPCAMTaskDigest-workbench-$flavor-0.1.0-win-x64.zip"
+    $archive = Join-Path $outputRoot "UPCAMTaskDigest-workbench-$flavor-0.1.1-win-x64.zip"
     Compress-Archive -LiteralPath $package -DestinationPath $archive
     $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash  $([IO.Path]::GetFileName($archive))" | Set-Content -LiteralPath "$archive.sha256" -Encoding utf8NoBOM

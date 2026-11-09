@@ -102,6 +102,10 @@ def status_transition(content, config):
                 or names[target] != data['taskflowstatus']
                 or names[previous] != data['oldTaskflowstatus']):
             return None
+        known = config.get('status_resolution_known')
+        if known is not None and (not isinstance(known, list)
+                                  or target not in known or previous not in known):
+            return None
         resolved_ids = config.get('resolved_status_ids', [])
         resolved = target in resolved_ids
         previous_resolved = previous in resolved_ids

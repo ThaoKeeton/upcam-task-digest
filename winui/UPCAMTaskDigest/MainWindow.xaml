@@ -7,7 +7,7 @@
   <Window.SystemBackdrop><MicaBackdrop /></Window.SystemBackdrop>
   <Grid x:Name="RootGrid" RequestedTheme="Default" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
     <Grid.RowDefinitions><RowDefinition Height="48" /><RowDefinition Height="*" /></Grid.RowDefinitions>
-    <TitleBar x:Name="AppTitleBar" Title="UPCAM 站会日报"
+    <TitleBar x:Name="AppTitleBar" Title="UPCAM · Teambition 工作助手"
         AutomationProperties.AutomationId="app-titlebar"
         Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
         IsPaneToggleButtonVisible="True" PaneToggleRequested="TitleBar_PaneToggleRequested">
@@ -35,8 +35,6 @@
         <NavigationViewItemHeader Content="配置" />
         <NavigationViewItem Content="账户与模型" Tag="accounts" Icon="Contact" />
         <NavigationViewItem Content="项目范围" Tag="project" Icon="Folder" />
-        <NavigationViewItem Content="成员映射" Tag="members" Icon="People" />
-        <NavigationViewItem Content="状态映射" Tag="statuses" Icon="Flag" />
         <NavigationViewItem Content="自动运行" Tag="schedule" Icon="Clock" />
         <NavigationViewItemSeparator />
         <NavigationViewItem Content="运行与诊断" Tag="run" Icon="Play" />
@@ -62,10 +60,12 @@
             HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" />
         <Border Grid.Row="2" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,1,0,0" Padding="0,12,0,0">
           <Grid ColumnSpacing="10">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
             <ProgressRing x:Name="BusyRing" Width="18" Height="18" IsActive="False" Visibility="Collapsed" />
             <TextBlock x:Name="StatusText" Grid.Column="1" Text="正在读取本机配置…" TextWrapping="Wrap" MaxLines="2"
                 Foreground="{ThemeResource TextFillColorSecondaryBrush}" AutomationProperties.LiveSetting="Polite" />
+            <Button x:Name="CancelDiagnosticButton" Grid.Column="2" Content="停止诊断" Visibility="Collapsed"
+                AutomationProperties.AutomationId="cancel-diagnostic" Click="CancelDiagnostic_Click" />
           </Grid>
         </Border>
       </Grid>

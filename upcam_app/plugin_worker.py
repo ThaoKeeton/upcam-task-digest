@@ -22,7 +22,7 @@ from urllib.parse import parse_qsl, urlsplit
 from . import APP_VERSION, RULESET_REVISION
 from .config import DEFAULT_SETTINGS, SettingsError, SettingsStore, atomic_write, validate_settings
 from .preferences import PREFERENCE_DEFAULTS, preference_values
-from .secrets import INTERNAL_SECRET_FIELDS, SECRET_FIELDS, MemorySecretStore, SecretStoreError
+from .secrets import INTERNAL_SECRET_FIELDS, SECRET_FIELDS, MemorySecretStore, SecretStoreError, teambition_mcp_identity, MCP_AUTHORIZATION_FIELD
 from .windows_integration import StartupIntegrationError
 from .worker_api import WorkerApiError, WorkerService, _reject_duplicate_json_keys
 
@@ -364,7 +364,8 @@ class _SyntheticSecretStore(MemorySecretStore):
         self.marker = marker
         fixture = json.loads(marker.read_text(encoding="utf-8"))
         self.values = {
-            "teambition_app_id": "synthetic-app-id", "teambition_app_secret": "synthetic-app-secret",
+            "teambition_mcp_token": "synthetic-mcp-token",
+            MCP_AUTHORIZATION_FIELD: teambition_mcp_identity({"teambition_mcp_token": "synthetic-mcp-token"}),
             "openai_api_key": "synthetic-key-cannot-call-openai",
             "dingtalk_webhook": "https://oapi.dingtalk.com/robot/send?access_token=synthetic-only",
             "dingtalk_signing_secret": "synthetic-only",

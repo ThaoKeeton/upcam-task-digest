@@ -11,6 +11,7 @@ internal sealed class DesktopState
     public JsonArray Models { get; set; } = new();
     public JsonArray FastModels { get; set; } = new();
     public JsonArray History { get; set; } = new();
+    public JsonArray ProjectChoices { get; set; } = new();
     public Dictionary<string, string> SecretDrafts { get; } = new();
     internal static readonly string[] GeneralKeys = { "ui_language", "ui_theme", "tray_icon_enabled",
         "close_to_tray", "start_in_tray", "auto_check_updates", "start_with_windows" };
@@ -83,7 +84,7 @@ internal sealed class DesktopState
             InvalidateDiagnostic();
         }
         Dirty = true;
-        if (key is "owner_names" or "status_names" or "resolved_status_ids" or "max_tasks_per_run"
+        if (key is "owner_names" or "status_names" or "resolved_status_ids" or "max_tasks_per_run" or "max_concurrent_tasks"
             or "dingtalk_mention_mode" or "dingtalk_mentions")
             InvalidateDiagnostic();
         if (key is "tenant_id" or "project_id" or "include_archived") InvalidateScope();
@@ -101,7 +102,11 @@ internal sealed class DesktopState
     public void SetSecretDraft(string key, string value)
     {
         SecretDrafts[key] = value;
-        if (!string.IsNullOrEmpty(value) && (key is "teambition_app_id" or "teambition_app_secret")) InvalidateScope();
+        if (!string.IsNullOrEmpty(value) && key == "teambition_mcp_token")
+        {
+            ProjectChoices.Clear();
+            InvalidateScope();
+        }
     }
 
     private void InvalidateScope()
@@ -146,6 +151,7 @@ internal sealed class DesktopState
         if (result["models"] is JsonArray) ApplyModels(result);
         if (result["history"] is JsonArray history) History = (JsonArray)history.DeepClone();
         SecretDrafts.Clear();
+        ProjectChoices.Clear();
         Dirty = false;
     }
 
