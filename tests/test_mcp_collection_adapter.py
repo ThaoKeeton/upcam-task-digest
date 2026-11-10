@@ -128,7 +128,35 @@ class MCPCollectionAdapterTests(unittest.TestCase):
         client, transport = self.make(response)
         self.assertEqual(client.projects(project_id='fictional-project'), [project()])
         self.assertEqual(transport.calls, [('teambition.project.query', {
-            'projectId': 'fictional-project', 'pageSize': 100})])
+            'projectId': 'fictional-project'})])
+
+    def test_specific_project_request_omits_all_pagination_arguments(self):
+        response = {'fictionalSuccess': True, 'result': [project()]}
+        client, transport = self.make(response)
+        self.assertEqual(client.project_page(project_id='fictional-project', page_size=25), response)
+        self.assertEqual(transport.calls, [('teambition.project.query', {'projectId': 'fictional-project'})])
+
+    def test_specific_project_response_cannot_contain_multiple_rows(self):
+        for rows in ([project(), project()], [project(), project(id='fictional-other')]):
+            with self.subTest(rows=len(rows)):
+                client, transport = self.make(page(rows))
+                with self.assertRaisesRegex(CollectionError, 'Invalid or incomplete MCP page envelope'):
+                    client.project_page(project_id='fictional-project', page_size=100)
+                self.assertEqual(len(transport.calls), 1)
+
+    def test_specific_project_rejects_explicit_cursor_before_network(self):
+        for cursor in ('', 'opaque'):
+            with self.subTest(cursor=cursor):
+                client, transport = self.make(page([project()]))
+                with self.assertRaises(CollectionError):
+                    client.project_page(project_id='fictional-project', page_token=cursor)
+                self.assertEqual(transport.calls, [])
+
+    def test_specific_project_unexpected_cursor_is_not_silently_followed(self):
+        client, transport = self.make(page([project()], 'unexpected'))
+        with self.assertRaises(CollectionError):
+            client.projects(project_id='fictional-project')
+        self.assertEqual(len(transport.calls), 1)
 
     def test_unresolved_project_prefix_is_preserved_without_guessing(self):
         missing = project(); missing.pop('uniqueIdPrefix')
@@ -178,7 +206,7 @@ class MCPCollectionAdapterTests(unittest.TestCase):
         client, transport = self.make(page([project()]))
         self.assertEqual(client.project_page(project_id='fictional-project'), page([project()]))
         self.assertEqual(transport.calls, [('teambition.project.query', {
-            'projectId': 'fictional-project', 'pageSize': 100})])
+            'projectId': 'fictional-project'})])
 
     def test_tasks_use_lower_bound_only_and_enriched_readonly_tool(self):
         client, transport = self.make(page([task()]))

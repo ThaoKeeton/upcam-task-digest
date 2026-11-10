@@ -48,7 +48,7 @@ class FictionalMcpServer:
                       'serverInfo': {'name': 'fictional', 'version': '1'}}
         elif method == 'tools/list':
             defs = {
-                'teambition.project.query': schema({'my': 'boolean', 'pageSize': 'integer',
+                'teambition.project.query': schema({'projectId': 'string', 'my': 'boolean', 'pageSize': 'integer',
                     'pageToken': 'string', 'sort': 'string', 'includeArchived': 'boolean'}, []),
                 'teambition.project.task-query': schema({'projectId': 'string', 'tql': 'string',
                     'pageSize': 'integer', 'pageToken': 'string', 'enrichFields': 'string',
@@ -64,8 +64,12 @@ class FictionalMcpServer:
         elif method == 'tools/call':
             name, args = params['name'], params['arguments']
             if name == 'teambition.project.query':
-                assert args['my'] is True and args['includeArchived'] is False
-                assert args['sort'] == 'updated:desc'
+                if 'projectId' in args:
+                    # Simulate the documented ID mode: no pagination arguments.
+                    assert args == {'projectId': 'p1'}
+                else:
+                    assert args['my'] is True and args['includeArchived'] is False
+                    assert args['sort'] == 'updated:desc'
                 body = {'requestId': 'fictional-request', 'result': [self.project]}
             elif name == 'teambition.project.task-query':
                 assert args['projectId'] == 'p1' and args['enrichFields'] == 'tfs,members'
@@ -121,6 +125,27 @@ class FullOfflineMcpTests(unittest.TestCase):
         calls = [params for method, params in server.calls if method == 'tools/call']
         self.assertEqual(len(calls), 2)
         self.assertNotEqual(calls[0]['arguments']['pageSize'], calls[1]['arguments']['pageSize'])
+
+    def test_single_project_uses_no_pagination_through_real_transport_and_budget(self):
+        server, clock = FictionalMcpServer(), FakeClock()
+        client = Client('o1', credentials=lambda: 'fictional-token', transport=server,
+                        clock=clock, sleep=clock.sleep, max_records=1)
+        self.assertEqual(client._mcp().projects(project_id='p1'), [server.project])
+        calls = [params for method, params in server.calls if method == 'tools/call']
+        self.assertEqual(calls[0]['arguments'], {'projectId': 'p1'})
+        self.assertEqual(client.record_count, 1)
+
+    def test_single_project_does_not_gain_page_size_with_shared_budget(self):
+        from collection_batches import BatchPolicy, SessionBudget, _counters
+        server, clock = FictionalMcpServer(), FakeClock()
+        budget = SessionBudget(BatchPolicy(max_records=1), _counters(),
+                               created_at=clock(), now=clock(), clock=clock, save=lambda _: None)
+        client = Client('o1', credentials=lambda: 'fictional-token', transport=server,
+                        clock=clock, sleep=clock.sleep, max_records=1, shared_budget=budget)
+        self.assertEqual(client._mcp().projects(project_id='p1'), [server.project])
+        calls = [params for method, params in server.calls if method == 'tools/call']
+        self.assertEqual(calls[0]['arguments'], {'projectId': 'p1'})
+        self.assertEqual(budget.counters['records'], 1)
 
     def test_production_validators_cover_verified_synthetic_tool_shapes(self):
         server = FictionalMcpServer()

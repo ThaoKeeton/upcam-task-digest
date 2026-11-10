@@ -275,15 +275,26 @@ class MCPCollectionAdapter:
                 self._metadata = metadata
 
     def project_page(self, project_id=None, *, page_size=100, page_token=None):
-        arguments = _page_arguments(page_size, page_token)
         if project_id is None:
+            arguments = _page_arguments(page_size, page_token)
             arguments.update(my=True, includeArchived=False, sort='updated:desc')
+            maximum_rows = page_size
         else:
-            arguments['projectId'] = identifier(project_id)
-        return self._call('teambition.project.query', arguments,
-                          lambda data: self._check_page(data, page_size,
-                              lambda row: self._check_project(row, project_id),
-                              allow_missing_token=True, reject_duplicates=True))
+            # A project-ID lookup is a single-record query, not a pageable
+            # ``my``/TQL listing. Do not transmit paging parameters in this mode.
+            _page_arguments(page_size, None)  # Keep validating the public argument.
+            if page_token is not None:
+                raise CollectionError('Project ID lookup does not support pagination')
+            arguments = {'projectId': identifier(project_id)}
+            maximum_rows = 1
+
+        def check(data):
+            self._check_page(data, maximum_rows, lambda row: self._check_project(row, project_id),
+                             allow_missing_token=True, reject_duplicates=True)
+            if project_id is not None and data.get('nextPageToken') not in (None, ''):
+                raise CollectionError('Unexpected cursor in project ID lookup')
+
+        return self._call('teambition.project.query', arguments, check)
 
     def task_page(self, project_id, *, updated_since=None, include_archived=False,
                   page_size=100, page_token=None):
@@ -377,7 +388,8 @@ class MCPCollectionAdapter:
         ``max_records``. A missing project cursor is only a candidate endpoint:
         a second page-size scan must return the same IDs and raw content, with
         no duplicate IDs within either scan. Even agreement is not a snapshot.
-        Explicit project-ID lookups use one bounded scan, not the ``my`` list.
+        Explicit project-ID lookups use one non-pageable request; an unexpected
+        cursor fails rather than being interpreted or followed.
         """
         first = self._complete_pages(lambda token:
             self.project_page(project_id, page_size=page_size, page_token=token),
