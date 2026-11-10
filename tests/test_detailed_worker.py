@@ -183,7 +183,7 @@ class DetailedWorkerTests(unittest.TestCase):
             result = service.dispatch({"op": "export_detailed_diagnostic_to_file", "payload": {
                 **window, "path": str(target), "include_project_content": True}})
             self.assertEqual(len(calls), 1)
-            self.assertFalse(result["ok"])  # Unsupported source remains blocked.
+            self.assertTrue(result["ok"])  # Unknown activity semantics belong to the model.
             self.assertTrue(result["detailed_export"]["saved"])
             self.assertTrue(result["export_available"])
             raw = target.read_text(encoding="utf-8")

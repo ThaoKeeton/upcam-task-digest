@@ -86,6 +86,37 @@ public sealed partial class MainWindow
             _state.ManualStart = DateTime.Now.AddHours(-2).ToString("yyyy-MM-dd HH:mm");
             _state.ManualEnd = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
             Navigate("accounts");
+            await WaitForAsync(() => Find<PasswordBox>("secret-teambition_mcp_token") is not null);
+            RootGrid.UpdateLayout();
+            var mcpToken = Find<PasswordBox>("secret-teambition_mcp_token")!;
+            var mcpSave = Find<Button>("save-mcp-settings");
+            Assert(mcpSave is not null, "MCP authorization has a save action before project selection");
+            double tokenY = mcpToken.TransformToVisual(PageHost).TransformPoint(new Point()).Y;
+            double saveY = mcpSave!.TransformToVisual(PageHost).TransformPoint(new Point()).Y;
+            Assert(tokenY < saveY, "MCP token input precedes its save and authorization action");
+            foreach (string id in new[] { "project-choice", "load-projects", "tenant-id", "project-id" })
+            {
+                var control = Find<FrameworkElement>(id);
+                Assert(control is not null && saveY < control.TransformToVisual(PageHost).TransformPoint(new Point()).Y,
+                    $"MCP token and authorization precede {id}");
+            }
+            await CaptureAsync(Path.Combine(output, "teambition-setup.png"));
+            ApplyDiagnosticResult(new JsonObject
+            {
+                ["message"] = "Synthetic raw-source diagnosis",
+                ["diagnostic_summary"] = new JsonObject
+                {
+                    ["unknown_events_in_report_window"] = 3,
+                    ["unknown_events_with_unknown_time"] = 2,
+                    ["catalog_complete"] = false
+                }
+            });
+            Assert(_state.Output.Contains(UiStrings.F("\n\n辅助结构分析：窗口内旧解析器未分类动作 {0} 条；这项统计不阻断，正式生成时仍交由 OpenAI 整理。", 3)),
+                "Auxiliary legacy action classification does not claim to block raw generation");
+            Assert(_state.Output.Contains(UiStrings.F("\n时间归属无法判断的动作：{0} 条。", 2)) &&
+                _state.Output.Contains(UiStrings.T("\n时间不明的动态仍需检查，不能判断其是否属于报告时间段。")) &&
+                _state.Output.Contains(UiStrings.T("\n诊断目录未完整，以上仅为已扫描部分，不能据此认定没有其他动态。")),
+                "Unknown event time and incomplete auxiliary catalog warnings remain visible");
             Find<TabView>("account-tabs")!.SelectedIndex = 1;
             await WaitForAsync(() => Find<TextBox>("dingtalk-mentions") is not null);
             Find<ComboBox>("dingtalk-mention-mode")!.SelectedIndex = 1;

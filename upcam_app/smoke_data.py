@@ -135,6 +135,9 @@ class SyntheticSummarizer:
     def summarize(self, _key, _model, _effort, rows, _rules, service_tier="default"):
         return {row["task_key"]: "CI 虚构摘要" for row in rows}
 
+    def summarize_activities(self, _key, _model, _effort, rows, _rules, service_tier="default"):
+        return {row["task_key"]: {"category": "progress", "summary": "CI 虚构摘要"} for row in rows}
+
 
 def make_smoke_service(directory: Path, *, slow_diagnostic=False) -> WorkerService:
     """Never read an actual user profile, credentials, registry, or environment secrets."""

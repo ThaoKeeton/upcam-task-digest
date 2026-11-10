@@ -13,7 +13,7 @@ public sealed partial class MainWindow
     {
         var hero = Column(
             Paragraph(UiStrings.T("Teambition 工作助手"), size: 28),
-            Paragraph(UiStrings.T("先在本机收集和校验 Teambition 数据，只将摘要所需内容交给 OpenAI，再发送到配置的钉钉群。"), true),
+            Paragraph(UiStrings.T("先在本机检查采集范围，再将选定范围内的任务上下文和原始动态发送给 OpenAI 整理，最后发送到配置的钉钉群；不会下载附件正文。"), true),
             Paragraph(UiStrings.T(_savedAuto ? "● 自动运行已开启" : "○ 自动运行尚未开启"), size: 18),
             Toolbar(NavigationButton("运行与诊断", "run"), NavigationButton("选择日报项目", "project")));
         var summary = Pair(
@@ -42,14 +42,18 @@ public sealed partial class MainWindow
         {
             Header = UiStrings.T("Teambition"), IsClosable = false,
             Content = LocalScroll(Column(Card(Column(
-                BuildProjectPicker(),
-                Pair(SettingText("Tenant / Organization ID", "tenant_id", "tenant-id"),
-                     SettingText("Project ID", "project_id", "project-id")),
+                Paragraph(UiStrings.T("1. MCP Token 与连接授权"), size: 18),
                 SecretInput("Teambition MCP 个人 Token", "teambition_mcp_token"),
                 Paragraph(UiStrings.T(_state.SecretPresence["teambition_mcp_authorized"]?.GetValue<bool>() == true
                     ? "本机 MCP 连接已授权；定时运行需另行开启。" : "本机 MCP 连接尚未授权；保存 Token 后仍需主动确认。"), true),
                 Paragraph(UiStrings.T("使用 Teambition 官方 MCP 个人 Token。授权后成员姓名与任务状态自动读取；仅在无法解析时使用高级覆盖。旧 App 凭据不会用于连接。"), true),
                 Paragraph(UiStrings.T("输入框留空会保留已保存的密钥。新值只在保存后由当前 Windows 用户 DPAPI 加密；不显示已保存的原值。"), true),
+                Paragraph(UiStrings.T("先填写 Token，再保存并确认连接授权；无需先填写项目。此按钮也会保存其他已编辑配置。"), true),
+                ActionButton("保存配置并确认 MCP 授权", "save-mcp-settings", SaveCoreAsync),
+                Paragraph(UiStrings.T("2. 加载并选择项目"), size: 18),
+                BuildProjectPicker(),
+                Pair(SettingText("Tenant / Organization ID", "tenant_id", "tenant-id"),
+                     SettingText("Project ID", "project_id", "project-id")),
                 ActionButton("授权并只读测试连接", "test-teambition", async () =>
                 {
                     await SaveCoreAsync();
@@ -236,7 +240,7 @@ public sealed partial class MainWindow
             Paragraph(UiStrings.T("保存配置即采用当前项目、归档选项和筛选条件。范围或 Teambition 凭据变化时，会使用下面的时间区间自动只读核验；核验未通过时仍保存编辑，自动运行会关闭。"), true),
             archived, BuildFilterEditor()));
         var probe = Card(Column(Paragraph(UiStrings.T("项目与时间"), size: 18), TimeInputs(),
-            Paragraph(UiStrings.T("选择含任务动态的区间。成员姓名、状态名称与完成属性由 MCP 自动读取。无法解析时明确提示，不推测姓名或完成状态。"), true),
+            Paragraph(UiStrings.T("选择含任务动态的区间。MCP 返回的成员与状态字段作为原始上下文，不代表已确认状态的完成语义；日报分类由 OpenAI 根据任务上下文和原始动态判断。"), true),
             ActionButton("只读验证项目", "probe-project", async () =>
             {
                 if (_state.SecretDrafts.Any(x => !string.IsNullOrEmpty(x.Value))) await SaveCoreAsync();
@@ -381,7 +385,7 @@ public sealed partial class MainWindow
             list.Items.Add(new ListViewItem { Tag = id, HorizontalContentAlignment = HorizontalAlignment.Stretch, Content = row });
         }
         return FillLayout(Column(
-            Paragraph(UiStrings.T("高级可选覆盖：MCP 自动读取状态名称与完成属性。仅未解析时填写已核对的值；不能凭名称或 ID 猜测完成状态。"), true),
+            Paragraph(UiStrings.T("高级可选覆盖：仅填写人工核实的状态名称与完成含义。MCP 返回的状态字段不代表已确认其完成语义；不能凭名称或 ID 猜测完成状态。"), true),
             Toolbar(
                 ActionButton("添加状态", "status-add", () => EditStatusAsync(null)),
                 ActionButton("编辑选中状态", "status-edit", () => EditStatusAsync((list.SelectedItem as ListViewItem)?.Tag as string), accent: true),
@@ -563,7 +567,10 @@ public sealed partial class MainWindow
         {
             int inWindow = counts["unknown_events_in_report_window"]?.GetValue<int>() ?? 0;
             int unknownTime = counts["unknown_events_with_unknown_time"]?.GetValue<int>() ?? 0;
-            _state.Output += UiStrings.F("\n\n窗口内未支持动作：{0} 条。时间归属无法判断的未支持动作：{1} 条。", inWindow, unknownTime);
+            _state.Output += UiStrings.F("\n\n辅助结构分析：窗口内旧解析器未分类动作 {0} 条；这项统计不阻断，正式生成时仍交由 OpenAI 整理。", inWindow);
+            _state.Output += UiStrings.F("\n时间归属无法判断的动作：{0} 条。", unknownTime);
+            if (unknownTime > 0)
+                _state.Output += UiStrings.T("\n时间不明的动态仍需检查，不能判断其是否属于报告时间段。");
             if (counts["catalog_complete"]?.GetValue<bool>() != true)
                 _state.Output += UiStrings.T("\n诊断目录未完整，以上仅为已扫描部分，不能据此认定没有其他动态。");
         }
@@ -619,7 +626,7 @@ public sealed partial class MainWindow
         package.SetText(_state.DiagnosticText);
         if (!Windows.ApplicationModel.DataTransfer.Clipboard.SetContentWithOptions(package, DiagnosticClipboardOptions()))
             throw new InvalidOperationException("剪贴板暂时不可用，请重试复制或导出脱敏结构。");
-        SetStatus("已复制本机诊断文字，含动作类型与任务/成员 ID，不含评论正文或凭据。分享前请检查内容。");
+        SetStatus("已复制本次范围检查与辅助统计文字，不含评论正文或凭据。旧解析器的动作类型与 ID 仅在可用的辅助导出中；分享前请检查内容。");
     }
 
     private static Windows.ApplicationModel.DataTransfer.ClipboardContentOptions DiagnosticClipboardOptions() =>

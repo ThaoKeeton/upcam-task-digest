@@ -94,6 +94,7 @@ _GLOBAL_SOURCE_ISSUES = {
 }
 
 _COLLECTION_ERROR_MESSAGES = {
+    "Missing or invalid timezone-aware source timestamp": "动态时间缺失或没有有效时区，无法确定是否属于所选时间范围；未调用 OpenAI、未发送钉钉。请核对来源时间后重试。",
     "Invalid identifier": "Tenant ID、Project ID、任务 ID 或事件 ID 格式无效；检查设置中的 ID，不要用姓名或员工编号代替 API ID。",
     "Unknown view configuration field": "本机项目视图配置包含未知字段；重新打开项目映射页，只保留界面支持的筛选条件。",
     "View verified must be boolean": "本机项目范围核验状态无效；重新执行只读项目验证并保存。",

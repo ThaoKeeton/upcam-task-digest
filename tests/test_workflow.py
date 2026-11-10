@@ -25,6 +25,11 @@ class FakeSummarizer:
         self.inputs.append(deepcopy((rows, _rules)))
         return {row["task_key"]: "虚构：已定位导出异常，仍待修复。" for row in rows}
 
+    def summarize_activities(self, _key, _model, _effort, rows, _rules, service_tier="default"):
+        self.calls += 1
+        self.inputs.append(deepcopy((rows, _rules)))
+        return {row["task_key"]: {"category": "progress", "summary": "虚构：已定位导出异常，仍待修复。"} for row in rows}
+
 
 class FakeDingTalk:
     def __init__(self, result=True):
@@ -118,6 +123,50 @@ class WorkflowTests(unittest.TestCase):
         for credential in self.secret.values():
             self.assertNotIn(credential, model_content)
 
+    def test_raw_mcp_events_reach_model_before_dingtalk_with_rich_and_unknown_action(self):
+        event = {"id": "fictional-raw-event", "action": "future.unknown.action",
+                 "boundToObjectId": "demo-old-task", "boundToObjectType": "task",
+                 "createTime": "2026-01-01T18:00:00Z",
+                 "content": {"rich": "<p>虚构正文</p>", "future": [1, 2]}}
+        self.collection["records"][0]["activities"].append(event)
+        class RawFake:
+            def __init__(self): self.rows = []
+            def summarize_activities(self, key, model, effort, rows, rules, service_tier="default"):
+                self.rows = deepcopy(rows)
+                return {row["task_key"]: {"category": "progress", "summary": "虚构进展。"} for row in rows}
+        self.summarizer = RawFake()
+        try:
+            result = self.workflow().run(datetime(2026, 1, 1, 16, 50, tzinfo=SHANGHAI),
+                                         datetime(2026, 1, 2, 8, 50, tzinfo=SHANGHAI))
+        except WorkflowBlocked as exc:
+            self.fail(f"Raw activity was blocked before model: {exc}")
+        self.assertIn(event, self.summarizer.rows[0]["activities"])
+        self.assertEqual(result["report"]["report_type"], "automated-mcp-raw-v1")
+        self.assertEqual(len(self.ding.calls), 1)
+
+    def test_raw_mcp_source_crosses_real_request_builder_without_network(self):
+        from openai_summarizer import OpenAIResponsesClient
+        event = {"id": "fictional-rich-raw", "action": "unknown.vendor.event",
+                 "boundToObjectId": "demo-old-task", "boundToObjectType": "task",
+                 "createTime": "2026-01-01T18:00:00Z",
+                 "content": {"html": "<p>虚构富文本</p>", "nested": [1, {"a": "原文"}]}}
+        self.collection["records"][0]["activities"].append(event)
+        captured = []
+        def transport(_key, body, _timeout):
+            captured.append(json.loads(body))
+            content = json.dumps({"items": [{"task_key": "task-1", "category": "progress", "summary": "虚构进展。"}]}, ensure_ascii=False)
+            return json.dumps({"status": "completed", "output": [{"type": "message", "status": "completed", "content": [{"type": "output_text", "text": content}]}]}, ensure_ascii=False).encode('utf-8')
+        self.summarizer = OpenAIResponsesClient(transport=transport)
+        result = self.workflow().run(datetime(2026, 1, 1, 16, 50, tzinfo=SHANGHAI),
+                                     datetime(2026, 1, 2, 8, 50, tzinfo=SHANGHAI))
+        rows = json.loads(captured[0]['input'][1]['content'][0]['text'])['tasks']
+        self.assertIn(event, rows[0]['activities'])
+        self.assertEqual(rows[0]['task'], self.fake_client.collection['records'][0]['task'])
+        for secret in self.secret.values():
+            self.assertNotIn(secret, json.dumps(captured, ensure_ascii=False))
+        self.assertEqual(result['state'], 'sent')
+        self.assertEqual(len(self.ding.calls), 1)
+
     def test_duplicate_schedule_key_is_stopped_before_second_collection(self):
         workflow = self.workflow()
         start = datetime(2026, 1, 1, 16, 50, tzinfo=SHANGHAI)
@@ -192,33 +241,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.summarizer.calls, 0)
         self.assertEqual(self.ding.calls, [])
 
-    def test_source_validation_failure_is_diagnosed_and_saved_without_raw_content(self):
+    def test_unknown_event_time_blocks_and_saves_no_raw_content(self):
         self.collection["records"][0]["activities"].append({
-            "id": "demo-unknown-event",
-            "action": "future.unknown.action",
-            "boundToObjectId": "demo-old-task",
-            "boundToObjectType": "task",
-            "createTime": "2026-01-01T18:00:00Z",
-            "content": "synthetic-private-payload",
+            "id": "demo-unknown-event", "action": "future.unknown.action",
+            "boundToObjectId": "demo-old-task", "boundToObjectType": "task",
+            "createTime": None, "content": "synthetic-private-payload",
         })
         workflow = self.workflow()
-
         with self.assertRaises(WorkflowBlocked) as raised:
             workflow.run(datetime(2026, 1, 1, 16, 50, tzinfo=SHANGHAI),
                          datetime(2026, 1, 2, 8, 50, tzinfo=SHANGHAI),
                          schedule_key="2026-01-02:morning")
-
-        message = str(raised.exception)
-        self.assertIn("future.unknown.action", message)
-        self.assertIn("demo-old-task", message)
-        self.assertIn("未调用 OpenAI", message)
-        self.assertNotIn("synthetic-private-payload", message)
+        self.assertIn("未调用 OpenAI", str(raised.exception))
+        self.assertNotIn("synthetic-private-payload", str(raised.exception))
         self.assertEqual(self.summarizer.calls, 0)
         self.assertEqual(self.ding.calls, [])
         runs = workflow.history.list_runs()
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0]["state"], "blocked")
-        self.assertIn("future.unknown.action", runs[0]["delivery_note"])
         self.assertNotIn("synthetic-private-payload", runs[0]["delivery_note"])
 
     def assert_credential_blocked(self, workflow, *, model_calls=0):
@@ -273,7 +313,7 @@ class WorkflowTests(unittest.TestCase):
         self.assert_credential_blocked(self.workflow())
 
     def test_credential_in_model_editorial_rules_blocks_before_model(self):
-        with patch("automated_digest.load_editorial_rules",
+        with patch("mcp_raw_digest.load_raw_editorial_rules",
                    return_value=[self.secret["teambition_mcp_token"]]):
             self.assert_credential_blocked(self.workflow())
 
@@ -281,9 +321,9 @@ class WorkflowTests(unittest.TestCase):
         token = self.secret["teambition_mcp_token"]
 
         class LeakingSummarizer(FakeSummarizer):
-            def summarize(self, *args, **kwargs):
-                result = super().summarize(*args, **kwargs)
-                return {key: "private-evidence-marker " + token for key in result}
+            def summarize_activities(self, *args, **kwargs):
+                result = super().summarize_activities(*args, **kwargs)
+                return {key: {"category": "progress", "summary": "private-evidence-marker " + token} for key in result}
 
         self.summarizer = LeakingSummarizer()
         self.assert_credential_blocked(self.workflow(), model_calls=1)
@@ -293,8 +333,8 @@ class WorkflowTests(unittest.TestCase):
         token = self.secret["teambition_mcp_token"]
 
         class LeakingSummarizer(FakeSummarizer):
-            def summarize(self, *args, **kwargs):
-                super().summarize(*args, **kwargs)
+            def summarize_activities(self, *args, **kwargs):
+                super().summarize_activities(*args, **kwargs)
                 raise SummaryError("private-evidence-marker " + token)
 
         self.summarizer = LeakingSummarizer()
@@ -309,7 +349,7 @@ class WorkflowTests(unittest.TestCase):
         self.assert_credential_blocked(self.workflow())
 
     def test_credential_in_final_markdown_blocks_even_without_model(self):
-        from automated_digest import build_automated_digest
+        from mcp_raw_digest import build_raw_digest as build_automated_digest
         self.collection["records"] = []
 
         def unsafe_render(*args, **kwargs):

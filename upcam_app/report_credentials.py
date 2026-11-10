@@ -167,3 +167,16 @@ class GuardedSummarizer:
             raise
         self._guard.require_safe(result)
         return result
+
+    def summarize_activities(self, api_key, model, effort, rows, rules, service_tier="default"):
+        # Inspect all raw nested evidence before any content crosses the model
+        # boundary. Authentication remains separate from model-bound content.
+        self._guard.require_safe((model, effort, rows, rules, service_tier))
+        try:
+            result = self._client.summarize_activities(
+                api_key, model, effort, rows, rules, service_tier=service_tier)
+        except Exception as exc:
+            self._guard.require_safe(str(exc))
+            raise
+        self._guard.require_safe(result)
+        return result

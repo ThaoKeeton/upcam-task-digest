@@ -6,9 +6,11 @@ from datetime import datetime
 from pathlib import Path
 
 from automated_digest import (
-    AutomatedDigestBlocked, build_automated_digest, collection_validation_message,
-    requires_openai_summary,
+    AutomatedDigestBlocked, collection_validation_message,
+    build_automated_digest as build_legacy_digest,
+    requires_openai_summary as requires_legacy_summary,
 )
+from mcp_raw_digest import build_raw_digest as build_automated_digest, requires_raw_summary as requires_openai_summary
 from delivery_guard import DeliveryBlocked, DeliveryGuard, validate_manual_delivery_options
 from digest_pipeline import validate_view
 from openai_summarizer import OpenAIResponsesClient
@@ -34,7 +36,8 @@ class DigestWorkflow:
     def __init__(self, settings: dict, secrets: dict[str, str], data_dir: Path | None = None,
                  *, client_factory=Client, summarizer=None, ding_sender=None,
                  history=None, model_catalog=None, guard_factory=DeliveryGuard,
-                 checkpoint_factory=None):
+                 checkpoint_factory=None, pipeline_mode="raw"):
+        self._set_pipeline_mode(pipeline_mode)
         self.settings = settings
         self.secrets = dict(secrets)
         self.data_dir = Path(data_dir or user_data_dir())
@@ -46,9 +49,20 @@ class DigestWorkflow:
         self.guard_factory = guard_factory
         self.checkpoint_factory = checkpoint_factory
 
+    def _set_pipeline_mode(self, mode):
+        """Bind the host's code-selected contract, never a saved user setting."""
+        if mode not in ("raw", "legacy"):
+            raise WorkflowBlocked("Unsupported digest pipeline")
+        self._pipeline_mode = mode
+
     def run(self, start_local: datetime, end_local: datetime, *, schedule_key: str | None = None,
             allow_confirmed_repeat: bool = False, manual_request_id: str | None = None) -> dict:
         """Run one fixed local-time range; every delivery enters DeliveryGuard."""
+        # Freeze the selected contract before collection or injected factories
+        # can run callbacks. Both preflight and generation use the same path.
+        pipeline_mode = self._pipeline_mode
+        requires_summary = requires_legacy_summary if pipeline_mode == "legacy" else requires_openai_summary
+        build_report = build_legacy_digest if pipeline_mode == "legacy" else build_automated_digest
         try:
             validate_manual_delivery_options(allow_confirmed_repeat, manual_request_id)
         except DeliveryBlocked as exc:
@@ -126,7 +140,7 @@ class DigestWorkflow:
             raise WorkflowBlocked(message) from None
 
         try:
-            needs_openai = requires_openai_summary(collection, config, report_day, window)
+            needs_openai = requires_summary(collection, config, report_day, window)
         except AutomatedDigestBlocked as exc:
             self._record_blocked_attempt(start_local, end_local, schedule_key, str(exc))
             raise WorkflowBlocked(str(exc)) from None
@@ -141,7 +155,8 @@ class DigestWorkflow:
         api_key = self.secrets.get("openai_api_key", "")
         if needs_openai:
             if not api_key:
-                raise WorkflowBlocked("OpenAI API Key is required for substantive comment summaries")
+                raise WorkflowBlocked("OpenAI API Key is required for substantive comment summaries" if pipeline_mode == "legacy"
+                                      else "OpenAI API Key is required to summarize the selected activity data")
             try:
                 cache = self.model_catalog.load()
             except ModelCatalogError:
@@ -152,7 +167,7 @@ class DigestWorkflow:
                 raise WorkflowBlocked("The selected model is not in this API Key's cached model list")
 
         try:
-            report = build_automated_digest(
+            report = build_report(
                 collection, config, report_day, api_key, model, effort,
                 client=GuardedSummarizer(self.summarizer or OpenAIResponsesClient(), credential_guard),
                 window=window, service_tier=service_tier,
@@ -160,6 +175,9 @@ class DigestWorkflow:
             # Inspect before a draft is persisted, including provenance and any
             # future fields as well as the final rendered message.
             credential_guard.require_safe(report)
+            expected_report_type = "automated-v1" if pipeline_mode == "legacy" else "automated-mcp-raw-v1"
+            if report.get("report_type") != expected_report_type:
+                raise AutomatedDigestBlocked("Digest pipeline and report provenance do not match")
         except CredentialExposureBlocked as exc:
             self._record_blocked_attempt(start_local, end_local, schedule_key, str(exc))
             raise WorkflowBlocked(str(exc)) from None

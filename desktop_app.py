@@ -14,7 +14,8 @@ import uuid
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from automated_digest import collection_validation_message, diagnose_automatic_source
+from automated_digest import collection_validation_message
+from mcp_raw_digest import diagnose_raw_source
 from upcam_app.diagnostic_export import safe_structure_export
 from render_digest import render_digest
 from runtime_mappings import validate_mappings, merge_discovered
@@ -40,6 +41,7 @@ from openai_summarizer import KNOWN_FAST_MODELS
 from upcam_app.secrets import DpapiSecretStore, SECRET_FIELDS, SecretStoreError, revoke_missing_mcp_authorization, teambition_mcp_identity, mcp_connection_authorized, MCP_AUTHORIZATION_FIELD
 from upcam_app.workflow import DigestWorkflow, WorkflowBlocked
 from upcam_app.dingtalk_mentions import MentionConfigError, reject_credential_mentions
+from upcam_app.report_credentials import CredentialExposureBlocked, ReportCredentialGuard
 from delivery_guard import DeliveryBlocked, DeliveryGuard, initialize_ledger
 from report_contract import SHANGHAI, updated_selection
 
@@ -460,13 +462,18 @@ class DigestDesktopApp:
         form = self.settings_tab
         form.columnconfigure(1, weight=1)
         form.columnconfigure(3, weight=1)
-        ttk.Label(form, text="项目与 MCP 授权", font=("Microsoft YaHei UI", 12, "bold")).grid(
+        ttk.Label(form, text="1. MCP Token 与连接授权", font=("Microsoft YaHei UI", 12, "bold")).grid(
             row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
-        self._text_field(form, 1, 0, "Teambition Tenant / Organization ID", "tenant_id")
-        self._text_field(form, 1, 2, "Teambition Project ID", "project_id")
+        self._secret_field(form, 1, "teambition_mcp_token")
         ttk.Label(form, text="密钥使用 Windows 用户级 DPAPI 加密保存；不会写入日报、运行记录或模板。",
                   foreground="#536174").grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 6))
-        row = 3
+        ttk.Label(form, text="先填写 Token，再保存并确认连接授权；无需先填写项目。此按钮也会保存其他已编辑配置。",
+                  foreground="#536174", wraplength=self.wraplength).grid(row=3, column=0, columnspan=4, sticky="w")
+        ttk.Button(form, text="保存配置并确认 MCP 授权", command=self._save).grid(
+            row=4, column=0, columnspan=4, sticky="w", pady=(4, 12))
+        ttk.Label(form, text="2. 加载并选择项目", font=("Microsoft YaHei UI", 12, "bold")).grid(
+            row=5, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        row = 6
         self.project_choices = []
         self._project_choices_identity = None
         project_row = ttk.Frame(form)
@@ -477,10 +484,15 @@ class DigestDesktopApp:
         self.project_combo.bind("<<ComboboxSelected>>", self._select_discovered_project)
         self.load_projects_button = ttk.Button(project_row, text="加载我的项目", command=self._load_projects)
         self.load_projects_button.grid(row=0, column=1)
-        ttk.Label(project_row, text="先保存个人 Token 并确认授权，再加载项目；也可手动输入上方 ID。选择后仍需保存。",
+        ttk.Label(project_row, text="先保存个人 Token 并确认授权，再加载项目；也可手动输入下方 ID。选择后仍需保存。",
                   foreground="#536174", wraplength=self.wraplength).grid(row=1, column=0, columnspan=2, sticky="w")
         row += 1
+        self._text_field(form, row, 0, "Teambition Tenant / Organization ID", "tenant_id")
+        self._text_field(form, row, 2, "Teambition Project ID", "project_id")
+        row += 1
         for key in SECRET_FIELDS:
+            if key == "teambition_mcp_token":
+                continue
             self._secret_field(form, row, key)
             row += 1
 
@@ -1521,7 +1533,7 @@ class DigestDesktopApp:
         self._launch_run(start, end, schedule_key=None, scheduled=False)
 
     def _diagnose_manual(self):
-        """Read Teambition and run local source/event checks only; never summarize or send."""
+        """Check raw MCP source boundaries only; never summarize or send."""
         try:
             start_local, end_local = parse_manual_window(self.manual_start.get(), self.manual_end.get())
         except SettingsError as exc:
@@ -1552,18 +1564,22 @@ class DigestDesktopApp:
                 start, end = start_local.astimezone(SHANGHAI), end_local.astimezone(SHANGHAI)
                 day = end.date().isoformat()
                 config = runtime_config(settings)
+                guard = ReportCredentialGuard(secrets)
+                guard.require_safe(config)
                 client = _new_teambition_client(settings, secrets)
                 collection = client.collect(
                     settings["project_id"], day=day, window=(start, end),
                     include_archived=settings["include_archived"])
-                config = merge_discovered(config, collection.get("metadata", {}))
-                diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
+                guard.require_safe(collection)
+                diagnostic = diagnose_raw_source(collection, config, day, (start, end))
                 try:
                     safe_shape = safe_structure_export(collection, config, day, (start, end))
                 except Exception:
                     diagnostic["message"] += (
                         "\n当前诊断可查看，但安全结构文件生成失败；不会导出原始响应。"
                     )
+            except CredentialExposureBlocked as exc:
+                diagnostic = {"ok": False, "message": str(exc), "task_count": None}
             except (CollectionError, OSError) as exc:
                 diagnostic = {"ok": False, "message": collection_validation_message(exc), "task_count": None}
             except SettingsError as exc:
@@ -1628,7 +1644,7 @@ class DigestDesktopApp:
         if not self._job_lock.acquire(blocking=False):
             self._set_status("已有日报任务正在运行；当前触发不会并行执行。")
             return
-        self._set_status("正在本地采集并校验；通过后只发送必要评论摘要到 OpenAI，再自动发送钉钉。")
+        self._set_status("正在本地采集并校验；通过后将候选任务上下文及窗口内原始动态发送给 OpenAI 整理，再自动发送钉钉。")
 
         def worker():
             result = None

@@ -211,6 +211,10 @@ class MentionWorkflowTests(unittest.TestCase):
                 parent.model_requests.append((key, model, effort, rows, rules, service_tier))
                 return {row["task_key"]: "虚构：已定位导出异常，仍待修复。" for row in rows}
 
+            def summarize_activities(self, key, model, effort, rows, rules, service_tier="default"):
+                parent.model_requests.append((key, model, effort, rows, rules, service_tier))
+                return {row["task_key"]: {"category": "progress", "summary": "虚构：已定位导出异常，仍待修复。"} for row in rows}
+
         self.workflow = DigestWorkflow(self.settings, self.secrets, self.directory,
             client_factory=lambda *_args, **_kwargs: Client(), summarizer=Summarizer(), model_catalog=self.catalog,
             ding_sender=DingTalkSender(transport=lambda _url, body, _timeout: self.bodies.append(body) or {"errcode": 0}))

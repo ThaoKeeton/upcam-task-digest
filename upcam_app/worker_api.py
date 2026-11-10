@@ -18,6 +18,7 @@ from automated_digest import collection_validation_message, diagnose_automatic_s
 from collection_progress import observe_collection, report_collection
 from delivery_guard import DeliveryBlocked, DeliveryGuard, initialize_ledger, validate_manual_delivery_options
 from openai_summarizer import KNOWN_FAST_MODELS
+from mcp_raw_digest import diagnose_raw_source
 from render_digest import render_digest
 from runtime_mappings import merge_discovered
 from report_contract import SHANGHAI, updated_selection
@@ -43,6 +44,7 @@ from .project_setup import (
     parse_owner_mapping_tsv,
 )
 from .preferences import PREFERENCE_DEFAULTS, PreferenceError, preference_values, validate_update_token
+from .report_credentials import CredentialExposureBlocked, ReportCredentialGuard
 from .updates import GitHubUpdates, UpdateError
 from .secrets import (
     INTERNAL_SECRET_FIELDS, SECRET_FIELDS, UPDATE_SECRET_FIELDS, revoke_missing_mcp_authorization, teambition_mcp_identity,
@@ -75,7 +77,7 @@ class WorkerService:
                  secret_store=None, history=None, model_catalog=None,
                  startup_configurer=None, client_factory=Client,
                  workflow_factory=DigestWorkflow, sample_path=None, update_manager=None,
-                 checkpoint_factory=None):
+                 checkpoint_factory=None, pipeline_mode="raw"):
         self.data_dir = Path(data_dir or user_data_dir())
         self.settings_store = settings_store or SettingsStore(self.data_dir / "settings.json")
         self.secret_store = secret_store or DpapiSecretStore(self.data_dir / "credentials.dpapi")
@@ -95,6 +97,15 @@ class WorkerService:
         self._last_diagnostic_shape: dict | None = None
         self._last_diagnostic_context: str | None = None
         self._shutdown = False
+        self._set_pipeline_mode(pipeline_mode)
+
+    def _set_pipeline_mode(self, mode):
+        """Select a host contract in memory; no protocol/config field can set it."""
+        if mode not in ("raw", "legacy"):
+            raise WorkerApiError("Unsupported digest pipeline")
+        self._pipeline_mode = mode
+        self._last_diagnostic_shape = None
+        self._last_diagnostic_context = None
 
     def dispatch(self, request: dict) -> dict:
         if not isinstance(request, dict):
@@ -653,9 +664,45 @@ class WorkerService:
             config = merge_discovered(config, collection.get("metadata", {}))
             report_collection("validating", completed=len(collection.get("records", [])),
                               total=len(collection.get("records", [])))
-            diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
-            self._last_diagnostic_shape = safe_structure_export(collection, config, day, (start, end))
-            self._last_diagnostic_context = _diagnostic_context(settings, secrets, payload)
+            if self._pipeline_mode == "legacy":
+                # Preserve the plugin's existing diagnostic contract, including
+                # its export exceptions. The new gates apply only to standalone.
+                diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
+                self._last_diagnostic_shape = safe_structure_export(collection, config, day, (start, end))
+                self._last_diagnostic_context = _diagnostic_context(settings, secrets, payload)
+            else:
+                credential_guard = ReportCredentialGuard(secrets)
+                try:
+                    credential_guard.require_safe((collection, config))
+                except CredentialExposureBlocked as exc:
+                    diagnostic = {"ok": False, "message": str(exc), "task_count": None}
+                else:
+                    diagnostic = diagnose_raw_source(collection, config, day, (start, end))
+                # The legacy field-shape export is optional diagnostic material,
+                # never a semantic gate for the raw-activity pipeline. Its failure
+                # must not replace the source/window result or expose raw errors.
+                try:
+                    shape = safe_structure_export(collection, config, day, (start, end))
+                    credential_guard.require_safe(shape)
+                    metadata = shape["diagnostic"]
+                    created = datetime.fromisoformat(metadata["created_at_utc"]).strftime("%Y%m%dT%H%M%SZ")
+                    file_stem = f"teambition-diagnostic-v{APP_VERSION}-{created}-{metadata['id'][:8]}"
+                    catalog = shape.get("protocol_catalog", {})
+                    export_details = {
+                        "diagnostic_file_stem": file_stem,
+                        "diagnostic": metadata,
+                        "diagnostic_summary": {
+                            "unknown_events_in_report_window": catalog.get("unknown_events_considered", 0),
+                            "unknown_events_with_unknown_time": catalog.get("unknown_window_events", 0),
+                            "catalog_complete": catalog.get("complete") is True,
+                        },
+                    }
+                    self._last_diagnostic_context = _diagnostic_context(settings, secrets, payload)
+                    self._last_diagnostic_shape = shape
+                except Exception:
+                    self._last_diagnostic_shape = None
+                    self._last_diagnostic_context = None
+                    diagnostic["message"] += "\n安全结构导出准备失败；范围检查结果不变，未导出原始响应。"
             latest_credentials = self.secret_store.load()
         except (CollectionError, OSError) as exc:
             self._last_diagnostic_shape = None
@@ -672,11 +719,14 @@ class WorkerService:
             return {"ok": False,
                     "message": "只读诊断未完成；没有调用 OpenAI、没有发送钉钉，详细 API 响应不会写入记录。请检查网络、凭据和项目权限。",
                     "task_count": None, "export_available": False}
-        metadata = self._last_diagnostic_shape["diagnostic"]
-        created = datetime.fromisoformat(metadata["created_at_utc"]).strftime("%Y%m%dT%H%M%SZ")
-        file_stem = f"teambition-diagnostic-v{APP_VERSION}-{created}-{metadata['id'][:8]}"
-        catalog = self._last_diagnostic_shape.get("protocol_catalog", {})
-        result = {**diagnostic, "export_available": bool(self._last_diagnostic_shape),
+        if self._pipeline_mode == "legacy":
+            # Keep metadata preparation outside the legacy diagnostic catch,
+            # as before; malformed export metadata remains a dispatch failure.
+            metadata = self._last_diagnostic_shape["diagnostic"]
+            created = datetime.fromisoformat(metadata["created_at_utc"]).strftime("%Y%m%dT%H%M%SZ")
+            file_stem = f"teambition-diagnostic-v{APP_VERSION}-{created}-{metadata['id'][:8]}"
+            catalog = self._last_diagnostic_shape.get("protocol_catalog", {})
+            export_details = {
                 "diagnostic_file_stem": file_stem,
                 "diagnostic": metadata,
                 "diagnostic_summary": {
@@ -684,6 +734,18 @@ class WorkerService:
                     "unknown_events_with_unknown_time": catalog.get("unknown_window_events", 0),
                     "catalog_complete": catalog.get("complete") is True,
                 },
+            }
+        if self._last_diagnostic_shape is None:
+            result = {**diagnostic, "export_available": False,
+                      "safety": "未调用 OpenAI；未发送钉钉。"}
+            result["message"] = _redact_known_diagnostic_credentials(
+                result.get("message", ""), secrets, latest_credentials)
+            if detailed_target is not None:
+                result["detailed_export"] = {
+                    "saved": False, "message": "缺少本次安全诊断元数据，没有写入详细项目数据。"}
+            return result
+        result = {**diagnostic, "export_available": bool(self._last_diagnostic_shape),
+                **export_details,
                 "safety": "未调用 OpenAI；未发送钉钉。"}
         result["message"] = _redact_known_diagnostic_credentials(
             result.get("message", ""), secrets, latest_credentials)
@@ -915,6 +977,7 @@ class WorkerService:
         if not self._job_lock.acquire(blocking=False):
             raise WorkerApiError("已有日报或诊断任务正在运行；当前操作未并行执行。")
         try:
+            pipeline_mode = self._pipeline_mode
             settings = self.settings_store.load()
             secrets = self.secret_store.load()
             ready, message = self._ensure_ledger(secrets)
@@ -929,8 +992,14 @@ class WorkerService:
                 workflow_options["checkpoint_factory"] = self.checkpoint_factory
             if self.workflow_factory is DigestWorkflow:
                 workflow_options["client_factory"] = self.client_factory
-            result = self.workflow_factory(settings, secrets, self.data_dir, **workflow_options).run(
-                                               start, end, **run_options)
+            workflow = self.workflow_factory(settings, secrets, self.data_dir, **workflow_options)
+            # Bind after construction so a custom factory returning the shared
+            # workflow cannot accidentally opt the plugin into standalone raw
+            # processing. Narrow factories and unrelated test doubles keep
+            # their existing signatures.
+            if isinstance(workflow, DigestWorkflow):
+                workflow._set_pipeline_mode(pipeline_mode)
+            result = workflow.run(start, end, **run_options)
             return {"run_id": result["run_id"], "state": result["state"],
                     "markdown": result["report"]["markdown"],
                     "window_start": start.isoformat(timespec="minutes"),

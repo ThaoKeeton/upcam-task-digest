@@ -192,6 +192,10 @@ class PluginWorkerService:
                 service = factory(self.data_directory)
                 if Path(service.data_dir).resolve() != self.data_directory:
                     raise WorkerApiError(_PROFILE_ERROR)
+                # Every construction route, including injected acceptance
+                # factories, preserves the plugin's original comment-only
+                # contract. This never writes into the shared profile.
+                service._set_pipeline_mode("legacy")
                 service.settings_store = _PreferencePreservingSettingsStore(service.settings_store)
 
                 def preserve_startup(enabled, **_kwargs):
@@ -349,7 +353,7 @@ def _make_production_service(directory):
     store = SettingsStore(directory / "settings.json")
     if not store.path.exists():
         store.save(deepcopy(DEFAULT_SETTINGS))
-    return WorkerService(directory, settings_store=store)
+    return WorkerService(directory, settings_store=store, pipeline_mode="legacy")
 
 
 class _SyntheticSecretStore(MemorySecretStore):
@@ -406,10 +410,12 @@ def _make_synthetic_service(directory):
 
     def workflow(settings, credentials, data_dir, **kwargs):
         return DigestWorkflow(settings, credentials, data_dir, client_factory=SyntheticClient,
-                              summarizer=SyntheticSummarizer(), ding_sender=SyntheticDingTalk(settings), **kwargs)
+                              summarizer=SyntheticSummarizer(), ding_sender=SyntheticDingTalk(settings),
+                              pipeline_mode="legacy", **kwargs)
 
     return WorkerService(directory, settings_store=store, secret_store=_SyntheticSecretStore(marker),
-                         model_catalog=catalog, client_factory=SyntheticClient, workflow_factory=workflow)
+                         model_catalog=catalog, client_factory=SyntheticClient, workflow_factory=workflow,
+                         pipeline_mode="legacy")
 
 
 def _response(output, request_id, *, result=None, error=None):
