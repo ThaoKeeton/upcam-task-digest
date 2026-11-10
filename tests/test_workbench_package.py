@@ -80,7 +80,7 @@ class WorkbenchReferenceTests(unittest.TestCase):
                 verifier.verify_reference(reference)
 
     def test_standalone_version_and_default_entry_remain_separate(self):
-        self.assertIn("<Version>0.5.0</Version>",
+        self.assertIn("<Version>0.5.1</Version>",
                       (ROOT / "winui/UPCAMTaskDigest/UPCAMTaskDigest.csproj").read_text())
         source = (ROOT / "worker_entry.py").read_text()
         self.assertNotIn("plugin_handshake", source)

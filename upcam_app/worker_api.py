@@ -97,6 +97,7 @@ class WorkerService:
         self._last_diagnostic_shape: dict | None = None
         self._last_diagnostic_context: str | None = None
         self._shutdown = False
+        self._chat_worker = None
         self._set_pipeline_mode(pipeline_mode)
 
     def _set_pipeline_mode(self, mode):
@@ -116,6 +117,11 @@ class WorkerService:
             raise WorkerApiError("请求格式无效。")
         handlers = {
             "initialize": self._initialize,
+            "chat_turn": lambda payload: self._chat().turn(payload),
+            "chat_reset": lambda payload: self._chat().reset(payload),
+            "chat_send": lambda payload: self._chat().send(payload),
+            "chat_resolve_preview": lambda payload: self._chat().resolve_preview(payload),
+            "chat_resolve_send": lambda payload: self._chat().resolve_send(payload),
             "save": self._save,
             "save_preferences": self._save_preferences,
             "check_updates": self._check_updates,
@@ -160,6 +166,15 @@ class WorkerService:
         except Exception:
             # Exception text can include headers, response bodies, or user-entered data.
             raise WorkerApiError("操作未完成；详细 API 响应和凭据没有写入日志。请检查设置并重试。") from None
+
+    def _chat(self):
+        # The Workbench plugin remains on its separate legacy contract.
+        if self._pipeline_mode != "raw":
+            raise WorkerApiError("当前版本不支持聊天模式。")
+        if self._chat_worker is None:
+            from .chat_worker import ChatWorker
+            self._chat_worker = ChatWorker(self)
+        return self._chat_worker
 
     def _initialize(self, payload: dict) -> dict:
         self._require_empty_payload(payload)

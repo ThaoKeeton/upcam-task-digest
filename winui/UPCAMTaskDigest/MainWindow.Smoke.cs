@@ -53,6 +53,7 @@ public sealed partial class MainWindow
             await VerifyDiagnosticCancellationAsync();
             await VerifyGeneralSettingsAsync(output);
             await VerifyCollectionProgressControlsAsync();
+            await VerifyChatAsync(output);
             var titleBar = Find<TitleBar>("app-titlebar");
             Assert(titleBar is not null && ExtendsContentIntoTitleBar, "Native custom TitleBar replaces colored system title bar");
             Assert(titleBar!.IconSource is BitmapIconSource { ShowAsMonochrome: false }, "TitleBar keeps original icon colors");
@@ -305,7 +306,7 @@ public sealed partial class MainWindow
             Assert(_state.History.Count == 2 && _state.History.All(row => Value(row, "state") == "sent"),
                 "Deliberate second manual click resends the same window without an extra confirmation dialog");
 
-            foreach (var size in new[] { new SizeInt32(1180, 800), new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540) })
+            foreach (var size in new[] { new SizeInt32(1180, 800), new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540), new SizeInt32(640, 520) })
             {
                 AppWindow.Resize(size);
                 await Task.Delay(150);
@@ -337,6 +338,14 @@ public sealed partial class MainWindow
                     await Task.Delay(60);
                     RootGrid.UpdateLayout();
                     Assert(PageHost.ActualWidth > 300 && PageHost.ActualHeight > 180, $"Layout {route} {size.Width}x{size.Height}");
+                    if (route == "chat")
+                    {
+                        var chatScroll = Find<ScrollViewer>("chat-scroll")!;
+                        var chatComposer = Find<TextBox>("chat-message-input")!;
+                        Assert(chatScroll.ActualHeight >= 45, "Chat conversation remains visible at " + size.Width);
+                        AssertInside(chatComposer, "Chat composer remains visible at " + size.Width);
+                        AssertInside(Find<Button>("chat-resolve-send")!, "Chat send recovery remains visible at " + size.Width);
+                    }
                     if (route == "schedule")
                     {
                         var morningStart = Find<TextBox>("morning-start-at")!;
@@ -461,6 +470,38 @@ public sealed partial class MainWindow
         await InvokeWhenReadyAsync("diagnose");
         await WaitForAsync(() => !_busy);
         Assert(_state.ExportAvailable, "A fresh read-only diagnosis works after cancellation without restarting the app");
+    }
+
+    private async Task VerifyChatAsync(string output)
+    {
+        Navigate("chat");
+        await WaitForAsync(() => Find<TextBox>("chat-message-input") is not null);
+        Assert(Find<Button>("chat-send-preview") is { IsEnabled: false },
+            "Chat cannot send before an answer exists");
+        Find<TextBox>("chat-message-input")!.Text = "CI 虚构聊天";
+        await WaitForAsync(() => _chatInput == "CI 虚构聊天");
+        await InvokeWhenReadyAsync("chat-ask");
+        await WaitForAsync(() => !_busy && _chatMessages.Any(line => line.Text.Contains("CI 虚构聊天任务")));
+        Assert(!string.IsNullOrEmpty(_chatDraftId) && Find<Button>("chat-send-preview") is { IsEnabled: true },
+            "Synthetic chat displays a read-only answer and only prepares a draft");
+        Navigate("home"); Navigate("chat");
+        Assert(_chatMessages.Any(line => line.Text.Contains("CI 虚构聊天任务")),
+            "Chat conversation survives navigation in the same process");
+        await CaptureAsync(Path.Combine(output, "chat-synthetic.png"));
+        await InvokeWhenReadyAsync("chat-send-preview");
+        await WaitForAsync(() => Find<TextBox>("chat-send-preview-text") is not null);
+        Assert(Find<TextBox>("chat-send-preview-text")!.Text == _chatDraftAnswer,
+            "Chat confirmation previews exactly the answer to be sent");
+        Invoke(await WaitForPrimaryAsync());
+        await WaitForAsync(() => !_busy && _chatMessages.Any(line => line.Text.Contains("钉钉机器人已确认接收")));
+        Assert(_chatDraftId is null, "Confirmed synthetic chat send consumes its draft");
+        await InvokeWhenReadyAsync("chat-resolve-send");
+        await WaitForAsync(() => !_busy && _chatMessages.Any(line => line.Text.Contains("没有可解除的未知发送记录")));
+        Assert(Find<ContentDialog>("chat-resolve-confirm") is null && _chatDraftId is null,
+            "No recovery confirmation appears without an unknown send");
+        await InvokeWhenReadyAsync("chat-reset");
+        await WaitForAsync(() => !_busy && _chatMessages.Count == 0);
+        Assert(_chatDraftId is null, "Clearing chat removes the conversation and pending draft");
     }
 
     private async Task VerifyCollectionProgressControlsAsync()
@@ -599,7 +640,7 @@ public sealed partial class MainWindow
         await CaptureAsync(Path.Combine(output, "general-english-light.png"));
         Assert(FindIn<CommunityToolkit.WinUI.Controls.SettingsCard>(PageHost, _ => true) is not null,
             "General page uses actual PowerToys-matched CommunityToolkit SettingsCard controls");
-        foreach (var size in new[] { new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540) })
+        foreach (var size in new[] { new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540), new SizeInt32(640, 520) })
         {
             AppWindow.Resize(size);
             foreach (string route in _routes.Keys)
@@ -607,6 +648,12 @@ public sealed partial class MainWindow
                 Navigate(route); await Task.Delay(40); RootGrid.UpdateLayout();
                 Assert(PageHost.ActualWidth > 300 && PageHost.ActualHeight > 150,
                     $"English light interface layout {route} {size.Width}x{size.Height}");
+                if (route == "chat")
+                {
+                    Assert(Find<ScrollViewer>("chat-scroll")!.ActualHeight >= 45, "English chat conversation remains visible at " + size.Width);
+                    AssertInside(Find<TextBox>("chat-message-input")!, "English chat composer remains visible at " + size.Width);
+                    AssertInside(Find<Button>("chat-resolve-send")!, "English chat send recovery remains visible at " + size.Width);
+                }
                 if (route == "schedule")
                 {
                     var clearProgress = Find<Button>("clear-collection-progress")!;

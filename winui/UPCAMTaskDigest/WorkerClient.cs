@@ -59,7 +59,8 @@ internal sealed class WorkerClient : IDisposable
             var request = new JsonObject { ["id"] = id, ["op"] = operation, ["payload"] = payload ?? new JsonObject() };
             if (observe) request["progress"] = true;
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            deadline.CancelAfter(IsUpdate(operation) ? TimeSpan.FromMinutes(6) : IsCollection(operation) ? _collectionDeadline : _ordinaryDeadline);
+            deadline.CancelAfter(IsUpdate(operation) ? TimeSpan.FromMinutes(6) : IsChat(operation) ? TimeSpan.FromMinutes(5) :
+                operation == "chat_send" ? TimeSpan.FromMinutes(1) : IsCollection(operation) ? _collectionDeadline : _ordinaryDeadline);
             using var abort = deadline.Token.Register(Abort);
             try
             {
@@ -102,6 +103,8 @@ internal sealed class WorkerClient : IDisposable
         }
         finally { _requestGate.Release(); }
     }
+
+    private static bool IsChat(string operation) => operation is "chat_turn";
 
     private static bool IsCollection(string operation) => operation is "save" or "run_manual" or "run_due" or
         "probe_project" or "diagnose" or "export_detailed_diagnostic_to_file" or "test_teambition";

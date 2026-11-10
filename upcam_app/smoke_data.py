@@ -180,10 +180,28 @@ def make_smoke_service(directory: Path, *, slow_diagnostic=False) -> WorkerServi
             time.sleep(10)  # Isolated fixture: enough time to exercise the real Cancel control.
             return super().collect(*args, **kwargs)
 
-    return WorkerService(
+    service = WorkerService(
         directory, settings_store=store, secret_store=secret_store,
         model_catalog=catalog, client_factory=SlowSyntheticClient if slow_diagnostic else SyntheticClient,
         workflow_factory=workflow,
         startup_configurer=lambda *_args, **_kwargs: None,
         update_manager=synthetic_update_manager(directory, APP_VERSION),
     )
+    # This explicit replacement has no external transport and cannot use a real
+    # profile. It exercises the same worker/session and send admission boundary.
+    from .chat_worker import ChatWorker, send_chat_markdown
+    class SyntheticChatPlanner:
+        def plan(self, question, history):
+            return {'operation': 'tasks', 'search': None, 'task_id': None, 'start': None, 'end': None,
+                    'summarize': False, 'send_requested': False, 'reply': None}
+        def summarize(self, question, source, history=None):
+            return 'CI 虚构聊天摘要'
+    class SyntheticChatReader:
+        def execute(self, plan):
+            return {'kind': 'tasks', 'rows': [{'id': 'ci-chat-task', 'content': 'CI 虚构聊天任务'}],
+                    'snapshot_guaranteed': False}
+    service._chat_worker = ChatWorker(service, planner_factory=lambda *_: SyntheticChatPlanner(),
+        reader_factory=lambda *_: SyntheticChatReader(),
+        sender=lambda webhook, secret, content: send_chat_markdown(
+            webhook, secret, content, transport=lambda *_: {'errcode': 0}))
+    return service

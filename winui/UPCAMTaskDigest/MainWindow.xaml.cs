@@ -23,6 +23,7 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
     private readonly Dictionary<string, (string Title, string Description)> _routes = new()
     {
         ["home"] = ("主页", "Teambition 工作助手 · 固定日报"),
+        ["chat"] = ("聊天", "根据问题只读查询 Teambition，按需整理或确认发送。"),
         ["general"] = ("常规", "管理应用更新、语言、主题、启动和系统托盘。"),
         ["accounts"] = ("账户与模型", "连接服务、保管凭据，选择 API 模型与请求设置。"),
         ["project"] = ("项目范围", "读取当前项目任务动态，按发生时间筛选，并核验只读接口。"),
@@ -167,6 +168,7 @@ public sealed partial class MainWindow : WinUIEx.WindowEx
         SaveButton.Content = UiStrings.T(route == "general" ? "保存常规设置" : "保存本机配置");
         PageHost.Content = route switch
         {
+            "chat" => BuildChat(),
             "accounts" => BuildAccounts(),
             "general" => BuildGeneral(),
             "project" => BuildProject(),

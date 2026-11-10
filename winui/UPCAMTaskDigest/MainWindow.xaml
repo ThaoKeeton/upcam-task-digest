@@ -31,6 +31,7 @@
       </NavigationView.Resources>
       <NavigationView.MenuItems>
         <NavigationViewItem Content="主页" Tag="home" Icon="Home" />
+        <NavigationViewItem Content="聊天" Tag="chat" Icon="Message" />
         <NavigationViewItem Content="常规" Tag="general" Icon="Setting" />
         <NavigationViewItemHeader Content="配置" />
         <NavigationViewItem Content="账户与模型" Tag="accounts" Icon="Contact" />

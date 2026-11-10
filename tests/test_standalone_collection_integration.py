@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class StandaloneCollectionIntegrationTests(unittest.TestCase):
     def test_new_standalone_patch_has_distinct_consistent_identity(self):
-        self.assertEqual(APP_VERSION, '0.5.0')
+        self.assertEqual(APP_VERSION, '0.5.1')
         project = (ROOT / 'winui/UPCAMTaskDigest/UPCAMTaskDigest.csproj').read_text()
         self.assertIn(f'<Version>{APP_VERSION}</Version>', project)
 
