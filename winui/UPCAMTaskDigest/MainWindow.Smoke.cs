@@ -19,6 +19,7 @@ namespace Upcam.Desktop;
 public sealed partial class MainWindow
 {
     private readonly List<string> _smokeSteps = new();
+    private readonly List<string> _smokeDiagnostics = new();
     private readonly List<object> _smokeLayouts = new();
     private readonly List<object> _smokeIcons = new();
 
@@ -474,6 +475,7 @@ public sealed partial class MainWindow
 
     private async Task VerifyChatAsync(string output)
     {
+        if (!_smoke) throw new InvalidOperationException("Chat diagnostics require synthetic smoke mode.");
         Navigate("chat");
         await WaitForAsync(() => Find<TextBox>("chat-message-input") is not null);
         Assert(Find<Button>("chat-send-preview") is { IsEnabled: false },
@@ -488,8 +490,40 @@ public sealed partial class MainWindow
         Assert(_chatMessages.Any(line => line.Text.Contains("CI 虚构聊天任务")),
             "Chat conversation survives navigation in the same process");
         await CaptureAsync(Path.Combine(output, "chat-synthetic.png"));
+        string? draftIdAtOpen = _chatDraftId;
+        string answerAtOpen = _chatDraftAnswer;
         await InvokeWhenReadyAsync("chat-send-preview");
         await WaitForAsync(() => Find<TextBox>("chat-send-preview-text") is not null);
+        var chatPreview = Find<TextBox>("chat-send-preview-text")!;
+        string previewAtFirstCheck = chatPreview.Text;
+        _smokeDiagnostics.Add($"chat-preview-state: draftIdStable={_chatDraftId == draftIdAtOpen}; " +
+            $"draftAnswerStable={_chatDraftAnswer == answerAtOpen}");
+        RecordSmokeTextComparison("chat-preview", answerAtOpen, previewAtFirstCheck, chatPreview.IsLoaded);
+        // Independent synthetic round trips, deliberately detached from the dialog.
+        // These observations do not replace or normalize the original assertion below.
+        foreach (var (label, newline) in new[] { ("LF", "\n"), ("CRLF", "\r\n"), ("CR", "\r") })
+        {
+            string original = "A" + newline + "B" + newline;
+            var probe = new TextBox
+            {
+                Text = original, IsReadOnly = true, AcceptsReturn = true,
+                TextWrapping = TextWrapping.Wrap, Height = 240
+            };
+            RecordSmokeTextComparison($"textbox-{label}-detached", original, probe.Text, probe.IsLoaded);
+        }
+        var dispatcherTurn = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool enqueued = DispatcherQueue.TryEnqueue(() => dispatcherTurn.SetResult(true));
+        _smokeDiagnostics.Add($"chat-preview-dispatch: enqueued={enqueued}");
+        if (enqueued)
+        {
+            await dispatcherTurn.Task.WaitAsync(TimeSpan.FromSeconds(12));
+            string previewAfterDispatch = chatPreview.Text;
+            _smokeDiagnostics.Add($"chat-preview-state-after-dispatch: draftIdStable={_chatDraftId == draftIdAtOpen}; " +
+                $"draftAnswerStable={_chatDraftAnswer == answerAtOpen}; " +
+                $"samePreviewControl={ReferenceEquals(chatPreview, Find<TextBox>("chat-send-preview-text"))}");
+            RecordSmokeTextComparison("chat-preview-after-dispatch", answerAtOpen, previewAfterDispatch, chatPreview.IsLoaded);
+            RecordSmokeTextComparison("chat-preview-first-vs-after-dispatch", previewAtFirstCheck, previewAfterDispatch, chatPreview.IsLoaded);
+        }
         Assert(Find<TextBox>("chat-send-preview-text")!.Text == _chatDraftAnswer,
             "Chat confirmation previews exactly the answer to be sent");
         Invoke(await WaitForPrimaryAsync());
@@ -502,6 +536,25 @@ public sealed partial class MainWindow
         await InvokeWhenReadyAsync("chat-reset");
         await WaitForAsync(() => !_busy && _chatMessages.Count == 0);
         Assert(_chatDraftId is null, "Clearing chat removes the conversation and pending draft");
+    }
+
+    private void RecordSmokeTextComparison(string label, string expected, string actual, bool isLoaded)
+    {
+        if (!_smoke) return;
+        int firstDifference = 0;
+        while (firstDifference < expected.Length && firstDifference < actual.Length &&
+            expected[firstDifference] == actual[firstDifference]) firstDifference++;
+        if (firstDifference == expected.Length && firstDifference == actual.Length) firstDifference = -1;
+        string UnitAt(string text) => firstDifference < 0 ? "none" : firstDifference >= text.Length ? "END" :
+            $"0x{(int)text[firstDifference]:X4}";
+        static string NormalizeNewlines(string text) => text.Replace("\r\n", "\n").Replace("\r", "\n");
+        // UTF-16 code units, counts and equality only. Never record text or draft IDs.
+        _smokeDiagnostics.Add($"{label}: isLoaded={isLoaded}; " +
+            $"expectedUtf16Length={expected.Length}; actualUtf16Length={actual.Length}; " +
+            $"expectedCR={expected.Count(c => c == '\r')}; expectedLF={expected.Count(c => c == '\n')}; " +
+            $"actualCR={actual.Count(c => c == '\r')}; actualLF={actual.Count(c => c == '\n')}; " +
+            $"firstMismatchUtf16Index={firstDifference}; expectedUnit={UnitAt(expected)}; actualUnit={UnitAt(actual)}; " +
+            $"exactEqual={expected == actual}; newlineNormalizedEqual={NormalizeNewlines(expected) == NormalizeNewlines(actual)}");
     }
 
     private async Task VerifyCollectionProgressControlsAsync()
@@ -849,7 +902,8 @@ public sealed partial class MainWindow
         string output = Path.Combine(AppContext.BaseDirectory, "smoke-output");
         Directory.CreateDirectory(output);
         File.WriteAllText(Path.Combine(output, "result.txt"), message +
-            "\nCurrent page: " + _page + "\nCompleted steps:\n" + string.Join("\n", _smokeSteps));
+            "\nCurrent page: " + _page + "\nCompleted steps:\n" + string.Join("\n", _smokeSteps) +
+            "\nSynthetic chat text diagnostics:\n" + string.Join("\n", _smokeDiagnostics));
         Environment.ExitCode = success ? 0 : 1;
         _exitRequested = true;
         Close();

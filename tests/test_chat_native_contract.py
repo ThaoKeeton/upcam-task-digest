@@ -65,4 +65,29 @@ class ChatNativeContractTests(unittest.TestCase):
         self.assertIn('chat-send-preview', source)
         self.assertIn('CI 虚构聊天', source)
 
+    def test_preview_diagnostics_survive_the_original_exact_comparison_failure(self):
+        source = (UI / 'MainWindow.Smoke.cs').read_text(encoding='utf-8')
+        chat = source.split('private async Task VerifyChatAsync(string output)', 1)[1]
+        chat = chat.split('private async Task VerifyCollectionProgressControlsAsync()', 1)[0]
+        # Collect evidence before the existing throw; do not weaken it to normalized equality.
+        self.assertIn('RecordSmokeTextComparison("chat-preview"', chat)
+        self.assertLess(chat.index('if (!_smoke)'), chat.index('Navigate("chat")'))
+        self.assertLess(chat.index('string answerAtOpen = _chatDraftAnswer;'),
+                        chat.index('await InvokeWhenReadyAsync("chat-send-preview");'))
+        original_assertion = 'Assert(Find<TextBox>("chat-send-preview-text")!.Text == _chatDraftAnswer,'
+        self.assertIn(original_assertion, chat)
+        self.assertLess(chat.index('RecordSmokeTextComparison("chat-preview"'),
+                        chat.index(original_assertion))
+        self.assertIn('DispatcherQueue.TryEnqueue(', chat)
+        self.assertLess(chat.index('await dispatcherTurn.Task.WaitAsync('),
+                        chat.index('RecordSmokeTextComparison("chat-preview-after-dispatch"'))
+        self.assertLess(chat.index('RecordSmokeTextComparison("chat-preview-first-vs-after-dispatch"'),
+                        chat.index(original_assertion))
+        self.assertLess(chat.index('RecordSmokeTextComparison($"textbox-{label}-detached"'),
+                        chat.index(original_assertion))
+        for fixture in (r'("LF", "\n")', r'("CRLF", "\r\n")', r'("CR", "\r")'):
+            self.assertIn(fixture, chat)
+        finish = source.split('private void FinishSmoke(bool success, string message)', 1)[1]
+        self.assertIn('string.Join("\\n", _smokeDiagnostics)', finish)
+
 if __name__ == '__main__': unittest.main()
