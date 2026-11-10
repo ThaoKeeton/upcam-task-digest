@@ -49,6 +49,26 @@ class ChatNativeContractTests(unittest.TestCase):
         self.assertIn('Chat conversation remains visible at', smoke)
         self.assertIn('Chat composer remains visible at', smoke)
 
+    def test_chat_compact_spacing_budget_preserves_the_conversation_row(self):
+        # Static spacing budget, not a substitute for WinUI measurement. At
+        # 640x520 with a two-line status, the old 36 DIP of gaps left ~41 DIP
+        # for the conversation. Reclaim 24 DIP to leave more room for both
+        # languages with a two-line status, compacting only these gaps.
+        page = (UI / 'MainWindow.Chat.cs').read_text(encoding='utf-8').split(
+            'private UIElement BuildChat()', 1)[1].split(
+            'private void RefreshChatIfVisible()', 1)[0]
+        ui = (UI / 'Ui.cs').read_text(encoding='utf-8')
+        column = ui.split('private static StackPanel Column(', 1)[1].split(
+            'private static FrameworkElement Card(', 1)[0]
+        default_gap = float(re.search(r'Spacing\s*=\s*(\d+)', column).group(1))
+        override = re.search(r'composer\.Spacing\s*=\s*(\d+)', page)
+        composer_gap = float(override.group(1)) if override else default_gap
+        row_gap = float(re.search(r'new Grid\s*\{\s*RowSpacing\s*=\s*(\d+)', page).group(1))
+        self.assertLessEqual(2 * composer_gap + row_gap, 12,
+                             'Chat gaps must not consume the minimum conversation viewport')
+        input_box = re.search(r'new TextBox\s*\{(.*?)\}, "chat-message-input"', page, re.S).group(1)
+        self.assertRegex(input_box, r'Height\s*=\s*84\b')
+
     def test_send_recovery_previews_a_specific_record_before_confirmation(self):
         page = (UI / 'MainWindow.Chat.cs').read_text(encoding='utf-8')
         self.assertIn('chat_resolve_preview', page)

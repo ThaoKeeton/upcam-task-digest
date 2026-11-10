@@ -341,11 +341,7 @@ public sealed partial class MainWindow
                     Assert(PageHost.ActualWidth > 300 && PageHost.ActualHeight > 180, $"Layout {route} {size.Width}x{size.Height}");
                     if (route == "chat")
                     {
-                        var chatScroll = Find<ScrollViewer>("chat-scroll")!;
-                        var chatComposer = Find<TextBox>("chat-message-input")!;
-                        Assert(chatScroll.ActualHeight >= 45, "Chat conversation remains visible at " + size.Width);
-                        AssertInside(chatComposer, "Chat composer remains visible at " + size.Width);
-                        AssertInside(Find<Button>("chat-resolve-send")!, "Chat send recovery remains visible at " + size.Width);
+                        await VerifyChatLayoutAsync(size, output);
                     }
                     if (route == "schedule")
                     {
@@ -564,6 +560,90 @@ public sealed partial class MainWindow
         Assert(_chatDraftId is null, "Clearing chat removes the conversation and pending draft");
     }
 
+    private async Task VerifyChatLayoutAsync(SizeInt32 size, string output)
+    {
+        if (!_smoke) throw new InvalidOperationException("Chat layout checks require synthetic smoke mode.");
+        var previousMessages = _chatMessages.ToArray();
+        string previousInput = _chatInput;
+        string? previousDraftId = _chatDraftId;
+        string previousDraftAnswer = _chatDraftAnswer;
+        bool previousSendRequested = _chatSendRequested;
+        string previousStatus = StatusText.Text;
+        bool previousPaneOpen = Navigation.IsPaneOpen;
+        string language = UiStrings.ResolvedLanguage;
+        try
+        {
+            Navigation.IsPaneOpen = true;
+            _chatDraftId = null;
+            _chatDraftAnswer = "";
+            _chatSendRequested = false;
+            string statusLine = language == "zh-CN" ? "CI 虚构布局检查" : "CI synthetic layout check";
+            StatusText.Text = statusLine;
+            RootGrid.UpdateLayout();
+            double singleLineHeight = StatusText.ActualHeight;
+            StatusText.Text = statusLine + (language == "zh-CN" ? "\n不会访问真实服务" : "\nNo live services are accessed");
+            foreach (string scenario in new[] { "empty", "multiline" })
+            {
+                _chatMessages.Clear();
+                _chatInput = "";
+                if (scenario == "multiline")
+                {
+                    _chatInput = "CI synthetic input\nSecond line";
+                    _chatMessages.Add(new ChatLine("你", "CI synthetic layout question"));
+                    _chatMessages.Add(new ChatLine("助手", string.Join("\n", Enumerable.Range(1, 30)
+                        .Select(line => $"CI synthetic answer line {line}"))));
+                }
+                RefreshChatIfVisible();
+                await Task.Delay(60);
+                RootGrid.UpdateLayout();
+                var chatScroll = Find<ScrollViewer>("chat-scroll")!;
+                string context = $"{language} {size.Width}x{size.Height} {scenario}";
+                _smokeDiagnostics.Add($"chat-layout {context}: actualWindow={AppWindow.Size.Width}x{AppWindow.Size.Height}; " +
+                    $"scale={RootGrid.XamlRoot.RasterizationScale}; pageHeight={PageHost.ActualHeight}; " +
+                    $"statusHeight={StatusText.ActualHeight}; singleLineHeight={singleLineHeight}; " +
+                    $"scrollHeight={chatScroll.ActualHeight}; viewportHeight={chatScroll.ViewportHeight}; " +
+                    $"scrollableHeight={chatScroll.ScrollableHeight}");
+                if (size.Width == 640 && size.Height <= 540)
+                    await CaptureAsync(Path.Combine(output, $"chat-layout-{language}-{size.Width}x{size.Height}-{scenario}.png"));
+                Assert(Navigation.IsPaneOpen && Navigation.DisplayMode == NavigationViewDisplayMode.Expanded,
+                    "Chat layout uses expanded navigation at " + context);
+                Assert(singleLineHeight > 0 && StatusText.ActualHeight >= singleLineHeight * 1.9,
+                    "Chat layout uses an explicit two-line status at " + context);
+                Assert(chatScroll.ActualHeight >= 45, "Chat conversation remains visible at " + context);
+                AssertChatControlInside(chatScroll, "Chat conversation remains inside its page at " + context);
+                var input = Find<TextBox>("chat-message-input")!;
+                Assert(Math.Abs(input.ActualHeight - 84) < 1, "Chat input keeps its 84 DIP height at " + context);
+                AssertChatControlInside(input, "Chat composer remains visible at " + context);
+                foreach (string id in new[] { "chat-ask", "chat-reset", "chat-send-preview", "chat-resolve-send" })
+                    AssertChatControlInside(Find<Button>(id)!, $"Chat button {id} remains visible at {context}");
+                if (scenario == "multiline")
+                    Assert(chatScroll.ScrollableHeight > 0, "Synthetic multiline chat can scroll at " + context);
+            }
+        }
+        finally
+        {
+            _chatMessages.Clear();
+            _chatMessages.AddRange(previousMessages);
+            _chatInput = previousInput;
+            _chatDraftId = previousDraftId;
+            _chatDraftAnswer = previousDraftAnswer;
+            _chatSendRequested = previousSendRequested;
+            StatusText.Text = previousStatus;
+            Navigation.IsPaneOpen = previousPaneOpen;
+            RefreshChatIfVisible();
+            RootGrid.UpdateLayout();
+        }
+    }
+
+    private void AssertChatControlInside(FrameworkElement control, string description)
+    {
+        AssertInside(control, description);
+        Rect bounds = control.TransformToVisual(PageHost).TransformBounds(new Rect(0, 0, control.ActualWidth, control.ActualHeight));
+        Assert(control.ActualWidth > 0 && control.ActualHeight > 0 &&
+            bounds.Left >= -2 && bounds.Top >= -2 && bounds.Right <= PageHost.ActualWidth + 2 &&
+            bounds.Bottom <= PageHost.ActualHeight + 2, description + " inside chat page");
+    }
+
     private void VerifyChatMultilineControls()
     {
         // Same synthetic text and settings; vary only when multiline is enabled.
@@ -755,9 +835,7 @@ public sealed partial class MainWindow
                     $"English light interface layout {route} {size.Width}x{size.Height}");
                 if (route == "chat")
                 {
-                    Assert(Find<ScrollViewer>("chat-scroll")!.ActualHeight >= 45, "English chat conversation remains visible at " + size.Width);
-                    AssertInside(Find<TextBox>("chat-message-input")!, "English chat composer remains visible at " + size.Width);
-                    AssertInside(Find<Button>("chat-resolve-send")!, "English chat send recovery remains visible at " + size.Width);
+                    await VerifyChatLayoutAsync(size, output);
                 }
                 if (route == "schedule")
                 {

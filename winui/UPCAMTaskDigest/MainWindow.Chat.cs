@@ -75,7 +75,9 @@ public sealed partial class MainWindow
             ? "已提出发送请求；请先预览并明确确认。"
             : "如需分享最新答复，请点击预览并确认；查询不会自动发送。";
         var composer = Column(input, Toolbar(ask, reset, send, resolve), Paragraph(UiStrings.T(sendHint), true));
-        var layout = new Grid { RowSpacing = 12 };
+        // Reclaim 24 DIP for the conversation at minimum height with a two-line status.
+        composer.Spacing = 4;
+        var layout = new Grid { RowSpacing = 4 };
         layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         layout.Children.Add(scroll);
