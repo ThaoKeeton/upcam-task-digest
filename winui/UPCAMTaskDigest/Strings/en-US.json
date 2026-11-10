@@ -710,6 +710,8 @@
   "清空聊天请求格式无效。": "The clear-chat request is invalid.",
   "确认发送": "Confirm send",
   "答复已变化，请重新预览后再发送。": "The answer changed. Preview it again before sending.",
+  "发送预览与答复不一致，已阻止发送。请重新打开预览后再确认。": "The send preview does not match the answer, so sending was blocked. Reopen the preview before confirming again.",
+  "原文预览与匹配答复不一致，已阻止解除发送阻断。请重新打开核对后再确认。": "The original-text preview does not match the answer, so the send block was not cleared. Reopen the review before confirming again.",
   "系统": "System",
   "聊天": "Chat",
   "聊天内容或查询结果过大，请缩小范围。": "The conversation or results are too large. Narrow the scope.",

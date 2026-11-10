@@ -43,8 +43,9 @@ public sealed partial class MainWindow
         {
             Header = UiStrings.T("输入问题"),
             PlaceholderText = UiStrings.T("例如：项目中最近有哪些任务更新？"),
-            Text = _chatInput,
+            // Enable multiline before assigning text, or WinUI can retain only its first line.
             AcceptsReturn = true,
+            Text = _chatInput,
             TextWrapping = TextWrapping.Wrap,
             Height = 84
         }, "chat-message-input");
@@ -147,6 +148,7 @@ public sealed partial class MainWindow
 
     private async Task SendChatDraftAsync()
     {
+        const string previewMismatch = "发送预览与答复不一致，已阻止发送。请重新打开预览后再确认。";
         string? draftId = _chatDraftId;
         string answer = _chatDraftAnswer;
         if (string.IsNullOrEmpty(draftId) || string.IsNullOrWhiteSpace(answer))
@@ -157,10 +159,15 @@ public sealed partial class MainWindow
 
         var previewText = Identify(new TextBox
         {
-            Text = answer, IsReadOnly = true, AcceptsReturn = true,
+            AcceptsReturn = true, Text = answer, IsReadOnly = true,
             TextWrapping = TextWrapping.Wrap, Height = 240
         }, "chat-send-preview-text");
         ScrollViewer.SetVerticalScrollBarVisibility(previewText, ScrollBarVisibility.Auto);
+        if (!ChatPreviewMatches(answer, previewText.Text))
+        {
+            SetStatus(previewMismatch);
+            return;
+        }
         var preview = Identify(new ContentDialog
         {
             XamlRoot = RootGrid.XamlRoot,
@@ -173,6 +180,11 @@ public sealed partial class MainWindow
                 previewText)
         }, "chat-send-confirm");
         if (await ShowDialogAsync(preview) != ContentDialogResult.Primary) return;
+        if (!ChatPreviewMatches(answer, previewText.Text))
+        {
+            SetStatus(previewMismatch);
+            return;
+        }
         if (_chatDraftId != draftId || _chatDraftAnswer != answer)
         {
             SetStatus("答复已变化，请重新预览后再发送。");
@@ -217,6 +229,7 @@ public sealed partial class MainWindow
 
     private async Task ResolveChatSendAsync()
     {
+        const string originalMismatch = "原文预览与匹配答复不一致，已阻止解除发送阻断。请重新打开核对后再确认。";
         void Report(string message)
         {
             _chatMessages.Add(new ChatLine("系统", UiStrings.T(message)));
@@ -299,12 +312,15 @@ public sealed partial class MainWindow
             Paragraph(UiStrings.F("记录编号：{0}", requestId)),
             Paragraph(UiStrings.F("发送尝试时间（UTC）：{0}", attemptedAtUtc)),
             Paragraph(UiStrings.F("内容校验短哈希：{0}", contentLabel)));
+        TextBox? original = null;
+        string? originalAnswer = null;
         if (matchingAnswers.Count == 1)
         {
+            originalAnswer = matchingAnswers[0].Text;
             details.Children.Add(Paragraph(UiStrings.T("本次运行中匹配的原文"), true));
-            var original = Identify(new TextBox
+            original = Identify(new TextBox
             {
-                Text = matchingAnswers[0].Text, IsReadOnly = true, AcceptsReturn = true,
+                AcceptsReturn = true, Text = originalAnswer, IsReadOnly = true,
                 TextWrapping = TextWrapping.Wrap, Height = 140
             }, "chat-resolve-original-text");
             ScrollViewer.SetVerticalScrollBarVisibility(original, ScrollBarVisibility.Auto);
@@ -313,6 +329,11 @@ public sealed partial class MainWindow
         else
         {
             details.Children.Add(Paragraph(UiStrings.T("本次运行没有可匹配的原文；仅在你能从钉钉记录确认具体消息时继续，否则取消。")));
+        }
+        if (original is not null && !ChatPreviewMatches(originalAnswer!, original.Text))
+        {
+            Report(originalMismatch);
+            return;
         }
 
         var dialog = Identify(new ContentDialog
@@ -329,6 +350,11 @@ public sealed partial class MainWindow
             }
         }, "chat-resolve-confirm");
         if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary) return;
+        if (original is not null && !ChatPreviewMatches(originalAnswer!, original.Text))
+        {
+            Report(originalMismatch);
+            return;
+        }
 
         await RunOperationAsync(UiStrings.T("正在处理发送阻断…"), async () =>
         {
@@ -353,5 +379,16 @@ public sealed partial class MainWindow
             }
             Report(resultStatus);
         });
+    }
+
+    private static string NormalizeChatNewlines(string text) => text.Replace("\r\n", "\n").Replace("\r", "\n");
+
+    private static bool ChatPreviewMatches(string expected, string actual)
+    {
+        // Only newline encoding may differ. Preserve every character, empty line
+        // and trailing line; do not trim, fold whitespace or normalize Unicode.
+        string[] expectedLines = NormalizeChatNewlines(expected).Split('\n');
+        string[] actualLines = NormalizeChatNewlines(actual).Split('\n');
+        return expectedLines.Length == actualLines.Length && expectedLines.SequenceEqual(actualLines, StringComparer.Ordinal);
     }
 }

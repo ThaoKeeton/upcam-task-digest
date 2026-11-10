@@ -476,10 +476,19 @@ public sealed partial class MainWindow
     private async Task VerifyChatAsync(string output)
     {
         if (!_smoke) throw new InvalidOperationException("Chat diagnostics require synthetic smoke mode.");
+        VerifyChatMultilineControls();
         Navigate("chat");
         await WaitForAsync(() => Find<TextBox>("chat-message-input") is not null);
         Assert(Find<Button>("chat-send-preview") is { IsEnabled: false },
             "Chat cannot send before an answer exists");
+        const string multilineInput = "CI synthetic input\nsecond line 🧪\n\nlast line  \n";
+        Find<TextBox>("chat-message-input")!.Text = multilineInput;
+        await WaitForAsync(() => ChatPreviewMatches(multilineInput, _chatInput));
+        Navigate("home"); Navigate("chat");
+        await WaitForAsync(() => Find<TextBox>("chat-message-input") is { IsLoaded: true });
+        Assert(ChatPreviewMatches(multilineInput, Find<TextBox>("chat-message-input")!.Text) &&
+            ChatPreviewMatches(multilineInput, _chatInput),
+            "Chat multiline composer survives navigation with every line intact");
         Find<TextBox>("chat-message-input")!.Text = "CI 虚构聊天";
         await WaitForAsync(() => _chatInput == "CI 虚构聊天");
         await InvokeWhenReadyAsync("chat-ask");
@@ -492,6 +501,8 @@ public sealed partial class MainWindow
         await CaptureAsync(Path.Combine(output, "chat-synthetic.png"));
         string? draftIdAtOpen = _chatDraftId;
         string answerAtOpen = _chatDraftAnswer;
+        Assert(NormalizeChatNewlines(answerAtOpen).Count(c => c == '\n') > 1,
+            "Synthetic chat preview regression uses a multiline draft");
         await InvokeWhenReadyAsync("chat-send-preview");
         await WaitForAsync(() => Find<TextBox>("chat-send-preview-text") is not null);
         var chatPreview = Find<TextBox>("chat-send-preview-text")!;
@@ -499,18 +510,6 @@ public sealed partial class MainWindow
         _smokeDiagnostics.Add($"chat-preview-state: draftIdStable={_chatDraftId == draftIdAtOpen}; " +
             $"draftAnswerStable={_chatDraftAnswer == answerAtOpen}");
         RecordSmokeTextComparison("chat-preview", answerAtOpen, previewAtFirstCheck, chatPreview.IsLoaded);
-        // Independent synthetic round trips, deliberately detached from the dialog.
-        // These observations do not replace or normalize the original assertion below.
-        foreach (var (label, newline) in new[] { ("LF", "\n"), ("CRLF", "\r\n"), ("CR", "\r") })
-        {
-            string original = "A" + newline + "B" + newline;
-            var probe = new TextBox
-            {
-                Text = original, IsReadOnly = true, AcceptsReturn = true,
-                TextWrapping = TextWrapping.Wrap, Height = 240
-            };
-            RecordSmokeTextComparison($"textbox-{label}-detached", original, probe.Text, probe.IsLoaded);
-        }
         var dispatcherTurn = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         bool enqueued = DispatcherQueue.TryEnqueue(() => dispatcherTurn.SetResult(true));
         _smokeDiagnostics.Add($"chat-preview-dispatch: enqueued={enqueued}");
@@ -524,8 +523,35 @@ public sealed partial class MainWindow
             RecordSmokeTextComparison("chat-preview-after-dispatch", answerAtOpen, previewAfterDispatch, chatPreview.IsLoaded);
             RecordSmokeTextComparison("chat-preview-first-vs-after-dispatch", previewAtFirstCheck, previewAfterDispatch, chatPreview.IsLoaded);
         }
-        Assert(Find<TextBox>("chat-send-preview-text")!.Text == _chatDraftAnswer,
-            "Chat confirmation previews exactly the answer to be sent");
+        Assert(ChatPreviewMatches(_chatDraftAnswer, previewAtFirstCheck) &&
+            ChatPreviewMatches(_chatDraftAnswer, Find<TextBox>("chat-send-preview-text")!.Text),
+            "Chat confirmation preserves every draft line and character except newline encoding");
+        int messageCountBeforeSend = _chatMessages.Count;
+        foreach (string alteredPreview in new[] { NormalizeChatNewlines(answerAtOpen).Split('\n')[0],
+            answerAtOpen + " CI synthetic changed preview" })
+        {
+            chatPreview.Text = alteredPreview;
+            Invoke(await WaitForPrimaryAsync());
+            await WaitForAsync(() => Find<ContentDialog>("chat-send-confirm") is null &&
+                StatusText.Text == UiStrings.T("发送预览与答复不一致，已阻止发送。请重新打开预览后再确认。"));
+            Assert(!_busy && _chatDraftId == draftIdAtOpen && _chatDraftAnswer == answerAtOpen &&
+                _chatMessages.Count == messageCountBeforeSend,
+                "Changed synthetic chat preview cannot send or consume its draft");
+            await InvokeWhenReadyAsync("chat-send-preview");
+            await WaitForAsync(() => Find<TextBox>("chat-send-preview-text") is { IsLoaded: true });
+            chatPreview = Find<TextBox>("chat-send-preview-text")!;
+            Assert(ChatPreviewMatches(answerAtOpen, chatPreview.Text),
+                "Reopened chat preview restores the complete unchanged draft");
+        }
+        Find<ContentDialog>("chat-send-confirm")!.Hide();
+        await WaitForAsync(() => Find<ContentDialog>("chat-send-confirm") is null);
+        Assert(_chatDraftId == draftIdAtOpen && _chatDraftAnswer == answerAtOpen &&
+            _chatMessages.Count == messageCountBeforeSend,
+            "Canceling a reopened chat preview preserves its draft");
+        await InvokeWhenReadyAsync("chat-send-preview");
+        await WaitForAsync(() => Find<TextBox>("chat-send-preview-text") is { IsLoaded: true });
+        Assert(ChatPreviewMatches(answerAtOpen, Find<TextBox>("chat-send-preview-text")!.Text),
+            "Final chat confirmation shows the complete unchanged draft");
         Invoke(await WaitForPrimaryAsync());
         await WaitForAsync(() => !_busy && _chatMessages.Any(line => line.Text.Contains("钉钉机器人已确认接收")));
         Assert(_chatDraftId is null, "Confirmed synthetic chat send consumes its draft");
@@ -538,6 +564,32 @@ public sealed partial class MainWindow
         Assert(_chatDraftId is null, "Clearing chat removes the conversation and pending draft");
     }
 
+    private void VerifyChatMultilineControls()
+    {
+        // Same synthetic text and settings; vary only when multiline is enabled.
+        foreach (var (label, newline) in new[] { ("LF", "\n"), ("CRLF", "\r\n"), ("CR", "\r") })
+        {
+            string original = "A" + newline + "B 🧪\t  " + newline + newline + "C  " + newline;
+            var textFirst = new TextBox
+            {
+                Text = original, IsReadOnly = true, AcceptsReturn = true,
+                TextWrapping = TextWrapping.Wrap, Height = 240
+            };
+            var acceptsReturnFirst = new TextBox
+            {
+                AcceptsReturn = true, Text = original, IsReadOnly = true,
+                TextWrapping = TextWrapping.Wrap, Height = 240
+            };
+            RecordSmokeTextComparison($"textbox-{label}-text-first", original, textFirst.Text, textFirst.IsLoaded);
+            RecordSmokeTextComparison($"textbox-{label}-accepts-return-first", original, acceptsReturnFirst.Text, acceptsReturnFirst.IsLoaded);
+            Assert(ChatPreviewMatches(original, "A\nB 🧪\t  \n\nC  \n") && ChatPreviewMatches(original, acceptsReturnFirst.Text),
+                $"AcceptsReturn-first {label} native textbox retains every line and character");
+            Assert(!ChatPreviewMatches(original, "A") && !ChatPreviewMatches(original, original + newline) &&
+                !ChatPreviewMatches(original, original.Replace("B", "X")) && !ChatPreviewMatches(original, original.Trim()),
+                $"Strict {label} preview comparison rejects truncation, extra lines, changed characters and trimmed whitespace");
+        }
+    }
+
     private void RecordSmokeTextComparison(string label, string expected, string actual, bool isLoaded)
     {
         if (!_smoke) return;
@@ -547,14 +599,14 @@ public sealed partial class MainWindow
         if (firstDifference == expected.Length && firstDifference == actual.Length) firstDifference = -1;
         string UnitAt(string text) => firstDifference < 0 ? "none" : firstDifference >= text.Length ? "END" :
             $"0x{(int)text[firstDifference]:X4}";
-        static string NormalizeNewlines(string text) => text.Replace("\r\n", "\n").Replace("\r", "\n");
         // UTF-16 code units, counts and equality only. Never record text or draft IDs.
         _smokeDiagnostics.Add($"{label}: isLoaded={isLoaded}; " +
             $"expectedUtf16Length={expected.Length}; actualUtf16Length={actual.Length}; " +
+            $"expectedLines={NormalizeChatNewlines(expected).Split('\n').Length}; actualLines={NormalizeChatNewlines(actual).Split('\n').Length}; " +
             $"expectedCR={expected.Count(c => c == '\r')}; expectedLF={expected.Count(c => c == '\n')}; " +
             $"actualCR={actual.Count(c => c == '\r')}; actualLF={actual.Count(c => c == '\n')}; " +
             $"firstMismatchUtf16Index={firstDifference}; expectedUnit={UnitAt(expected)}; actualUnit={UnitAt(actual)}; " +
-            $"exactEqual={expected == actual}; newlineNormalizedEqual={NormalizeNewlines(expected) == NormalizeNewlines(actual)}");
+            $"exactEqual={expected == actual}; newlineNormalizedEqual={ChatPreviewMatches(expected, actual)}");
     }
 
     private async Task VerifyCollectionProgressControlsAsync()

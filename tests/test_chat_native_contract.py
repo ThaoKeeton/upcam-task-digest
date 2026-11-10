@@ -2,6 +2,7 @@
 import ast
 import json
 from pathlib import Path
+import re
 import unittest
 from tests.test_interface_resources import _csharp_literals, CJK
 
@@ -65,16 +66,70 @@ class ChatNativeContractTests(unittest.TestCase):
         self.assertIn('chat-send-preview', source)
         self.assertIn('CI 虚构聊天', source)
 
-    def test_preview_diagnostics_survive_the_original_exact_comparison_failure(self):
+    def test_chat_multiline_controls_enable_returns_before_assigning_text(self):
+        source = (UI / 'MainWindow.Chat.cs').read_text(encoding='utf-8')
+        controls = dict((match.group('id'), match.group('body')) for match in re.finditer(
+            r'new TextBox\s*\{(?P<body>.*?)\}, "(?P<id>chat-[^"]+)"', source, re.S))
+        for identifier in ('chat-message-input', 'chat-send-preview-text', 'chat-resolve-original-text'):
+            with self.subTest(control=identifier):
+                body = controls[identifier]
+                self.assertLess(body.index('AcceptsReturn = true'), re.search(r'\bText\s*=', body).start())
+
+    def test_native_smoke_covers_multiline_rebuild_and_rejects_content_changes(self):
+        source = (UI / 'MainWindow.Smoke.cs').read_text(encoding='utf-8')
+        self.assertIn('VerifyChatMultilineControls();', source)
+        self.assertIn('"Chat multiline composer survives navigation with every line intact"', source)
+        for case in ('!ChatPreviewMatches(original, "A")',
+                     '!ChatPreviewMatches(original, original + newline)',
+                     '!ChatPreviewMatches(original, original.Replace("B", "X"))',
+                     '!ChatPreviewMatches(original, original.Trim())'):
+            self.assertIn(case, source)
+        page = (UI / 'MainWindow.Chat.cs').read_text(encoding='utf-8')
+        self.assertIn('expectedLines.SequenceEqual(actualLines, StringComparer.Ordinal)', page)
+
+    def test_send_preview_fails_closed_before_confirmation_and_before_dispatch(self):
+        source = (UI / 'MainWindow.Chat.cs').read_text(encoding='utf-8')
+        send = source.split('private async Task SendChatDraftAsync()', 1)[1].split(
+            'private async Task ResolveChatSendAsync()', 1)[0]
+        guards = list(re.finditer(r'if \(!ChatPreviewMatches\(answer, previewText.Text\)\)\s*'
+                                 r'\{\s*SetStatus\(previewMismatch\);\s*return;\s*\}', send))
+        self.assertEqual(len(guards), 2)
+        show = send.index('await ShowDialogAsync(preview)')
+        self.assertLess(guards[0].start(), show)
+        self.assertLess(show, guards[1].start())
+        self.assertLess(guards[1].end(), send.index('_chatDraftId = null;'))
+        self.assertLess(guards[1].end(), send.index('Worker.SendAsync("chat_send"'))
+        self.assertIn('_chatDraftId != draftId || _chatDraftAnswer != answer', send)
+
+    def test_optional_recovery_original_fails_closed_before_confirmation_and_resolution(self):
+        source = (UI / 'MainWindow.Chat.cs').read_text(encoding='utf-8')
+        recovery = source.split('private async Task ResolveChatSendAsync()', 1)[1]
+        guard = 'if (original is not null && !ChatPreviewMatches(originalAnswer!, original.Text))'
+        self.assertEqual(recovery.count(guard), 2)
+        first, second = recovery.index(guard), recovery.rindex(guard)
+        show = recovery.index('await ShowDialogAsync(dialog)')
+        self.assertLess(first, show)
+        self.assertLess(show, second)
+        self.assertLess(second, recovery.index('Worker.SendAsync("chat_resolve_send"'))
+        for block in recovery.split(guard)[1:]:
+            self.assertRegex(block, r'^\s*\{\s*Report\(originalMismatch\);\s*return;\s*\}')
+
+    def test_native_smoke_rejects_altered_preview_then_cancels_and_reopens(self):
+        source = (UI / 'MainWindow.Smoke.cs').read_text(encoding='utf-8')
+        self.assertIn('chatPreview.Text = alteredPreview;', source)
+        self.assertIn('"Changed synthetic chat preview cannot send or consume its draft"', source)
+        self.assertIn('"Canceling a reopened chat preview preserves its draft"', source)
+
+    def test_preview_diagnostics_survive_a_full_text_comparison_failure(self):
         source = (UI / 'MainWindow.Smoke.cs').read_text(encoding='utf-8')
         chat = source.split('private async Task VerifyChatAsync(string output)', 1)[1]
         chat = chat.split('private async Task VerifyCollectionProgressControlsAsync()', 1)[0]
-        # Collect evidence before the existing throw; do not weaken it to normalized equality.
+        # Only newline encoding may differ; all lines and characters must still match.
         self.assertIn('RecordSmokeTextComparison("chat-preview"', chat)
         self.assertLess(chat.index('if (!_smoke)'), chat.index('Navigate("chat")'))
         self.assertLess(chat.index('string answerAtOpen = _chatDraftAnswer;'),
                         chat.index('await InvokeWhenReadyAsync("chat-send-preview");'))
-        original_assertion = 'Assert(Find<TextBox>("chat-send-preview-text")!.Text == _chatDraftAnswer,'
+        original_assertion = 'Assert(ChatPreviewMatches(_chatDraftAnswer, previewAtFirstCheck) &&'
         self.assertIn(original_assertion, chat)
         self.assertLess(chat.index('RecordSmokeTextComparison("chat-preview"'),
                         chat.index(original_assertion))
@@ -83,8 +138,9 @@ class ChatNativeContractTests(unittest.TestCase):
                         chat.index('RecordSmokeTextComparison("chat-preview-after-dispatch"'))
         self.assertLess(chat.index('RecordSmokeTextComparison("chat-preview-first-vs-after-dispatch"'),
                         chat.index(original_assertion))
-        self.assertLess(chat.index('RecordSmokeTextComparison($"textbox-{label}-detached"'),
-                        chat.index(original_assertion))
+        self.assertLess(chat.index('VerifyChatMultilineControls();'), chat.index(original_assertion))
+        self.assertIn('RecordSmokeTextComparison($"textbox-{label}-text-first"', chat)
+        self.assertIn('RecordSmokeTextComparison($"textbox-{label}-accepts-return-first"', chat)
         for fixture in (r'("LF", "\n")', r'("CRLF", "\r\n")', r'("CR", "\r")'):
             self.assertIn(fixture, chat)
         finish = source.split('private void FinishSmoke(bool success, string message)', 1)[1]
