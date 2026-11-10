@@ -83,6 +83,15 @@ class McpSetupOrderTests(unittest.TestCase):
         self.assertNotIn('只发送必要评论摘要', messages[-1])
         app._job_lock.release()
 
+    def test_native_smoke_uses_current_scope_diagnostic_copy(self):
+        source = (Path(__file__).resolve().parents[1] / 'winui' / 'UPCAMTaskDigest' / 'MainWindow.Smoke.cs').read_text(encoding='utf-8')
+        self.assertNotIn('窗口内未支持动作：0 条', source)
+        self.assertNotIn('时间归属无法判断的未支持动作：0 条', source)
+        self.assertNotIn('copiedDiagnostic.Contains("只读校验通过")', source)
+        self.assertIn('窗口内旧解析器未分类动作 0 条', source)
+        self.assertIn('时间归属无法判断的动作：0 条', source)
+        self.assertIn('copiedDiagnostic.Contains("只读范围检查通过")', source)
+
     def test_token_precedes_project_loading_selection_and_manual_ids(self):
         app = self.build_form()
         form = app.settings_tab

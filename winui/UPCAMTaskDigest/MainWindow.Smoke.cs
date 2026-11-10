@@ -224,8 +224,9 @@ public sealed partial class MainWindow
             await InvokeWhenReadyAsync("diagnose");
             await WaitForAsync(() => !_busy);
             Assert(_state.ExportAvailable && _state.Output.Contains("通过"), "Read-only diagnostic button and safe export availability");
-            Assert(_state.Output.Contains("窗口内未支持动作：0 条") && _state.Output.Contains("时间归属无法判断的未支持动作：0 条"),
-                "Native diagnostics distinguish unsupported actions from unknown time membership");
+            Assert(_state.Output.Contains("窗口内旧解析器未分类动作 0 条") &&
+                _state.Output.Contains("时间归属无法判断的动作：0 条"),
+                "Native diagnostics distinguish legacy parser counts from unknown time membership");
             string previousDiagnostic = _state.DiagnosticText;
             await InvokeWhenReadyAsync("export-detailed-diagnostic");
             await WaitForAsync(() => Find<ContentDialog>("detailed-export-consent") is not null);
@@ -260,7 +261,7 @@ public sealed partial class MainWindow
             await InvokeWhenReadyAsync("copy-diagnostic");
             await WaitForAsync(() => !_busy);
             string copiedDiagnostic = await Windows.ApplicationModel.DataTransfer.Clipboard.GetContent().GetTextAsync();
-            Assert(copiedDiagnostic == _state.DiagnosticText && copiedDiagnostic.Contains("只读校验通过"),
+            Assert(copiedDiagnostic == _state.DiagnosticText && copiedDiagnostic.Contains("只读范围检查通过"),
                 "Native copy button copies only the current local diagnostic");
             Assert(Title.Contains("v" + _state.ApplicationVersion) &&
                 _state.ApplicationVersion == typeof(MainWindow).Assembly.GetName().Version?.ToString(3),
