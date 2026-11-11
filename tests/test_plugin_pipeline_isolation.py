@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from upcam_app import APP_VERSION
+from upcam_app import PLUGIN_BACKEND_VERSION
 from upcam_app.plugin_worker import PluginWorkerService
 from upcam_app.smoke_data import make_smoke_service, SyntheticClient, SyntheticSummarizer
 from upcam_app.worker_api import WorkerApiError
@@ -15,7 +15,7 @@ from upcam_app.workflow import DigestWorkflow
 
 
 WINDOW = {"start": "2026-11-03 16:50", "end": "2026-11-04 08:50"}
-HANDSHAKE = {"protocol_version": 1, "backend_version": APP_VERSION,
+HANDSHAKE = {"protocol_version": 1, "backend_version": PLUGIN_BACKEND_VERSION,
              "nonce": "0123456789abcdef0123456789abcdef"}
 
 

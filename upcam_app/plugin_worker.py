@@ -19,7 +19,7 @@ import sys
 import threading
 from urllib.parse import parse_qsl, urlsplit
 
-from . import APP_VERSION, RULESET_REVISION
+from . import PLUGIN_BACKEND_VERSION, RULESET_REVISION
 from .config import DEFAULT_SETTINGS, SettingsError, SettingsStore, atomic_write, validate_settings
 from .preferences import PREFERENCE_DEFAULTS, preference_values
 from .secrets import INTERNAL_SECRET_FIELDS, SECRET_FIELDS, MemorySecretStore, SecretStoreError, teambition_mcp_identity, MCP_AUTHORIZATION_FIELD
@@ -182,7 +182,7 @@ class PluginWorkerService:
             if (operation != "plugin_handshake" or set(payload) != {"protocol_version", "backend_version", "nonce"}
                     or type(payload.get("protocol_version")) is not int
                     or payload["protocol_version"] != PROTOCOL_VERSION
-                    or payload.get("backend_version") != APP_VERSION
+                    or payload.get("backend_version") != PLUGIN_BACKEND_VERSION
                     or not isinstance(payload.get("nonce"), str)
                     or not re.fullmatch(r"[0-9a-f]{32}", payload["nonce"])):
                 raise WorkerApiError(_HANDSHAKE_ERROR)
@@ -241,6 +241,10 @@ class PluginWorkerService:
                 result = self._run_due_authorized(payload)
             else:
                 result = self._service.dispatch(request)
+                if operation == "initialize":
+                    # Native acceptance and PluginState require the pinned backend
+                    # identity. Standalone initialize keeps APP_VERSION.
+                    result = {**result, "application_version": PLUGIN_BACKEND_VERSION}
             self._shutdown = bool(getattr(self._service, "_shutdown", False))
             secrets.extend(_credential_values(self._service.secret_store.load()))
             _require_secret_free(result, secrets)
@@ -278,7 +282,7 @@ class PluginWorkerService:
         authorization = {
             "schema_version": 1,
             "data_directory": str(self.data_directory),
-            "application_version": APP_VERSION,
+            "application_version": PLUGIN_BACKEND_VERSION,
             "ruleset_revision": RULESET_REVISION,
             "settings": {key: value for key, value in settings.items() if key not in PREFERENCE_DEFAULTS},
             "credential_fingerprint": credential_fingerprint,
@@ -290,7 +294,7 @@ class PluginWorkerService:
             "authorized": True,
             "authorization_fingerprint": fingerprint,
             "data_directory": str(self.data_directory),
-            "application_version": APP_VERSION,
+            "application_version": PLUGIN_BACKEND_VERSION,
             "ruleset_revision": RULESET_REVISION,
         }
 

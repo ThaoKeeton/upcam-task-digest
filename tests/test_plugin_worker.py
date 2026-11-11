@@ -18,7 +18,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import quote
 
-from upcam_app import APP_VERSION, RULESET_REVISION
+from upcam_app import APP_VERSION, PLUGIN_BACKEND_VERSION, RULESET_REVISION
 from upcam_app.config import DEFAULT_SETTINGS, SettingsStore
 from upcam_app.preferences import PREFERENCE_DEFAULTS, preference_values
 from upcam_app.secrets import SecretStoreError, teambition_mcp_identity, MCP_AUTHORIZATION_FIELD
@@ -31,7 +31,7 @@ from report_contract import updated_selection
 REPOSITORY = Path(__file__).resolve().parents[1]
 HANDSHAKE = {
     "protocol_version": 1,
-    "backend_version": APP_VERSION,
+    "backend_version": PLUGIN_BACKEND_VERSION,
     "nonce": "0123456789abcdef0123456789abcdef",
 }
 WINDOW = {"start": "2026-11-03 16:50", "end": "2026-11-04 08:50"}
@@ -56,7 +56,11 @@ class PluginWorkerTests(unittest.TestCase):
     def ready(self, plugin):
         result = plugin.dispatch({"op": "plugin_handshake", "payload": HANDSHAKE})
         self.assertEqual(result["mode"], "project-workbench")
-        return plugin.dispatch({"op": "initialize", "payload": {}})
+        self.assertEqual(result["backend_version"], PLUGIN_BACKEND_VERSION)
+        initialized = plugin.dispatch({"op": "initialize", "payload": {}})
+        self.assertEqual(initialized["application_version"], PLUGIN_BACKEND_VERSION)
+        self.assertNotEqual(PLUGIN_BACKEND_VERSION, APP_VERSION)
+        return initialized
 
     def authorized_fixture(self, name="authorized-profile"):
         directory = self.root / name
@@ -170,7 +174,7 @@ class PluginWorkerTests(unittest.TestCase):
     def test_bad_handshake_locks_session_without_profile_or_factory_side_effects(self):
         invalid = [
             {**HANDSHAKE, "protocol_version": 2}, {**HANDSHAKE, "protocol_version": True},
-            {**HANDSHAKE, "backend_version": "0.4.2"}, {**HANDSHAKE, "backend_version": "0.4.6"},
+            {**HANDSHAKE, "backend_version": "0.4.2"}, {**HANDSHAKE, "backend_version": APP_VERSION},
             {**HANDSHAKE, "nonce": "a" * 31},
             {**HANDSHAKE, "nonce": "A" * 32}, {**HANDSHAKE, "nonce": "g" * 32},
             {**HANDSHAKE, "extra": True}, {},
@@ -872,7 +876,7 @@ class PluginWorkerTests(unittest.TestCase):
         self.assertIs(result["authorized"], True)
         self.assertRegex(result["authorization_fingerprint"], r"^[0-9a-f]{64}$")
         self.assertEqual(result["data_directory"], str(directory.resolve()))
-        self.assertEqual(result["application_version"], APP_VERSION)
+        self.assertEqual(result["application_version"], PLUGIN_BACKEND_VERSION)
         self.assertEqual(result["ruleset_revision"], RULESET_REVISION)
         self.assertEqual({name: (directory / name).read_bytes() for name in files}, before)
         self.assertEqual(service.secret_store.load(), credentials)
