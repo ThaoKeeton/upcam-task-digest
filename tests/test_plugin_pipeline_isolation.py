@@ -20,6 +20,13 @@ HANDSHAKE = {"protocol_version": 1, "backend_version": PLUGIN_BACKEND_VERSION,
 
 
 class PluginPipelineIsolationTests(unittest.TestCase):
+    def test_plugin_detailed_export_keeps_the_read_only_diagnosis_text(self):
+        source = (Path(__file__).resolve().parents[1] / "plugins/UPCAM.Workbench/DigestPage.cs").read_text(encoding="utf-8")
+        method = source.split("private static string ApplyDetailedExportResult", 1)[1].split(
+            "private FrameworkElement BuildHistory", 1)[0]
+        self.assertNotIn("ApplyDiagnostic(", method)
+        self.assertNotIn("data.Output", method)
+        self.assertIn("诊断结果已保留", method)
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="upcam-pipeline-isolation-")
         self.addCleanup(temporary.cleanup)
