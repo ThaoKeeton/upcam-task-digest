@@ -243,7 +243,11 @@ class ConcurrentCollectionTests(unittest.TestCase):
         transport = ConcurrentTransport([task(i) for i in range(3)], latency=.30)
         result = collect(transport)
         starts = [instant for _, _, instant in transport.requests]
-        self.assertTrue(all(b - a >= .245 for a, b in zip(starts, starts[1:])), starts)
+        gaps = [b - a for a, b in zip(starts, starts[1:])]
+        # The gate still targets 0.25 s. Windows CI monotonic time is quantized
+        # near 15.6 ms, so a true gap can be recorded about one tick short.
+        # RequestGateTests covers the exact interval with a fake clock.
+        self.assertGreaterEqual(min(gaps), 0.25 - 0.02, gaps)
         self.assertGreater(transport.peak, 1)
         self.assertEqual(result['collection_stats']['requests'], 20)
 
@@ -272,7 +276,7 @@ class ConcurrentCollectionTests(unittest.TestCase):
         client.collect('fictional-project', day='2026-01-02')
         before = len(transport.requests)
         client.collect('fictional-project', day='2026-01-02')
-        self.assertGreaterEqual(transport.requests[before][2] - transport.requests[before - 1][2], .245)
+        self.assertGreaterEqual(transport.requests[before][2] - transport.requests[before - 1][2], 0.25 - 0.02)
 
     def test_worker_bounds_are_validated(self):
         for bad in (0, 5, True, 1.5):
