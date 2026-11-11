@@ -302,6 +302,15 @@ jobs:
           $hostDirectory = Join-Path (Get-Location) 'pairing-host'
           dotnet publish integrations/project-workbench/shipping-pairing/ShippingInstall/ShippingInstall.csproj -c Release -r win-x64 --self-contained false "-p:ShippingHostDirectory=$hostDirectory" -o pairing-installer
           if ($LASTEXITCODE -ne 0) { throw 'Shipping Core installer build failed.' }
+      - name: Verify pure SHA256 and safe failure helpers in Windows PowerShell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = Get-Location
+          $powershell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+          & $powershell -NoProfile -NonInteractive -STA -File (Join-Path $base 'integrations/project-workbench/shipping-pairing/test-hash-helper.ps1') -DriverPath (Join-Path $base 'integrations/project-workbench/shipping-pairing/test-shipping-host.ps1') -ReportPath (Join-Path $base 'pairing-evidence/hash-helper.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Pure SHA256 helper regression failed.' }
+          Get-Content pairing-evidence/hash-helper.json
       - name: Install, trust, diagnose prerequisite, disable and close exact shipping pair
         shell: pwsh
         run: |

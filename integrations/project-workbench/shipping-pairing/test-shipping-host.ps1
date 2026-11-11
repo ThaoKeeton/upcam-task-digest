@@ -7,6 +7,8 @@ Only a fresh GitHub-hosted Windows runner with an interactive desktop is allowed
 The host's normal user directory must not exist. This script never removes that
 directory, reads an existing profile, or supplies service credentials. The only
 diagnostic call has empty project/tenant and is required to reject before collection. Use Windows PowerShell 5.1 with -STA for built-in WPF UIA.
+The owned normal window counts only after its title is exactly Default · Project Workbench.
+Byte identity uses Read-Sha256. A legacy Get-FileHash expression is recorded as a sanitized probe and cannot decide the check.
 #>
 [CmdletBinding()]
 param(
@@ -82,6 +84,9 @@ $script:result = [ordered]@{
     cleanup = 'not-started'
     screenshot = 'not-requested'
     selectorDiagnostic = $null
+    failureClassification = $null
+    hashCmdletProbe = $null
+    shippingHostHashes = $null
     serviceOperationsInvoked = $false
     localPrerequisiteDiagnosticInvoked = $false
     serviceCredentialEnvironmentInherited = $false
@@ -97,6 +102,43 @@ function Set-Phase([string]$Name, [string]$Failure) {
 function Assert-Check([string]$Name, [bool]$Condition) {
     $script:checks[$Name] = $Condition
     if (-not $Condition) { throw 'A fixed native UI check failed.' }
+}
+
+# Do not depend on cross-edition PowerShell module auto-loading for byte identity.
+# This .NET Framework-compatible implementation performs the same SHA256 check.
+function Read-Sha256([string]$Path) {
+    $stream = $null
+    $algorithm = $null
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        if ($null -ne $algorithm) { $algorithm.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
+function Get-SafeFailure($Record) {
+    # No exception message, target value, path, source line text or environment.
+    $kind = 'other'
+    $errorType = $Record.Exception.GetType().FullName
+    if ($errorType -ceq 'System.Management.Automation.CommandNotFoundException') { $kind = 'command-unavailable' }
+    elseif ($errorType -match '^System\.Management\.Automation\.ParameterBinding') { $kind = 'parameter-binding' }
+    elseif ($errorType -ceq 'System.IO.FileNotFoundException') { $kind = 'missing-file' }
+    elseif ($errorType -ceq 'System.IO.DirectoryNotFoundException') { $kind = 'missing-directory' }
+    elseif ($errorType -ceq 'System.UnauthorizedAccessException') { $kind = 'access-denied' }
+    elseif ($errorType -ceq 'System.Management.Automation.PropertyNotFoundException') { $kind = 'property-unavailable' }
+    elseif ($errorType -ceq 'System.Management.Automation.RuntimeException') { $kind = 'runtime-evaluation' }
+    $command = 'other'
+    if ($null -ne $Record.InvocationInfo -and $null -ne $Record.InvocationInfo.MyCommand) {
+        foreach ($allowed in @('Get-FileHash', 'Join-Path', 'Split-Path', 'Read-Sha256', 'Assert-Check')) {
+            if ($Record.InvocationInfo.MyCommand.Name -ceq $allowed) { $command = $allowed }
+        }
+    }
+    $line = if ($null -ne $Record.InvocationInfo) { [int]$Record.InvocationInfo.ScriptLineNumber } else { 0 }
+    return [ordered]@{ kind = $kind; command = $command; line = $line }
 }
 
 function Wait-For([scriptblock]$Probe, [int]$Seconds = 30) {
@@ -466,7 +508,8 @@ public sealed class UpcamRealHostRun : IDisposable
             if (id == (uint)HostId && IsWindowVisible(window))
             {
                 var text = new StringBuilder(256); GetWindowTextW(window, text, text.Capacity);
-                if (text.ToString() == "Project Workbench · 原生插件工作台") found = window;
+                // Workbench 0.4 normal mode replaces its startup title after the fresh Default workspace is ready.
+                if (text.ToString() == "Default · Project Workbench") found = window;
             }
             return true;
         }, IntPtr.Zero);
@@ -567,8 +610,22 @@ public sealed class UpcamRealHostRun : IDisposable
     # Grant evidence writes only after the fresh-root gate and every evidence path check.
     # In particular, an existing root reached through an 8.3 alias cannot reach this grant.
     $script:canWriteReport = $true
-    Assert-Check 'exactShippingHostBytes' (((Get-FileHash -LiteralPath $hostFile -Algorithm SHA256).Hash -eq '48598e37f84e1f0ca60b0fadaa33a540876d5b83b6db08da593d8b48e33c35ac') -and
-        ((Get-FileHash -LiteralPath (Join-Path (Split-Path $hostFile -Parent) 'Workbench.App.dll') -Algorithm SHA256).Hash -eq '25aa56d72caf6b137250b7be75d4e5c5f1e49a3ed4339081f50a7e209dbfd69b'))
+    Set-Phase 'shipping-hash' 'shipping-host-byte-check-failed'
+    # One bounded reproduction of the old expression supplies sanitized evidence
+    # for the WinPS 5.1-only harness failure. It never substitutes for SHA validation.
+    try {
+        $legacyMatches = (((Get-FileHash -LiteralPath $hostFile -Algorithm SHA256).Hash -eq '48598e37f84e1f0ca60b0fadaa33a540876d5b83b6db08da593d8b48e33c35ac') -and
+            ((Get-FileHash -LiteralPath (Join-Path (Split-Path $hostFile -Parent) 'Workbench.App.dll') -Algorithm SHA256).Hash -eq '25aa56d72caf6b137250b7be75d4e5c5f1e49a3ed4339081f50a7e209dbfd69b'))
+        $script:result.hashCmdletProbe = [ordered]@{ succeeded = $true; matches = $legacyMatches; failure = $null }
+    }
+    catch { $script:result.hashCmdletProbe = [ordered]@{ succeeded = $false; matches = $null; failure = (Get-SafeFailure $_) } }
+    $hostDll = [IO.Path]::Combine([IO.Path]::GetDirectoryName($hostFile), 'Workbench.App.dll')
+    [UpcamRealHostRun]::RejectLinks($hostDll)
+    $actualExeHash = Read-Sha256 $hostFile
+    $actualDllHash = Read-Sha256 $hostDll
+    $script:result.shippingHostHashes = [ordered]@{ executableSha256 = $actualExeHash; dllSha256 = $actualDllHash; algorithm = 'SHA256' }
+    Assert-Check 'exactShippingHostBytes' ($actualExeHash -ceq '48598e37f84e1f0ca60b0fadaa33a540876d5b83b6db08da593d8b48e33c35ac' -and
+        $actualDllHash -ceq '25aa56d72caf6b137250b7be75d4e5c5f1e49a3ed4339081f50a7e209dbfd69b')
     $sourcePackage = [IO.Path]::GetFullPath($PackageDirectory)
     $installer = [IO.Path]::GetFullPath($InstallerExe)
     $installReport = [IO.Path]::GetFullPath($InstallReportPath)
@@ -603,9 +660,14 @@ public sealed class UpcamRealHostRun : IDisposable
     $script:owned = [UpcamRealHostRun]::Start($hostFile)
     $script:result.cleanup = 'pending'
     $handle = Wait-For { $candidate = $script:owned.FindHostWindow(); if ($candidate -ne [IntPtr]::Zero) { $candidate } } 60
-    $script:window = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+    # Only the same owned HWND, after its exact fresh Default workspace title is ready.
+    $script:window = Wait-For {
+        $candidateWindow = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+        if ($candidateWindow.Current.ProcessId -eq $script:owned.HostId -and
+            $candidateWindow.Current.Name -ceq 'Default · Project Workbench') { $candidateWindow }
+    } 30
     Assert-Check 'normalHostWindow' ($script:window.Current.ProcessId -eq $script:owned.HostId -and
-        $script:window.Current.Name -ceq 'Project Workbench · 原生插件工作台')
+        $script:window.Current.Name -ceq 'Default · Project Workbench')
 
     Set-Phase 'plugin-discovery' 'initial-production-plugin-state-invalid'
     Select-Exact '插件'
@@ -736,6 +798,7 @@ catch {
     # Deliberately omit exception messages, UI strings, paths, stacks, and response values from evidence.
     $script:result.status = 'failed'
     $script:result.failureCode = $script:failureCode
+    $script:result.failureClassification = Get-SafeFailure $_
     if ($null -ne $script:selectorProbe -and $script:selectorProbe.category -ne 'matched') {
         $script:result.selectorDiagnostic = $script:selectorProbe
     }
