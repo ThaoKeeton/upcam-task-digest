@@ -10,13 +10,17 @@ from pathlib import Path
 import re
 import sys
 import threading
+import time
 import uuid
 from urllib.parse import parse_qsl, urlsplit
 
 from automated_digest import collection_validation_message, diagnose_automatic_source
+from collection_progress import observe_collection, report_collection
 from delivery_guard import DeliveryBlocked, DeliveryGuard, initialize_ledger, validate_manual_delivery_options
 from openai_summarizer import KNOWN_FAST_MODELS
+from mcp_raw_digest import diagnose_raw_source
 from render_digest import render_digest
+from runtime_mappings import merge_discovered
 from report_contract import SHANGHAI, updated_selection
 from teambition_readonly import Client, CollectionError
 
@@ -27,7 +31,7 @@ from .config import (
 )
 from .diagnostic_export import safe_structure_export
 from .collection_checkpoint import CollectionCheckpointBusy, DpapiCollectionCheckpoint
-from .collection_runtime import make_collection_client
+from .collection_runtime import make_collection_client, list_mcp_projects
 from .dingtalk_mentions import MentionConfigError, mention_options, reject_credential_mentions
 from .diagnostic_files import write_private_diagnostic
 from . import APP_VERSION, RULESET_REVISION
@@ -40,10 +44,11 @@ from .project_setup import (
     parse_owner_mapping_tsv,
 )
 from .preferences import PREFERENCE_DEFAULTS, PreferenceError, preference_values, validate_update_token
+from .report_credentials import CredentialExposureBlocked, ReportCredentialGuard
 from .updates import GitHubUpdates, UpdateError
 from .secrets import (
-    INTERNAL_SECRET_FIELDS, SECRET_FIELDS, UPDATE_SECRET_FIELDS,
-    DpapiSecretStore, SecretStoreError,
+    INTERNAL_SECRET_FIELDS, SECRET_FIELDS, UPDATE_SECRET_FIELDS, revoke_missing_mcp_authorization, teambition_mcp_identity,
+    DpapiSecretStore, SecretStoreError, mcp_connection_authorized, MCP_AUTHORIZATION_FIELD,
 )
 from .windows_integration import StartupIntegrationError, configure_user_startup
 from .workflow import DigestWorkflow, WorkflowBlocked
@@ -72,7 +77,7 @@ class WorkerService:
                  secret_store=None, history=None, model_catalog=None,
                  startup_configurer=None, client_factory=Client,
                  workflow_factory=DigestWorkflow, sample_path=None, update_manager=None,
-                 checkpoint_factory=None):
+                 checkpoint_factory=None, pipeline_mode="raw"):
         self.data_dir = Path(data_dir or user_data_dir())
         self.settings_store = settings_store or SettingsStore(self.data_dir / "settings.json")
         self.secret_store = secret_store or DpapiSecretStore(self.data_dir / "credentials.dpapi")
@@ -87,9 +92,21 @@ class WorkerService:
         self._job_lock = threading.Lock()
         self._handled_schedule_slots: set[str] = set()
         self._setup_probe: dict | None = None
+        self._project_choices: dict[str, dict] = {}
+        self._project_choices_identity: str | None = None
         self._last_diagnostic_shape: dict | None = None
         self._last_diagnostic_context: str | None = None
         self._shutdown = False
+        self._chat_worker = None
+        self._set_pipeline_mode(pipeline_mode)
+
+    def _set_pipeline_mode(self, mode):
+        """Select a host contract in memory; no protocol/config field can set it."""
+        if mode not in ("raw", "legacy"):
+            raise WorkerApiError("Unsupported digest pipeline")
+        self._pipeline_mode = mode
+        self._last_diagnostic_shape = None
+        self._last_diagnostic_context = None
 
     def dispatch(self, request: dict) -> dict:
         if not isinstance(request, dict):
@@ -100,6 +117,11 @@ class WorkerService:
             raise WorkerApiError("请求格式无效。")
         handlers = {
             "initialize": self._initialize,
+            "chat_turn": lambda payload: self._chat().turn(payload),
+            "chat_reset": lambda payload: self._chat().reset(payload),
+            "chat_send": lambda payload: self._chat().send(payload),
+            "chat_resolve_preview": lambda payload: self._chat().resolve_preview(payload),
+            "chat_resolve_send": lambda payload: self._chat().resolve_send(payload),
             "save": self._save,
             "save_preferences": self._save_preferences,
             "check_updates": self._check_updates,
@@ -114,6 +136,8 @@ class WorkerService:
             "update_status_mapping": self._update_status_mapping,
             "update_view_filter": self._update_view_filter,
             "probe_project": self._probe_project,
+            "list_projects": self._list_projects,
+            "select_project": self._select_project,
             "diagnose": self._diagnose,
             "export_diagnostic": self._export_diagnostic,
             "diagnostic_status": self._diagnostic_status,
@@ -143,6 +167,15 @@ class WorkerService:
             # Exception text can include headers, response bodies, or user-entered data.
             raise WorkerApiError("操作未完成；详细 API 响应和凭据没有写入日志。请检查设置并重试。") from None
 
+    def _chat(self):
+        # The Workbench plugin remains on its separate legacy contract.
+        if self._pipeline_mode != "raw":
+            raise WorkerApiError("当前版本不支持聊天模式。")
+        if self._chat_worker is None:
+            from .chat_worker import ChatWorker
+            self._chat_worker = ChatWorker(self)
+        return self._chat_worker
+
     def _initialize(self, payload: dict) -> dict:
         self._require_empty_payload(payload)
         settings = self.settings_store.load()
@@ -154,6 +187,10 @@ class WorkerService:
             pass
         credentials = self.secret_store.load()
         reject_credential_mentions(settings, credentials)
+        migrated = revoke_missing_mcp_authorization(settings, credentials)
+        if migrated != settings:
+            self.settings_store.save(migrated)
+        settings = migrated
         self.history.recover_interrupted_sends()
         ledger_ready, ledger_message = self._ensure_ledger(credentials)
         credentials = self.secret_store.load()
@@ -285,6 +322,9 @@ class WorkerService:
         settings_input = payload.get("settings")
         secret_values = payload.get("secret_values", {})
         clear_secrets = payload.get("clear_secrets", [])
+        authorize_mcp = payload.get("authorize_teambition_mcp", False)
+        if type(authorize_mcp) is not bool:
+            raise WorkerApiError("MCP 连接授权选项无效；未保存任何更改。")
         if not isinstance(settings_input, dict) or not isinstance(secret_values, dict):
             raise WorkerApiError("设置内容无效；未保存任何更改。")
         if not isinstance(clear_secrets, list) or any(not isinstance(key, str) for key in clear_secrets):
@@ -301,6 +341,16 @@ class WorkerService:
         for key in clear_secrets:
             proposed_secrets.pop(key, None)
         proposed_secrets.update(entered)
+        if ("teambition_mcp_token" in clear_secrets or
+                proposed_secrets.get("teambition_mcp_token") != previous_secrets.get("teambition_mcp_token")):
+            # Revocation is permanent until this save receives a new explicit
+            # grant, even if the user later enters a previously authorized token.
+            proposed_secrets.pop(MCP_AUTHORIZATION_FIELD, None)
+        if authorize_mcp:
+            identity = teambition_mcp_identity(proposed_secrets)
+            if identity is None:
+                raise WorkerApiError("请先输入 Teambition MCP 个人 Token，再确认连接授权。")
+            proposed_secrets[MCP_AUTHORIZATION_FIELD] = identity
         credential_identity = _teambition_identity(proposed_secrets)
         previous_identity = _teambition_identity(previous_secrets)
         proposed = _verified_settings_for_save(
@@ -316,6 +366,8 @@ class WorkerService:
             # Saving the chosen scope requests verification; no client flag or
             # checkbox can establish a successful server-side read-only proof.
             scope_status = "请填写项目和 Teambition 凭据后保存，以完成只读核验。"
+            if teambition_mcp_identity(proposed_secrets) and not credential_identity:
+                scope_status = "Token 已保存在本机，但尚未授权连接官方 MCP；请在账户页确认后再核验。"
             if clean["tenant_id"] and clean["project_id"] and credential_identity:
                 window = payload.get("verification_window")
                 if not isinstance(window, dict):
@@ -330,6 +382,8 @@ class WorkerService:
                         ))
                         scope_probe = proof["discovery"]
                         scope_status = "项目范围已自动完成只读核验。"
+                    except CollectionError as exc:
+                        scope_status = collection_validation_message(exc)
                     except ProjectSetupError as exc:
                         scope_status = str(exc)
                     except (SettingsError, ValueError, TypeError):
@@ -492,6 +546,50 @@ class WorkerService:
         validate_view({"view": view})
         return {"filters": updated}
 
+    def _list_projects(self, payload: dict) -> dict:
+        self._require_empty_payload(payload)
+        self._project_choices = {}
+        self._project_choices_identity = None
+        credentials = self.secret_store.load()
+        identity = _teambition_identity(credentials)
+        if identity is None:
+            raise WorkerApiError("请先在账户页保存并确认授权本机连接 Teambition 官方 MCP；仅保存 Token 不会授权连接。")
+        if not self._job_lock.acquire(blocking=False):
+            raise WorkerApiError("已有采集或发送正在运行；请完成后再加载项目列表。")
+        try:
+            projects = list_mcp_projects(credentials, client_factory=self.client_factory)
+            if _teambition_identity(self.secret_store.load()) != identity:
+                raise WorkerApiError("MCP 授权在加载期间已改变；未返回项目列表，请重新授权后加载。")
+        except WorkerApiError:
+            raise
+        except Exception as exc:
+            if isinstance(exc, CollectionError) and str(exc) == "Teambition MCP authorization expired or denied":
+                raise WorkerApiError("Teambition MCP 个人 Token 已失效或无读取权限；请重新生成 Token 并保存，确认当前账户有项目读取权限。") from None
+            raise WorkerApiError("MCP 项目列表加载失败，可能是读取合同未核验、分页复核不一致或无权限；当前项目未更改。可手动输入 Tenant / Organization ID 和 Project ID 后再核验。") from None
+        finally:
+            self._job_lock.release()
+        self._project_choices = {project["id"]: dict(project) for project in projects}
+        self._project_choices_identity = identity
+        return {"projects": projects, "status": ("当前账号参与的可见项目，列表可能不完整；找不到可手动填 ID。列表不含归档项目，选择后保存生效。" if projects else
+                                                    "未找到当前账号参与的可见项目，列表可能不完整且不含归档项目；原项目配置保持不变，可手动填 ID。")}
+
+    def _select_project(self, payload: dict) -> dict:
+        if set(payload) != {"project_id"} or not isinstance(payload.get("project_id"), str):
+            raise WorkerApiError("项目选择无效；当前项目未更改。")
+        identity = _teambition_identity(self.secret_store.load())
+        if identity is None or identity != self._project_choices_identity:
+            raise WorkerApiError("项目列表对应的 MCP 授权已改变；请重新加载项目列表。")
+        selected = self._project_choices.get(payload["project_id"])
+        if selected is None:
+            raise WorkerApiError("请选择本次加载的项目；当前项目未更改。")
+        # Return a draft only. Persisting the scope still requires an explicit save.
+        draft = {"project_id": selected["id"], "tenant_id": selected["organizationId"],
+                 "name": selected["name"], "status": "项目已填入表单；原配置保持不变，保存后生效。"}
+        if "uniqueIdPrefix" in selected:
+            draft["task_number_prefix"] = selected["uniqueIdPrefix"]
+            draft["task_display_scope"] = {"tenant_id": selected["organizationId"], "project_id": selected["id"]}
+        return draft
+
     def _probe_project(self, payload: dict) -> dict:
         self._setup_probe = None
         settings = self.settings_store.load()
@@ -499,15 +597,19 @@ class WorkerService:
         settings = _merge_probe_inputs(settings, payload)
         if not settings.get("tenant_id") or not settings.get("project_id"):
             raise WorkerApiError("请先填写 Tenant ID 和 Project ID。")
-        if not secrets.get("teambition_app_id") or not secrets.get("teambition_app_secret"):
-            raise WorkerApiError("请先保存 Teambition App ID 和 App Secret。")
+        if not secrets.get("teambition_mcp_token", "").strip():
+            raise WorkerApiError("请先保存 Teambition MCP 个人 Token。")
+        if not mcp_connection_authorized(secrets):
+            raise WorkerApiError("请先在账户页保存并确认授权本机连接 Teambition 官方 MCP；仅保存 Token 不会授权连接。")
         try:
             proof = self._collect_scope_probe(settings, secrets, payload)
         except ProjectSetupError as exc:
             self._setup_probe = None
             raise WorkerApiError(str(exc)) from None
-        except (CollectionError, OSError):
+        except (CollectionError, OSError) as exc:
             self._setup_probe = None
+            if str(exc) == "Teambition MCP authorization expired or denied":
+                raise WorkerApiError("Teambition MCP 个人 Token 已失效或无读取权限；请重新生成 Token 并保存，确认当前账户有项目读取权限。") from None
             raise WorkerApiError("Teambition 只读查询未完成或翻页不完整；没有更改核验状态。请检查权限后再试。") from None
         except (SettingsError, ValueError, TypeError):
             self._setup_probe = None
@@ -515,7 +617,7 @@ class WorkerService:
         self._setup_probe = proof
         return {
             **proof["discovery"],
-            "status": "只读样本通过。成员姓名仍需根据项目成员页核对；状态名称建议也需核对。",
+            "status": "只读样本通过。成员姓名和任务状态按 MCP 可见数据自动读取；未解析字段可在高级覆盖中补充。",
         }
 
     def _collect_scope_probe(self, settings: dict, credentials: dict, window: dict):
@@ -528,6 +630,8 @@ class WorkerService:
         collection = self._collect_source(
             settings, credentials, day=report_day, window=(start, end),
             include_archived=settings["include_archived"])
+        # Validate source metadata in memory; never persist it as a manual override.
+        discovered = merge_discovered(runtime_config(settings), collection.get("metadata", {}))
         probe = analyze_project_probe(
             collection, tenant_id=settings["tenant_id"], project_id=settings["project_id"],
             expected_selection=selection, include_archived=settings["include_archived"])
@@ -540,6 +644,8 @@ class WorkerService:
             "status_name_suggestions": probe.status_name_suggestions,
             "conflicting_status_ids": list(probe.conflicting_status_ids),
             "observed_actions": list(probe.observed_actions), "selection": selection,
+            "unresolved_owner_count": len(set(probe.owner_ids) - set(discovered["owner_names"])),
+            "unresolved_status_count": len(set(probe.status_ids) - set(discovered["status_names"])),
         }
         return {"scope": _scope_signature(settings), "selection": selection,
                 "credential_identity": _teambition_identity(credentials),
@@ -556,19 +662,62 @@ class WorkerService:
         secrets = self.secret_store.load()
         if not settings.get("tenant_id") or not settings.get("project_id"):
             raise WorkerApiError("请先保存 Tenant ID 和 Project ID。")
-        if not secrets.get("teambition_app_id") or not secrets.get("teambition_app_secret"):
-            raise WorkerApiError("只读诊断需要已保存的 Teambition App ID 和 App Secret；不需要 OpenAI 或钉钉密钥。")
+        if not secrets.get("teambition_mcp_token", "").strip():
+            raise WorkerApiError("只读诊断需要已保存的 Teambition MCP 个人 Token；不需要 OpenAI 或钉钉密钥。")
+        if not mcp_connection_authorized(secrets):
+            raise WorkerApiError("请先在账户页保存并确认授权本机连接 Teambition 官方 MCP；仅保存 Token 不会授权连接。")
         try:
             start_local, end_local = parse_manual_window(payload.get("start", ""), payload.get("end", ""))
             start, end = start_local.astimezone(SHANGHAI), end_local.astimezone(SHANGHAI)
             day = end.date().isoformat()
             config = runtime_config(settings)
+            report_collection("starting")
             collection = self._collect_source(
                 settings, secrets, day=day, window=(start, end),
-                include_archived=settings["include_archived"])
-            diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
-            self._last_diagnostic_shape = safe_structure_export(collection, config, day, (start, end))
-            self._last_diagnostic_context = _diagnostic_context(settings, secrets, payload)
+                include_archived=settings["include_archived"],
+                candidate_mode="full_project" if detailed_target is not None else "updated_since_start")
+            config = merge_discovered(config, collection.get("metadata", {}))
+            report_collection("validating", completed=len(collection.get("records", [])),
+                              total=len(collection.get("records", [])))
+            if self._pipeline_mode == "legacy":
+                # Preserve the plugin's existing diagnostic contract, including
+                # its export exceptions. The new gates apply only to standalone.
+                diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
+                self._last_diagnostic_shape = safe_structure_export(collection, config, day, (start, end))
+                self._last_diagnostic_context = _diagnostic_context(settings, secrets, payload)
+            else:
+                credential_guard = ReportCredentialGuard(secrets)
+                try:
+                    credential_guard.require_safe((collection, config))
+                except CredentialExposureBlocked as exc:
+                    diagnostic = {"ok": False, "message": str(exc), "task_count": None}
+                else:
+                    diagnostic = diagnose_raw_source(collection, config, day, (start, end))
+                # The legacy field-shape export is optional diagnostic material,
+                # never a semantic gate for the raw-activity pipeline. Its failure
+                # must not replace the source/window result or expose raw errors.
+                try:
+                    shape = safe_structure_export(collection, config, day, (start, end))
+                    credential_guard.require_safe(shape)
+                    metadata = shape["diagnostic"]
+                    created = datetime.fromisoformat(metadata["created_at_utc"]).strftime("%Y%m%dT%H%M%SZ")
+                    file_stem = f"teambition-diagnostic-v{APP_VERSION}-{created}-{metadata['id'][:8]}"
+                    catalog = shape.get("protocol_catalog", {})
+                    export_details = {
+                        "diagnostic_file_stem": file_stem,
+                        "diagnostic": metadata,
+                        "diagnostic_summary": {
+                            "unknown_events_in_report_window": catalog.get("unknown_events_considered", 0),
+                            "unknown_events_with_unknown_time": catalog.get("unknown_window_events", 0),
+                            "catalog_complete": catalog.get("complete") is True,
+                        },
+                    }
+                    self._last_diagnostic_context = _diagnostic_context(settings, secrets, payload)
+                    self._last_diagnostic_shape = shape
+                except Exception:
+                    self._last_diagnostic_shape = None
+                    self._last_diagnostic_context = None
+                    diagnostic["message"] += "\n安全结构导出准备失败；范围检查结果不变，未导出原始响应。"
             latest_credentials = self.secret_store.load()
         except (CollectionError, OSError) as exc:
             self._last_diagnostic_shape = None
@@ -585,11 +734,14 @@ class WorkerService:
             return {"ok": False,
                     "message": "只读诊断未完成；没有调用 OpenAI、没有发送钉钉，详细 API 响应不会写入记录。请检查网络、凭据和项目权限。",
                     "task_count": None, "export_available": False}
-        metadata = self._last_diagnostic_shape["diagnostic"]
-        created = datetime.fromisoformat(metadata["created_at_utc"]).strftime("%Y%m%dT%H%M%SZ")
-        file_stem = f"teambition-diagnostic-v{APP_VERSION}-{created}-{metadata['id'][:8]}"
-        catalog = self._last_diagnostic_shape.get("protocol_catalog", {})
-        result = {**diagnostic, "export_available": bool(self._last_diagnostic_shape),
+        if self._pipeline_mode == "legacy":
+            # Keep metadata preparation outside the legacy diagnostic catch,
+            # as before; malformed export metadata remains a dispatch failure.
+            metadata = self._last_diagnostic_shape["diagnostic"]
+            created = datetime.fromisoformat(metadata["created_at_utc"]).strftime("%Y%m%dT%H%M%SZ")
+            file_stem = f"teambition-diagnostic-v{APP_VERSION}-{created}-{metadata['id'][:8]}"
+            catalog = self._last_diagnostic_shape.get("protocol_catalog", {})
+            export_details = {
                 "diagnostic_file_stem": file_stem,
                 "diagnostic": metadata,
                 "diagnostic_summary": {
@@ -597,6 +749,18 @@ class WorkerService:
                     "unknown_events_with_unknown_time": catalog.get("unknown_window_events", 0),
                     "catalog_complete": catalog.get("complete") is True,
                 },
+            }
+        if self._last_diagnostic_shape is None:
+            result = {**diagnostic, "export_available": False,
+                      "safety": "未调用 OpenAI；未发送钉钉。"}
+            result["message"] = _redact_known_diagnostic_credentials(
+                result.get("message", ""), secrets, latest_credentials)
+            if detailed_target is not None:
+                result["detailed_export"] = {
+                    "saved": False, "message": "缺少本次安全诊断元数据，没有写入详细项目数据。"}
+            return result
+        result = {**diagnostic, "export_available": bool(self._last_diagnostic_shape),
+                **export_details,
                 "safety": "未调用 OpenAI；未发送钉钉。"}
         result["message"] = _redact_known_diagnostic_credentials(
             result.get("message", ""), secrets, latest_credentials)
@@ -723,16 +887,20 @@ class WorkerService:
         secrets = self.secret_store.load()
         if not settings.get("tenant_id") or not settings.get("project_id"):
             raise WorkerApiError("请先保存 Tenant ID 和 Project ID。")
-        if not secrets.get("teambition_app_id") or not secrets.get("teambition_app_secret"):
-            raise WorkerApiError("请先保存 Teambition App ID 和 App Secret。")
+        if not secrets.get("teambition_mcp_token", "").strip():
+            raise WorkerApiError("请先保存 Teambition MCP 个人 Token。")
+        if not mcp_connection_authorized(secrets):
+            raise WorkerApiError("请先在账户页保存并确认授权本机连接 Teambition 官方 MCP；仅保存 Token 不会授权连接。")
         now = datetime.now().astimezone(SHANGHAI).replace(microsecond=0)
         start, end = now - timedelta(minutes=5), now
         try:
             collection = self._collect_source(
                 settings, secrets, day=end.date().isoformat(), window=(start, end),
                 include_archived=settings["include_archived"])
-        except (CollectionError, OSError):
-            raise WorkerApiError("Teambition 只读连接测试失败；请检查本机网络、凭据和项目读取权限。") from None
+        except (CollectionError, OSError) as exc:
+            if str(exc) == "Teambition MCP authorization expired or denied":
+                raise WorkerApiError("Teambition MCP 个人 Token 已失效或无读取权限；请重新生成 Token 并保存，确认当前账户有项目读取权限。") from None
+            raise WorkerApiError("Teambition MCP 只读连接测试失败；请检查本机网络、个人 Token 和项目读取权限。") from None
         return {"status": f"Teambition 只读查询成功；读取 {len(collection.get('records', []))} 个任务。",
                 "records": len(collection.get("records", [])),
                 "safety": "未调用 OpenAI；未发送钉钉。"}
@@ -824,6 +992,7 @@ class WorkerService:
         if not self._job_lock.acquire(blocking=False):
             raise WorkerApiError("已有日报或诊断任务正在运行；当前操作未并行执行。")
         try:
+            pipeline_mode = self._pipeline_mode
             settings = self.settings_store.load()
             secrets = self.secret_store.load()
             ready, message = self._ensure_ledger(secrets)
@@ -838,8 +1007,14 @@ class WorkerService:
                 workflow_options["checkpoint_factory"] = self.checkpoint_factory
             if self.workflow_factory is DigestWorkflow:
                 workflow_options["client_factory"] = self.client_factory
-            result = self.workflow_factory(settings, secrets, self.data_dir, **workflow_options).run(
-                                               start, end, **run_options)
+            workflow = self.workflow_factory(settings, secrets, self.data_dir, **workflow_options)
+            # Bind after construction so a custom factory returning the shared
+            # workflow cannot accidentally opt the plugin into standalone raw
+            # processing. Narrow factories and unrelated test doubles keep
+            # their existing signatures.
+            if isinstance(workflow, DigestWorkflow):
+                workflow._set_pipeline_mode(pipeline_mode)
+            result = workflow.run(start, end, **run_options)
             return {"run_id": result["run_id"], "state": result["state"],
                     "markdown": result["report"]["markdown"],
                     "window_start": start.isoformat(timespec="minutes"),
@@ -865,6 +1040,8 @@ class WorkerService:
             self._job_lock.release()
 
     def _validate_auto_ready(self, settings: dict, credentials: dict) -> None:
+        if not mcp_connection_authorized(credentials):
+            raise WorkerApiError("请先在账户页保存并确认授权本机连接 Teambition 官方 MCP；仅保存 Token 不会授权连接。")
         if (settings.get("api_contract_verified") is not True
                 or settings.get("view", {}).get("verified") is not True
                 or not settings.get("view", {}).get("evidence")):
@@ -968,7 +1145,24 @@ def serve(input_stream=None, output_stream=None, *, service=None) -> None:
             if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", request_id):
                 request_id = None
                 raise ValueError("request id invalid")
-            result = service.dispatch(request)
+            # Only the native read-only operation opts in. Existing clients keep
+            # exactly one final response and never receive unsolicited frames.
+            observer = None
+            if request.get("progress") is True and request.get("op") in {"diagnose", "save"}:
+                previous_phase, last_emit = None, -float("inf")
+
+                def observer(progress):
+                    nonlocal previous_phase, last_emit
+                    now = time.monotonic()
+                    if progress["phase"] == previous_phase and now - last_emit < 0.5:
+                        return
+                    previous_phase, last_emit = progress["phase"], now
+                    output_stream.write(json.dumps({"id": request_id, "kind": "progress",
+                                                    "progress": progress}, separators=(",", ":")) + "\n")
+                    output_stream.flush()
+
+            with observe_collection(observer):
+                result = service.dispatch(request)
             _write_response(output_stream, request_id, True, result=result)
             if getattr(service, "_shutdown", False):
                 return
@@ -1015,7 +1209,8 @@ def _safe_history_row(row: dict) -> dict:
 
 
 def _secret_presence(values: dict) -> dict[str, bool]:
-    return {key: bool(values.get(key)) for key in SECRET_FIELDS + UPDATE_SECRET_FIELDS}
+    return {**{key: bool(values.get(key)) for key in SECRET_FIELDS + UPDATE_SECRET_FIELDS},
+            "teambition_mcp_authorized": mcp_connection_authorized(values)}
 
 
 def _resource_path(relative: str) -> Path:
@@ -1082,10 +1277,7 @@ def _verified_settings_for_save(settings_input: dict, old: dict, probe: dict | N
 
 def _teambition_identity(credentials: dict) -> str | None:
     """Compare authentication in memory without returning credential material."""
-    values = [credentials.get("teambition_app_id"), credentials.get("teambition_app_secret")]
-    if not all(isinstance(value, str) and value for value in values):
-        return None
-    return hashlib.sha256(json.dumps(values, ensure_ascii=False).encode("utf-8")).hexdigest()
+    return teambition_mcp_identity(credentials) if mcp_connection_authorized(credentials) else None
 
 
 def _is_windows_device_path(value: str) -> bool:

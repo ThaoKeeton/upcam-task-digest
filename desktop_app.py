@@ -14,17 +14,18 @@ import uuid
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from automated_digest import collection_validation_message, diagnose_automatic_source
+from automated_digest import collection_validation_message
+from mcp_raw_digest import diagnose_raw_source
 from upcam_app.diagnostic_export import safe_structure_export
 from render_digest import render_digest
-from runtime_mappings import validate_mappings
+from runtime_mappings import validate_mappings, merge_discovered
 from teambition_readonly import CollectionError
 from upcam_app import APP_NAME, APP_VERSION, OPENAI_MODEL, OPENAI_REASONING_EFFORT, RULESET_REVISION
 from upcam_app.config import (
     DEFAULT_SETTINGS, SCHEDULE_RECOVERY_WINDOW, SettingsError, SettingsStore, parse_manual_window,
     recoverable_schedule_occurrences, runtime_config, scheduled_window, user_data_dir, validate_settings,
 )
-from upcam_app.collection_runtime import make_collection_client
+from upcam_app.collection_runtime import make_collection_client, list_mcp_projects
 from upcam_app.history import HistoryError, HistoryStore
 from upcam_app.project_setup import (
     ProjectSetupError, analyze_project_probe, merge_owner_mappings, parse_owner_mapping_tsv,
@@ -37,9 +38,10 @@ from upcam_app.openai_models import (
     ModelCatalogError, OpenAIModelCatalog, cache_matches_key, reasoning_efforts,
 )
 from openai_summarizer import KNOWN_FAST_MODELS
-from upcam_app.secrets import DpapiSecretStore, SECRET_FIELDS, SecretStoreError
+from upcam_app.secrets import DpapiSecretStore, SECRET_FIELDS, SecretStoreError, revoke_missing_mcp_authorization, teambition_mcp_identity, mcp_connection_authorized, MCP_AUTHORIZATION_FIELD
 from upcam_app.workflow import DigestWorkflow, WorkflowBlocked
 from upcam_app.dingtalk_mentions import MentionConfigError, reject_credential_mentions
+from upcam_app.report_credentials import CredentialExposureBlocked, ReportCredentialGuard
 from delivery_guard import DeliveryBlocked, DeliveryGuard, initialize_ledger
 from report_contract import SHANGHAI, updated_selection
 
@@ -58,8 +60,8 @@ VIEW_FILTERS = {
 SMOKE_TEST_TABS = (
     "账户与模型",
     "项目范围",
-    "成员映射",
-    "状态映射",
+    "高级：成员覆盖",
+    "高级：状态覆盖",
     "自动运行",
     "运行与诊断",
     "运行记录",
@@ -208,7 +210,7 @@ class SideNavigation:
         self.content.pack(side="left", fill="both", expand=True)
         tk.Label(self.sidebar, text="UPCAM", bg="#15324b", fg="#ffffff",
                  font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w", padx=20, pady=(24, 0))
-        tk.Label(self.sidebar, text="站会日报", bg="#15324b", fg="#b8c8d8",
+        tk.Label(self.sidebar, text="Teambition 工作助手", bg="#15324b", fg="#b8c8d8",
                  font=("Microsoft YaHei UI", 10)).pack(anchor="w", padx=21, pady=(0, 18))
         self.nav_items = tk.Frame(self.sidebar, bg="#15324b")
         self.nav_items.pack(fill="x", padx=10)
@@ -262,8 +264,7 @@ class SideNavigation:
 
 class DigestDesktopApp:
     SECRET_LABELS = {
-        "teambition_app_id": "Teambition App ID",
-        "teambition_app_secret": "Teambition App Secret",
+        "teambition_mcp_token": "Teambition MCP 个人 Token",
         "dingtalk_webhook": "钉钉机器人 Webhook（含 access_token）",
         "dingtalk_signing_secret": "钉钉机器人签名密钥",
         "openai_api_key": "OpenAI API Key",
@@ -271,7 +272,7 @@ class DigestDesktopApp:
 
     def __init__(self, root: tk.Tk, *, start_hidden=False, tray_enabled=True):
         self.root = root
-        self.root.title(f"{APP_NAME} · {APP_VERSION}")
+        self.root.title(f"UPCAM · Teambition 工作助手 · {APP_VERSION}")
         self.root.geometry("1080x850")
         self.root.minsize(920, 700)
         self.data_dir = user_data_dir()
@@ -282,6 +283,11 @@ class DigestDesktopApp:
         self.last_diagnostic_shape = None
         self.history.recover_interrupted_sends()
         self.settings = self.settings_store.load()
+        self.saved_secrets = self.secret_store.load()
+        migrated = revoke_missing_mcp_authorization(self.settings, self.saved_secrets)
+        if migrated != self.settings:
+            self.settings_store.save(migrated)
+        self.settings = migrated
         configured_now = datetime.now().replace(microsecond=0)
         enabled_since = self.settings.get("auto_send_enabled_since_local", "")
         if self.settings.get("auto_send_enabled"):
@@ -293,7 +299,6 @@ class DigestDesktopApp:
                     timespec="seconds")
         else:
             self._auto_run_enabled_since = configured_now
-        self.saved_secrets = self.secret_store.load()
         self.model_cache = None
         self.ledger_ready, self.ledger_message = self._prepare_ledger()
         self.values: dict[str, tk.Variable] = {}
@@ -307,7 +312,7 @@ class DigestDesktopApp:
         self._refresh_history()
         self.root.protocol("WM_DELETE_WINDOW", self._hide_to_tray)
         self._set_status(self.ledger_message if not self.ledger_ready else
-                         "请先完成 Teambition 项目映射，再保存配置并启用自动运行。")
+                         "请保存 MCP 个人 Token，选择项目和时间；成员姓名与任务状态自动读取。")
         if tray_enabled and os.name == "nt":
             self._start_tray()
         if start_hidden and self._tray_icon is not None:
@@ -331,7 +336,7 @@ class DigestDesktopApp:
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("退出应用", lambda _icon, _item: self.root.after(0, self._quit_application)),
             )
-            self._tray_icon = pystray.Icon(APP_NAME, image, APP_NAME, menu)
+            self._tray_icon = pystray.Icon(APP_NAME, image, "UPCAM · Teambition 工作助手", menu)
             self._tray_icon.run_detached()
         except Exception:
             self._tray_icon = None
@@ -432,8 +437,8 @@ class DigestDesktopApp:
         self.tabs = self.navigation
         self.settings_tab = self.tabs.add("账户与模型")
         self.mapping_tab = self.tabs.add("项目范围")
-        self.owner_tab = self.tabs.add("成员映射")
-        self.status_tab = self.tabs.add("状态映射")
+        self.owner_tab = self.tabs.add("高级：成员覆盖")
+        self.status_tab = self.tabs.add("高级：状态覆盖")
         self.schedule_tab = self.tabs.add("自动运行")
         self.preview_tab = self.tabs.add("运行与诊断")
         self.history_tab = self.tabs.add("运行记录")
@@ -457,14 +462,37 @@ class DigestDesktopApp:
         form = self.settings_tab
         form.columnconfigure(1, weight=1)
         form.columnconfigure(3, weight=1)
-        ttk.Label(form, text="项目与应用凭据", font=("Microsoft YaHei UI", 12, "bold")).grid(
+        ttk.Label(form, text="1. MCP Token 与连接授权", font=("Microsoft YaHei UI", 12, "bold")).grid(
             row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
-        self._text_field(form, 1, 0, "Teambition Tenant / Organization ID", "tenant_id")
-        self._text_field(form, 1, 2, "Teambition Project ID", "project_id")
+        self._secret_field(form, 1, "teambition_mcp_token")
         ttk.Label(form, text="密钥使用 Windows 用户级 DPAPI 加密保存；不会写入日报、运行记录或模板。",
                   foreground="#536174").grid(row=2, column=0, columnspan=4, sticky="w", pady=(0, 6))
-        row = 3
+        ttk.Label(form, text="先填写 Token，再保存并确认连接授权；无需先填写项目。此按钮也会保存其他已编辑配置。",
+                  foreground="#536174", wraplength=self.wraplength).grid(row=3, column=0, columnspan=4, sticky="w")
+        ttk.Button(form, text="保存配置并确认 MCP 授权", command=self._save).grid(
+            row=4, column=0, columnspan=4, sticky="w", pady=(4, 12))
+        ttk.Label(form, text="2. 加载并选择项目", font=("Microsoft YaHei UI", 12, "bold")).grid(
+            row=5, column=0, columnspan=4, sticky="w", pady=(0, 8))
+        row = 6
+        self.project_choices = []
+        self._project_choices_identity = None
+        project_row = ttk.Frame(form)
+        project_row.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(4, 8))
+        project_row.columnconfigure(0, weight=1)
+        self.project_combo = ttk.Combobox(project_row, state="readonly", values=())
+        self.project_combo.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.project_combo.bind("<<ComboboxSelected>>", self._select_discovered_project)
+        self.load_projects_button = ttk.Button(project_row, text="加载我的项目", command=self._load_projects)
+        self.load_projects_button.grid(row=0, column=1)
+        ttk.Label(project_row, text="先保存个人 Token 并确认授权，再加载项目；也可手动输入下方 ID。选择后仍需保存。",
+                  foreground="#536174", wraplength=self.wraplength).grid(row=1, column=0, columnspan=2, sticky="w")
+        row += 1
+        self._text_field(form, row, 0, "Teambition Tenant / Organization ID", "tenant_id")
+        self._text_field(form, row, 2, "Teambition Project ID", "project_id")
+        row += 1
         for key in SECRET_FIELDS:
+            if key == "teambition_mcp_token":
+                continue
             self._secret_field(form, row, key)
             row += 1
 
@@ -555,7 +583,7 @@ class DigestDesktopApp:
         row += 1
         self._text_field(form, row, 0, "每批采集任务数（1–700）", "max_tasks_per_run", width=9)
         ttk.Label(form,
-                  text="默认每批 300，非项目总数限制；全项目最多 10,000 个任务。整次最多 50,000 次请求、1,000,000 条返回记录、512 MiB 响应、128 MiB 保留数据及两小时，最多 3 轮来源重核；单批预算仍有效。超限阻断，不截断；缩短时间窗不减少基础扫描。",
+                  text="默认每批 300，非项目总数限制；单次最多 10,000 个候选。整次最多 50,000 次请求、1,000,000 条返回记录、512 MiB 响应、128 MiB 保留数据及两小时，最多 3 轮来源重核；单批预算仍有效。超限阻断，不截断。普通模式按更新时间向 Teambition 筛选；详细诊断仍会全项目复核。",
                   foreground="#536174", wraplength=550).grid(row=row, column=2, columnspan=2,
                                                               sticky="w", pady=4)
         row += 1
@@ -588,7 +616,7 @@ class DigestDesktopApp:
                   font=("Microsoft YaHei UI", 12, "bold")).grid(
                       row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(form,
-                  text="不需要编写 JSON。应用只使用仓库已批准的只读接口：从你选择的时间窗读取任务与动态样本，发现实际出现的 ID；不会调用 OpenAI 或发送钉钉。",
+                  text="选择项目与时间即可使用固定日报。官方 MCP 自动读取任务、动态、成员姓名和任务状态；此验证不会调用 OpenAI 或发送钉钉。",
                   foreground="#536174", wraplength=self.wraplength).grid(
                       row=1, column=0, columnspan=2, sticky="w", pady=(5, 8))
 
@@ -599,7 +627,7 @@ class DigestDesktopApp:
         probe_row = ttk.Frame(form)
         probe_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 4))
         self.project_probe_button = ttk.Button(
-            probe_row, text="只读验证项目并发现映射 ID", command=self._probe_project)
+            probe_row, text="只读验证项目", command=self._probe_project)
         self.project_probe_button.pack(side="left")
         self.project_probe_status = tk.StringVar(value="尚未完成只读项目验证。")
         ttk.Label(probe_row, textvariable=self.project_probe_status, foreground="#536174",
@@ -649,7 +677,7 @@ class DigestDesktopApp:
                   font=("Microsoft YaHei UI", 12, "bold")).grid(
                       row=0, column=0, sticky="w", pady=(0, 4))
         ttk.Label(form,
-                  text="应用可发现采集样本里出现的成员 ID；已批准接口不会返回完整成员名册，姓名需从项目成员页核对。",
+                  text="高级可选覆盖：成员姓名由 MCP 自动读取；仅未解析时补充已核对的姓名。已有覆盖保留，冲突时停止并提示。",
                   foreground="#536174", wraplength=self.wraplength).grid(
                       row=1, column=0, sticky="w", pady=(0, 8))
         owner_table = ttk.Frame(form)
@@ -694,7 +722,7 @@ class DigestDesktopApp:
                   font=("Microsoft YaHei UI", 10, "bold")).grid(
                       row=0, column=0, sticky="w", pady=(0, 4))
         ttk.Label(form,
-                  text="样本动态返回的名称仅作建议；选中状态后可填入建议，核对名称并明确勾选哪些状态代表已解决，再保存。",
+                  text="高级可选覆盖：状态名称与完成属性由 MCP 自动读取。仅未解析时填写已核对的状态，不能凭名称或 ID 猜测已解决。",
                   foreground="#536174", wraplength=self.wraplength).grid(
                       row=1, column=0, sticky="w", pady=(0, 8))
         status_table = ttk.Frame(form)
@@ -891,11 +919,14 @@ class DigestDesktopApp:
             return
         secrets = dict(self.saved_secrets)
         secrets.update({key: self.values[key].get() for key in
-                        ("teambition_app_id", "teambition_app_secret") if self.values[key].get()})
+                        ("teambition_mcp_token",) if self.values[key].get()})
         if not settings["tenant_id"] or not settings["project_id"] or any(
-                not secrets.get(key) for key in ("teambition_app_id", "teambition_app_secret")):
-            messagebox.showinfo("需要配置", "请先填写 Tenant ID、Project ID、App ID 和 App Secret。",
+                not secrets.get(key) for key in ("teambition_mcp_token",)):
+            messagebox.showinfo("需要配置", "请先填写 Tenant ID、Project ID、MCP 个人 Token。",
                                 parent=self.root)
+            return
+        if not mcp_connection_authorized(secrets):
+            messagebox.showinfo("需要连接授权", "请先保存个人 Token 并确认授权本机连接 Teambition 官方 MCP。", parent=self.root)
             return
         try:
             start_local, end_local = parse_manual_window(self.manual_start.get(), self.manual_end.get())
@@ -921,21 +952,22 @@ class DigestDesktopApp:
                 probe = analyze_project_probe(
                     collection, tenant_id=settings["tenant_id"], project_id=settings["project_id"],
                     expected_selection=selection, include_archived=settings["include_archived"])
+                merge_discovered(runtime_config(settings), collection.get("metadata", {}))
                 result, error = probe, None
             except ProjectSetupError as exc:
                 result, error = None, str(exc)
-            except (CollectionError, OSError):
-                result, error = None, "只读查询未完成或响应不完整；没有更改本机核验状态。请检查权限并选择包含完整任务动态的时间区间。"
+            except (CollectionError, OSError) as exc:
+                result, error = None, collection_validation_message(exc)
             except Exception:
                 result, error = None, "只读项目验证失败；详细响应未写入日志，也没有更改本机核验状态。"
             self.root.after(0, lambda: self._project_probe_finished(
                 result, error, settings["tenant_id"], settings["project_id"],
-                settings["include_archived"], probe_filters, selection))
+                settings["include_archived"], probe_filters, selection, teambition_mcp_identity(secrets)))
 
         threading.Thread(target=worker, daemon=True, name="teambition-project-setup").start()
 
     def _project_probe_finished(self, probe, error, tenant_id, project_id, include_archived,
-                                filters, selection):
+                                filters, selection, credential_identity=None):
         self.project_probe_button.configure(state="normal")
         if error:
             self.project_probe_status.set(error)
@@ -945,7 +977,7 @@ class DigestDesktopApp:
         self._setup_probe = {
             "probe": probe, "tenant_id": tenant_id, "project_id": project_id,
             "include_archived": include_archived, "filters": filters,
-            "selection": selection,
+            "selection": selection, "credential_identity": credential_identity,
         }
         self.scope_confirm_var.set(False)
         self.owner_candidate_ids.update(probe.owner_ids)
@@ -958,12 +990,12 @@ class DigestDesktopApp:
         self.project_probe_status.set(
             f"只读样本通过：{probe.task_count} 个任务、{probe.activity_count} 条动态；"
             f"发现 {len(probe.owner_ids)} 个成员 ID、{len(probe.status_ids)} 个状态 ID。")
-        self._set_status("API 响应字段样本已核验。请检查映射，并勾选确认项目范围后保存。")
+        self._set_status("MCP 字段样本已核验。请确认项目范围并保存；成员姓名与状态在每次采集时自动读取。")
         messagebox.showinfo(
             "只读验证通过",
             f"已完整读取所选区间的 {probe.task_count} 个任务和 {probe.activity_count} 条动态。\n"
             f"发现 {len(probe.owner_ids)} 个成员 ID 与 {len(probe.status_ids)} 个状态 ID。\n\n"
-            "成员姓名不能从当前批准的接口可靠发现；请对照项目成员页填写。状态名称建议来自动态样本，仍需核对。\n"
+            "成员姓名与任务状态在每次采集时由 MCP 自动读取。仅未解析时需要高级覆盖。\n"
             "最后请确认上方项目视图范围并保存配置。",
             parent=self.root)
 
@@ -1088,6 +1120,8 @@ class DigestDesktopApp:
                 text="本机已加密保存" if self.saved_secrets.get(key) else "本机未保存")
 
     def _validate_auto_ready(self, settings, secrets):
+        if not mcp_connection_authorized(secrets):
+            raise SettingsError("请先保存个人 Token 并确认授权本机连接 Teambition 官方 MCP。")
         if not self.ledger_ready or not secrets.get("delivery_ledger_id"):
             raise SettingsError("本机防重账本未通过验证")
         if not settings.get("tenant_id") or not settings.get("project_id"):
@@ -1096,7 +1130,7 @@ class DigestDesktopApp:
         if (config.get("api_contract_verified") is not True or not config["view"].get("verified")
                 or not config["view"].get("evidence")):
             raise SettingsError("请先在项目映射页核验 API 字段和项目视图范围")
-        required = ("teambition_app_id", "teambition_app_secret", "dingtalk_webhook",
+        required = ("teambition_mcp_token", "dingtalk_webhook",
                     "dingtalk_signing_secret", "openai_api_key")
         if any(not secrets.get(key) for key in required):
             raise SettingsError("请先填写并保存 Teambition、钉钉和 OpenAI 密钥")
@@ -1131,7 +1165,9 @@ class DigestDesktopApp:
                     except (TypeError, ValueError):
                         raise SettingsError("每批采集任务数请输入 1 到 700 之间的整数") from None
                 proposed[key] = value
+        authorized_mcp_identity = None
         try:
+            DigestDesktopApp._apply_project_display_draft(self, proposed)
             if bool(proposed["auto_send_enabled"]) != previous_auto_send:
                 proposed["auto_send_enabled_since_local"] = (
                     datetime.now().replace(microsecond=0).isoformat(timespec="seconds")
@@ -1141,13 +1177,33 @@ class DigestDesktopApp:
             proposed["resolved_status_ids"] = sorted(self.resolved_status_ids)
             old_view = self.settings.get("view", DEFAULT_SETTINGS["view"])
             filters = dict(self.view_filters)
-            identity_unchanged = all(
+            entered_token = self.values["teambition_mcp_token"].get()
+            effective_secrets = dict(self.saved_secrets)
+            if entered_token:
+                effective_secrets["teambition_mcp_token"] = entered_token
+            mcp_token_changed = effective_secrets.get("teambition_mcp_token") != self.saved_secrets.get("teambition_mcp_token")
+            if mcp_token_changed:
+                effective_secrets.pop(MCP_AUTHORIZATION_FIELD, None)
+            if teambition_mcp_identity(effective_secrets) and not mcp_connection_authorized(effective_secrets):
+                if messagebox.askyesno("授权本机连接 Teambition 官方 MCP",
+                        "个人 Token 将作为认证信息发送给 Teambition 官方 MCP 服务，用于只读获取项目、任务、动态、成员姓名和任务状态。\n\n"
+                        "允许后会按你的主动操作、保存时核验或已启用的定时运行连接。Token 泄露可能使他人取得账号权限，请勿分享；清除服务密钥可撤销本机授权。\n\n"
+                        "是否允许连接？选择否只保存在本机，不连接。", parent=self.root):
+                    authorized_mcp_identity = teambition_mcp_identity(effective_secrets)
+                    effective_secrets[MCP_AUTHORIZATION_FIELD] = authorized_mcp_identity
+            credential_identity = (teambition_mcp_identity(effective_secrets)
+                                   if mcp_connection_authorized(effective_secrets) else None)
+            credentials_unchanged = bool(credential_identity and credential_identity ==
+                                         teambition_mcp_identity(self.saved_secrets)
+                                         and mcp_connection_authorized(self.saved_secrets))
+            identity_unchanged = credentials_unchanged and all(
                 proposed.get(key) == self.settings.get(key, DEFAULT_SETTINGS[key])
                 for key in ("tenant_id", "project_id"))
             scope_unchanged = (identity_unchanged
                                and proposed["include_archived"] == self.settings.get("include_archived", False)
                                and filters == old_view.get("task_equals", {}))
-            probe_matches = bool(self._setup_probe and
+            probe_matches = bool(self._setup_probe and credential_identity
+                and self._setup_probe.get("credential_identity") == credential_identity and
                 proposed["tenant_id"] == self._setup_probe["tenant_id"]
                 and proposed["project_id"] == self._setup_probe["project_id"]
                 and proposed["include_archived"] == self._setup_probe["include_archived"]
@@ -1171,6 +1227,9 @@ class DigestDesktopApp:
             proposed["view"] = {"verified": view_verified, "evidence": evidence if view_verified else "",
                                  "task_equals": filters}
             proposed["schema_version"] = 1
+            if not view_verified:
+                proposed["auto_send_enabled"] = False
+                proposed["auto_send_enabled_since_local"] = ""
             clean = validate_settings(proposed)
         except (SettingsError, ValueError, TypeError) as exc:
             messagebox.showerror("无法保存配置", str(exc), parent=self.root)
@@ -1183,6 +1242,10 @@ class DigestDesktopApp:
             prior_credentials = self.secret_store.load()
             merged = dict(prior_credentials)
             merged.update(entered)
+            if mcp_token_changed or merged.get("teambition_mcp_token") != prior_credentials.get("teambition_mcp_token"):
+                merged.pop(MCP_AUTHORIZATION_FIELD, None)
+            if authorized_mcp_identity is not None:
+                merged[MCP_AUTHORIZATION_FIELD] = authorized_mcp_identity
             reject_credential_mentions(clean, prior_credentials, merged)
             if clean["auto_send_enabled"]:
                 self._validate_auto_ready(clean, merged)
@@ -1200,6 +1263,7 @@ class DigestDesktopApp:
             messagebox.showerror("无法保存配置", str(exc), parent=self.root)
             return
         self.settings, self.saved_secrets = clean, merged
+        self._project_display_draft = None
         if clean["auto_send_enabled"]:
             self._auto_run_enabled_since = datetime.fromisoformat(clean["auto_send_enabled_since_local"])
         else:
@@ -1209,7 +1273,8 @@ class DigestDesktopApp:
             getattr(self, f"_secret_state_{key}").configure(
                 text="本机已加密保存" if self.saved_secrets.get(key) else "本机未保存")
         self._load_model_cache()
-        self._set_status("本机设置已保存。" + ("自动执行已启用。" if clean["auto_send_enabled"] else "自动执行当前关闭。"))
+        self._set_status("本机设置已保存。" + ("自动执行已启用。" if clean["auto_send_enabled"] else "自动执行当前关闭。")
+                         + ("" if mcp_connection_authorized(merged) else " MCP 连接尚未授权；仅保存 Token 不会连接。"))
         startup_note = ("开机启动已启用。" if clean["start_with_windows"] else "开机启动当前关闭。")
         messagebox.showinfo("保存完成", "设置已保存在本机。" + startup_note +
                             "服务密钥使用 Windows DPAPI 加密。", parent=self.root)
@@ -1330,17 +1395,109 @@ class DigestDesktopApp:
         if current not in options:
             self.values["openai_reasoning_effort"].set("default")
 
+    def _load_projects(self):
+        # Loading is always a deliberate action, never an initialization side effect.
+        if self.values["teambition_mcp_token"].get():
+            messagebox.showinfo("需要先保存", "请先保存新 Token 并确认连接授权，再加载项目列表。", parent=self.root)
+            return
+        secrets = self.secret_store.load()
+        if not mcp_connection_authorized(secrets):
+            messagebox.showinfo("需要连接授权", "请先保存个人 Token 并确认授权本机连接 Teambition 官方 MCP。", parent=self.root)
+            return
+        if not self._job_lock.acquire(blocking=False):
+            self._set_status("已有采集或发送正在运行；请完成后再加载项目列表。")
+            return
+        identity = teambition_mcp_identity(secrets)
+        self.project_choices = []
+        self._project_choices_identity = None
+        self.project_combo.configure(values=())
+        self.project_combo.set("")
+        self.load_projects_button.configure(state="disabled")
+        self._set_status("正在只读加载我的项目；原项目配置保持不变。")
+
+        def worker():
+            try:
+                projects, error = list_mcp_projects(secrets), None
+            except Exception as exc:
+                projects = []
+                error = ("Teambition MCP 个人 Token 已失效或无读取权限；请重新生成 Token 并保存，确认当前账户有项目读取权限。"
+                         if isinstance(exc, CollectionError) and str(exc) == "Teambition MCP authorization expired or denied" else
+                         "MCP 项目列表加载失败，可能是读取合同未核验、分页复核不一致或无权限；当前项目未更改。可手动输入 Tenant / Organization ID 和 Project ID 后再核验。")
+            finally:
+                self._job_lock.release()
+            self.root.after(0, lambda: self._projects_loaded(projects, error, identity))
+        threading.Thread(target=worker, daemon=True, name="teambition-project-list").start()
+
+    def _projects_loaded(self, projects, error, identity):
+        self.load_projects_button.configure(state="normal")
+        current = self.secret_store.load()
+        if not mcp_connection_authorized(current) or teambition_mcp_identity(current) != identity:
+            error = "MCP 授权在加载期间已改变；未返回项目列表，请重新授权后加载。"
+        if error:
+            self.project_choices = []
+            self._project_choices_identity = None
+            self.project_combo.configure(values=())
+            self.project_combo.set("")
+            self._set_status(error)
+            messagebox.showerror("项目列表未完成", error, parent=self.root)
+            return
+        self.project_choices = list(projects)
+        self._project_choices_identity = identity
+        self.project_combo.configure(values=tuple(
+            f"{project['name']} · {project['organizationId']} · {project['id']}" for project in projects))
+        self._set_status("当前账号参与的可见项目，列表可能不完整；找不到可手动填 ID。列表不含归档项目，选择后保存生效。" if projects else
+                         "未找到当前账号参与的可见项目，列表可能不完整且不含归档项目；原项目配置保持不变，可手动填 ID。")
+
+    def _select_discovered_project(self, _event=None):
+        current = self.secret_store.load()
+        if (not mcp_connection_authorized(current)
+                or teambition_mcp_identity(current) != self._project_choices_identity):
+            self._set_status("项目列表对应的 MCP 授权已改变；请重新加载项目列表。")
+            return
+        index = self.project_combo.current()
+        if not 0 <= index < len(self.project_choices):
+            return
+        selected = self.project_choices[index]
+        scope = {"tenant_id": selected["organizationId"], "project_id": selected["id"]}
+        previous_draft = getattr(self, "_project_display_draft", None)
+        saved = getattr(self, "settings", {})
+        if previous_draft and previous_draft["scope"] == scope:
+            display = dict(previous_draft["display"])
+        elif all(saved.get(key) == value for key, value in scope.items()):
+            display = {key: saved.get(key, DEFAULT_SETTINGS[key]) for key in
+                       ("task_number_prefix", "task_link_view_id", "task_display_scope")}
+        else:
+            # A different project's prefix/view cannot follow the new draft.
+            # The saved original remains intact until the user explicitly saves.
+            display = {"task_number_prefix": "", "task_link_view_id": "", "task_display_scope": None}
+        if "uniqueIdPrefix" in selected:
+            display["task_number_prefix"] = selected["uniqueIdPrefix"]
+            display["task_display_scope"] = dict(scope)
+        self._project_display_draft = {"scope": scope, "display": display}
+        self.values["tenant_id"].set(selected["organizationId"])
+        self.values["project_id"].set(selected["id"])
+        self._set_status("项目已填入表单；原配置保持不变，保存后生效。")
+
+    def _apply_project_display_draft(self, proposed):
+        """Apply only the explicitly selected project's display draft at save."""
+        draft = getattr(self, "_project_display_draft", None)
+        if draft and all(proposed.get(key) == value for key, value in draft["scope"].items()):
+            proposed.update(draft["display"])
+
     def _test_teambition(self):
         settings = dict(self.settings)
         for key in ("tenant_id", "project_id"):
             settings[key] = self.values[key].get().strip()
         secrets = dict(self.saved_secrets)
         secrets.update({key: self.values[key].get() for key in
-                        ("teambition_app_id", "teambition_app_secret") if self.values[key].get()})
+                        ("teambition_mcp_token",) if self.values[key].get()})
         if not settings["tenant_id"] or not settings["project_id"] or any(
-                not secrets.get(key) for key in ("teambition_app_id", "teambition_app_secret")):
-            messagebox.showinfo("需要配置", "填写 Tenant ID、Project ID、App ID 和 App Secret 后再测试。",
+                not secrets.get(key) for key in ("teambition_mcp_token",)):
+            messagebox.showinfo("需要配置", "填写 Tenant ID、Project ID、MCP 个人 Token 后再测试。",
                                 parent=self.root)
+            return
+        if not mcp_connection_authorized(secrets):
+            messagebox.showinfo("需要连接授权", "请先保存个人 Token 并确认授权本机连接 Teambition 官方 MCP。", parent=self.root)
             return
         self._set_status("正在执行 Teambition 只读项目查询；不会请求 OpenAI 或发送钉钉。")
 
@@ -1352,8 +1509,8 @@ class DigestDesktopApp:
                 collection = client.collect(settings["project_id"], day=end.date().isoformat(),
                                             window=(start, end), include_archived=settings["include_archived"])
                 result, error = f"Teambition 只读查询成功；收到 {len(collection['records'])} 条任务记录。", None
-            except (CollectionError, OSError):
-                result, error = None, "Teambition 连接测试失败；请检查本机网络、凭据和项目权限。"
+            except (CollectionError, OSError) as exc:
+                result, error = None, collection_validation_message(exc)
             except Exception:
                 result, error = None, "Teambition 连接测试未完成；详细响应未写入日志。"
             self.root.after(0, lambda: self._connection_test_finished(result, error))
@@ -1376,7 +1533,7 @@ class DigestDesktopApp:
         self._launch_run(start, end, schedule_key=None, scheduled=False)
 
     def _diagnose_manual(self):
-        """Read Teambition and run local source/event checks only; never summarize or send."""
+        """Check raw MCP source boundaries only; never summarize or send."""
         try:
             start_local, end_local = parse_manual_window(self.manual_start.get(), self.manual_end.get())
         except SettingsError as exc:
@@ -1385,13 +1542,13 @@ class DigestDesktopApp:
         if not self._job_lock.acquire(blocking=False):
             self._set_status("已有日报或诊断任务正在运行；请等待完成后再检查。")
             return
-        required = ("teambition_app_id", "teambition_app_secret")
+        required = ("teambition_mcp_token",)
         if (not self.settings.get("tenant_id") or not self.settings.get("project_id")
                 or any(not self.saved_secrets.get(key) for key in required)):
             self._job_lock.release()
             messagebox.showinfo(
                 "需要已保存的 Teambition 配置",
-                "请先在“账户与模型”填写并保存 Tenant ID、Project ID、Teambition App ID 和 App Secret。此项诊断不需要 OpenAI 或钉钉密钥。",
+                "请先在“账户与模型”填写并保存 Tenant ID、Project ID、Teambition MCP 个人 Token。此项诊断不需要 OpenAI 或钉钉密钥。",
                 parent=self.root)
             return
         settings, secrets = dict(self.settings), dict(self.saved_secrets)
@@ -1407,17 +1564,22 @@ class DigestDesktopApp:
                 start, end = start_local.astimezone(SHANGHAI), end_local.astimezone(SHANGHAI)
                 day = end.date().isoformat()
                 config = runtime_config(settings)
+                guard = ReportCredentialGuard(secrets)
+                guard.require_safe(config)
                 client = _new_teambition_client(settings, secrets)
                 collection = client.collect(
                     settings["project_id"], day=day, window=(start, end),
                     include_archived=settings["include_archived"])
-                diagnostic = diagnose_automatic_source(collection, config, day, (start, end))
+                guard.require_safe(collection)
+                diagnostic = diagnose_raw_source(collection, config, day, (start, end))
                 try:
                     safe_shape = safe_structure_export(collection, config, day, (start, end))
                 except Exception:
                     diagnostic["message"] += (
                         "\n当前诊断可查看，但安全结构文件生成失败；不会导出原始响应。"
                     )
+            except CredentialExposureBlocked as exc:
+                diagnostic = {"ok": False, "message": str(exc), "task_count": None}
             except (CollectionError, OSError) as exc:
                 diagnostic = {"ok": False, "message": collection_validation_message(exc), "task_count": None}
             except SettingsError as exc:
@@ -1482,7 +1644,7 @@ class DigestDesktopApp:
         if not self._job_lock.acquire(blocking=False):
             self._set_status("已有日报任务正在运行；当前触发不会并行执行。")
             return
-        self._set_status("正在本地采集并校验；通过后只发送必要评论摘要到 OpenAI，再自动发送钉钉。")
+        self._set_status("正在本地采集并校验；通过后将候选任务上下文及窗口内原始动态发送给 OpenAI 整理，再自动发送钉钉。")
 
         def worker():
             result = None

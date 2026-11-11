@@ -1,6 +1,8 @@
 # UPCAM 站会日报 · Workbench 原生插件
 
-插件版本 0.1.0，业务核心为独立版 0.4.3。此插件向统一窗口提供真正的 WinUI 页面，不会嵌入或启动另一个日报应用窗口。独立版 0.4.3 继续保留。
+**MCP 0.5.x 独立版与本旧版插件不兼容，插件尚未迁移；以下安装、接续数据及回退说明仅适用于原有 0.4.x，不适用于 MCP 0.5.x。**
+
+插件版本 0.1.1，本测试分支业务核心为独立版 0.4.6。只读诊断显示安全数字进度和已耗时；取消会终止本次工作进程而不自动重放。此插件向统一窗口提供真正的 WinUI 页面，不会嵌入或启动另一个日报应用窗口。独立版 0.4.3 继续保留。
 
 ## 兼容范围
 
@@ -17,7 +19,7 @@
 
 正式包名称含 `production`；名称含 `acceptance` 的包只用于 CI 虚构数据验收，页面会明确显示测试标识，不应用于真实项目。
 
-平台联合验收请下载独立 CI 产物 `UPCAMTaskDigest-workbench-acceptance-0.1.0-windows`。其中含可安装模拟 ZIP、SHA-256、记录实际源码和 SDK 的 `acceptance-handoff.json`，以及[合成包安装与验收说明](https://github.com/ThaoKeeton/upcam-task-digest/blob/main/integrations/project-workbench/ACCEPTANCE.zh-CN.md)。它不包含真实项目配置，全部服务由本地模拟替身提供。
+平台联合验收请下载独立 CI 产物 `UPCAMTaskDigest-workbench-acceptance-0.1.1-windows`。其中含可安装模拟 ZIP、SHA-256、记录实际源码和 SDK 的 `acceptance-handoff.json`，以及[合成包安装与验收说明](https://github.com/ThaoKeeton/upcam-task-digest/blob/main/integrations/project-workbench/ACCEPTANCE.zh-CN.md)。它不包含真实项目配置，全部服务由本地模拟替身提供。
 
 ## 接续独立版数据与回退
 

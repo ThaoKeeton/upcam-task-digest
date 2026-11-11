@@ -19,6 +19,7 @@ namespace Upcam.Desktop;
 public sealed partial class MainWindow
 {
     private readonly List<string> _smokeSteps = new();
+    private readonly List<string> _smokeDiagnostics = new();
     private readonly List<object> _smokeLayouts = new();
     private readonly List<object> _smokeIcons = new();
 
@@ -50,8 +51,10 @@ public sealed partial class MainWindow
             Assert(_ready && Navigation.IsEnabled && PageHost.IsEnabled && SaveButton.IsEnabled,
                 "Compatible synthetic worker restores native operation state");
             ApplyGeneralAppearance();
+            await VerifyDiagnosticCancellationAsync();
             await VerifyGeneralSettingsAsync(output);
             await VerifyCollectionProgressControlsAsync();
+            await VerifyChatAsync(output);
             var titleBar = Find<TitleBar>("app-titlebar");
             Assert(titleBar is not null && ExtendsContentIntoTitleBar, "Native custom TitleBar replaces colored system title bar");
             Assert(titleBar!.IconSource is BitmapIconSource { ShowAsMonochrome: false }, "TitleBar keeps original icon colors");
@@ -85,6 +88,37 @@ public sealed partial class MainWindow
             _state.ManualStart = DateTime.Now.AddHours(-2).ToString("yyyy-MM-dd HH:mm");
             _state.ManualEnd = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
             Navigate("accounts");
+            await WaitForAsync(() => Find<PasswordBox>("secret-teambition_mcp_token") is not null);
+            RootGrid.UpdateLayout();
+            var mcpToken = Find<PasswordBox>("secret-teambition_mcp_token")!;
+            var mcpSave = Find<Button>("save-mcp-settings");
+            Assert(mcpSave is not null, "MCP authorization has a save action before project selection");
+            double tokenY = mcpToken.TransformToVisual(PageHost).TransformPoint(new Point()).Y;
+            double saveY = mcpSave!.TransformToVisual(PageHost).TransformPoint(new Point()).Y;
+            Assert(tokenY < saveY, "MCP token input precedes its save and authorization action");
+            foreach (string id in new[] { "project-choice", "load-projects", "tenant-id", "project-id" })
+            {
+                var control = Find<FrameworkElement>(id);
+                Assert(control is not null && saveY < control.TransformToVisual(PageHost).TransformPoint(new Point()).Y,
+                    $"MCP token and authorization precede {id}");
+            }
+            await CaptureAsync(Path.Combine(output, "teambition-setup.png"));
+            ApplyDiagnosticResult(new JsonObject
+            {
+                ["message"] = "Synthetic raw-source diagnosis",
+                ["diagnostic_summary"] = new JsonObject
+                {
+                    ["unknown_events_in_report_window"] = 3,
+                    ["unknown_events_with_unknown_time"] = 2,
+                    ["catalog_complete"] = false
+                }
+            });
+            Assert(_state.Output.Contains(UiStrings.F("\n\n辅助结构分析：窗口内旧解析器未分类动作 {0} 条；这项统计不阻断，正式生成时仍交由 OpenAI 整理。", 3)),
+                "Auxiliary legacy action classification does not claim to block raw generation");
+            Assert(_state.Output.Contains(UiStrings.F("\n时间归属无法判断的动作：{0} 条。", 2)) &&
+                _state.Output.Contains(UiStrings.T("\n时间不明的动态仍需检查，不能判断其是否属于报告时间段。")) &&
+                _state.Output.Contains(UiStrings.T("\n诊断目录未完整，以上仅为已扫描部分，不能据此认定没有其他动态。")),
+                "Unknown event time and incomplete auxiliary catalog warnings remain visible");
             Find<TabView>("account-tabs")!.SelectedIndex = 1;
             await WaitForAsync(() => Find<TextBox>("dingtalk-mentions") is not null);
             Find<ComboBox>("dingtalk-mention-mode")!.SelectedIndex = 1;
@@ -192,8 +226,9 @@ public sealed partial class MainWindow
             await InvokeWhenReadyAsync("diagnose");
             await WaitForAsync(() => !_busy);
             Assert(_state.ExportAvailable && _state.Output.Contains("通过"), "Read-only diagnostic button and safe export availability");
-            Assert(_state.Output.Contains("窗口内未支持动作：0 条") && _state.Output.Contains("时间归属无法判断的未支持动作：0 条"),
-                "Native diagnostics distinguish unsupported actions from unknown time membership");
+            Assert(_state.Output.Contains("窗口内旧解析器未分类动作 0 条") &&
+                _state.Output.Contains("时间归属无法判断的动作：0 条"),
+                "Native diagnostics distinguish legacy parser counts from unknown time membership");
             string previousDiagnostic = _state.DiagnosticText;
             await InvokeWhenReadyAsync("export-detailed-diagnostic");
             await WaitForAsync(() => Find<ContentDialog>("detailed-export-consent") is not null);
@@ -214,7 +249,7 @@ public sealed partial class MainWindow
                 var detailResult = await Worker.SendAsync("export_detailed_diagnostic_to_file", detailPayload);
                 string detailText = File.ReadAllText(detailPath);
                 Assert(detailResult["detailed_export"]?["saved"]?.GetValue<bool>() == true &&
-                    detailText.Contains("CI 虚构") && !detailText.Contains("synthetic-app-secret") &&
+                    detailText.Contains("CI 虚构") && !detailText.Contains("synthetic-mcp-token") &&
                     !detailText.Contains("synthetic-key-cannot-call-openai") && !detailText.Contains("access_token=synthetic-only"),
                     "Packaged worker exports synthetic project evidence without configured credentials");
                 Assert(detailResult["diagnostic_summary"]?["unknown_events_in_report_window"]?.GetValue<int>() == 0 &&
@@ -228,7 +263,7 @@ public sealed partial class MainWindow
             await InvokeWhenReadyAsync("copy-diagnostic");
             await WaitForAsync(() => !_busy);
             string copiedDiagnostic = await Windows.ApplicationModel.DataTransfer.Clipboard.GetContent().GetTextAsync();
-            Assert(copiedDiagnostic == _state.DiagnosticText && copiedDiagnostic.Contains("只读校验通过"),
+            Assert(copiedDiagnostic == _state.DiagnosticText && copiedDiagnostic.Contains("只读范围检查通过"),
                 "Native copy button copies only the current local diagnostic");
             Assert(Title.Contains("v" + _state.ApplicationVersion) &&
                 _state.ApplicationVersion == typeof(MainWindow).Assembly.GetName().Version?.ToString(3),
@@ -272,7 +307,7 @@ public sealed partial class MainWindow
             Assert(_state.History.Count == 2 && _state.History.All(row => Value(row, "state") == "sent"),
                 "Deliberate second manual click resends the same window without an extra confirmation dialog");
 
-            foreach (var size in new[] { new SizeInt32(1180, 800), new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540) })
+            foreach (var size in new[] { new SizeInt32(1180, 800), new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540), new SizeInt32(640, 520) })
             {
                 AppWindow.Resize(size);
                 await Task.Delay(150);
@@ -304,6 +339,10 @@ public sealed partial class MainWindow
                     await Task.Delay(60);
                     RootGrid.UpdateLayout();
                     Assert(PageHost.ActualWidth > 300 && PageHost.ActualHeight > 180, $"Layout {route} {size.Width}x{size.Height}");
+                    if (route == "chat")
+                    {
+                        await VerifyChatLayoutAsync(size, output);
+                    }
                     if (route == "schedule")
                     {
                         var morningStart = Find<TextBox>("morning-start-at")!;
@@ -396,6 +435,260 @@ public sealed partial class MainWindow
         _smokeSteps.Add(description);
     }
 
+    private async Task VerifyDiagnosticCancellationAsync()
+    {
+        await _worker!.StopAsync();
+        _worker.Dispose();
+        var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "worker", "UPCAMWorker.exe"))
+        {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
+            RedirectStandardOutput = true, RedirectStandardError = true,
+            StandardInputEncoding = new System.Text.UTF8Encoding(false), StandardOutputEncoding = new System.Text.UTF8Encoding(false),
+            WorkingDirectory = AppContext.BaseDirectory
+        };
+        start.ArgumentList.Add("--smoke-test-slow-diagnostic");
+        _worker = new WorkerClient(start, TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(125), TimeSpan.FromMinutes(11));
+        ApplyInitializationResult(await _worker.SendAsync("initialize"));
+        Navigate("run");
+        await InvokeWhenReadyAsync("diagnose");
+        await WaitForAsync(() => _busy && CancelDiagnosticButton.Visibility == Visibility.Visible && StatusText.Text.Contains("1/3"));
+        Assert(!PageHost.IsEnabled && CancelDiagnosticButton.IsEnabled,
+            "Read-only diagnosis shows real numeric progress while the separate Cancel control stays enabled");
+        string earlierProgress = StatusText.Text;
+        await Task.Delay(1100);
+        Assert(StatusText.Text != earlierProgress && StatusText.Text.Contains("1/3"),
+            "Read-only diagnosis elapsed time advances while its worker is still busy");
+        Invoke(CancelDiagnosticButton);
+        await WaitForAsync(() => !_busy);
+        Assert(_ready && PageHost.IsEnabled && CancelDiagnosticButton.Visibility == Visibility.Collapsed && !_state.ExportAvailable,
+            "Cancel stops diagnosis, reopens a compatible worker and leaves no stale export");
+        Assert(_state.Output.Contains("已停止") && _state.History.Count == 0,
+            "Canceled read-only diagnosis is not replayed or converted into a digest run");
+        await InvokeWhenReadyAsync("diagnose");
+        await WaitForAsync(() => !_busy);
+        Assert(_state.ExportAvailable, "A fresh read-only diagnosis works after cancellation without restarting the app");
+    }
+
+    private async Task VerifyChatAsync(string output)
+    {
+        if (!_smoke) throw new InvalidOperationException("Chat diagnostics require synthetic smoke mode.");
+        VerifyChatMultilineControls();
+        Navigate("chat");
+        await WaitForAsync(() => Find<TextBox>("chat-message-input") is not null);
+        Assert(Find<Button>("chat-send-preview") is { IsEnabled: false },
+            "Chat cannot send before an answer exists");
+        const string multilineInput = "CI synthetic input\nsecond line 🧪\n\nlast line  \n";
+        Find<TextBox>("chat-message-input")!.Text = multilineInput;
+        await WaitForAsync(() => ChatPreviewMatches(multilineInput, _chatInput));
+        Navigate("home"); Navigate("chat");
+        await WaitForAsync(() => Find<TextBox>("chat-message-input") is { IsLoaded: true });
+        Assert(ChatPreviewMatches(multilineInput, Find<TextBox>("chat-message-input")!.Text) &&
+            ChatPreviewMatches(multilineInput, _chatInput),
+            "Chat multiline composer survives navigation with every line intact");
+        Find<TextBox>("chat-message-input")!.Text = "CI 虚构聊天";
+        await WaitForAsync(() => _chatInput == "CI 虚构聊天");
+        await InvokeWhenReadyAsync("chat-ask");
+        await WaitForAsync(() => !_busy && _chatMessages.Any(line => line.Text.Contains("CI 虚构聊天任务")));
+        Assert(!string.IsNullOrEmpty(_chatDraftId) && Find<Button>("chat-send-preview") is { IsEnabled: true },
+            "Synthetic chat displays a read-only answer and only prepares a draft");
+        Navigate("home"); Navigate("chat");
+        Assert(_chatMessages.Any(line => line.Text.Contains("CI 虚构聊天任务")),
+            "Chat conversation survives navigation in the same process");
+        await CaptureAsync(Path.Combine(output, "chat-synthetic.png"));
+        string? draftIdAtOpen = _chatDraftId;
+        string answerAtOpen = _chatDraftAnswer;
+        Assert(NormalizeChatNewlines(answerAtOpen).Count(c => c == '\n') > 1,
+            "Synthetic chat preview regression uses a multiline draft");
+        await InvokeWhenReadyAsync("chat-send-preview");
+        await WaitForAsync(() => Find<TextBox>("chat-send-preview-text") is not null);
+        var chatPreview = Find<TextBox>("chat-send-preview-text")!;
+        string previewAtFirstCheck = chatPreview.Text;
+        _smokeDiagnostics.Add($"chat-preview-state: draftIdStable={_chatDraftId == draftIdAtOpen}; " +
+            $"draftAnswerStable={_chatDraftAnswer == answerAtOpen}");
+        RecordSmokeTextComparison("chat-preview", answerAtOpen, previewAtFirstCheck, chatPreview.IsLoaded);
+        var dispatcherTurn = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool enqueued = DispatcherQueue.TryEnqueue(() => dispatcherTurn.SetResult(true));
+        _smokeDiagnostics.Add($"chat-preview-dispatch: enqueued={enqueued}");
+        if (enqueued)
+        {
+            await dispatcherTurn.Task.WaitAsync(TimeSpan.FromSeconds(12));
+            string previewAfterDispatch = chatPreview.Text;
+            _smokeDiagnostics.Add($"chat-preview-state-after-dispatch: draftIdStable={_chatDraftId == draftIdAtOpen}; " +
+                $"draftAnswerStable={_chatDraftAnswer == answerAtOpen}; " +
+                $"samePreviewControl={ReferenceEquals(chatPreview, Find<TextBox>("chat-send-preview-text"))}");
+            RecordSmokeTextComparison("chat-preview-after-dispatch", answerAtOpen, previewAfterDispatch, chatPreview.IsLoaded);
+            RecordSmokeTextComparison("chat-preview-first-vs-after-dispatch", previewAtFirstCheck, previewAfterDispatch, chatPreview.IsLoaded);
+        }
+        Assert(ChatPreviewMatches(_chatDraftAnswer, previewAtFirstCheck) &&
+            ChatPreviewMatches(_chatDraftAnswer, Find<TextBox>("chat-send-preview-text")!.Text),
+            "Chat confirmation preserves every draft line and character except newline encoding");
+        int messageCountBeforeSend = _chatMessages.Count;
+        foreach (string alteredPreview in new[] { NormalizeChatNewlines(answerAtOpen).Split('\n')[0],
+            answerAtOpen + " CI synthetic changed preview" })
+        {
+            chatPreview.Text = alteredPreview;
+            Invoke(await WaitForPrimaryAsync());
+            await WaitForAsync(() => Find<ContentDialog>("chat-send-confirm") is null &&
+                StatusText.Text == UiStrings.T("发送预览与答复不一致，已阻止发送。请重新打开预览后再确认。"));
+            Assert(!_busy && _chatDraftId == draftIdAtOpen && _chatDraftAnswer == answerAtOpen &&
+                _chatMessages.Count == messageCountBeforeSend,
+                "Changed synthetic chat preview cannot send or consume its draft");
+            await InvokeWhenReadyAsync("chat-send-preview");
+            await WaitForAsync(() => Find<TextBox>("chat-send-preview-text") is { IsLoaded: true });
+            chatPreview = Find<TextBox>("chat-send-preview-text")!;
+            Assert(ChatPreviewMatches(answerAtOpen, chatPreview.Text),
+                "Reopened chat preview restores the complete unchanged draft");
+        }
+        Find<ContentDialog>("chat-send-confirm")!.Hide();
+        await WaitForAsync(() => Find<ContentDialog>("chat-send-confirm") is null);
+        Assert(_chatDraftId == draftIdAtOpen && _chatDraftAnswer == answerAtOpen &&
+            _chatMessages.Count == messageCountBeforeSend,
+            "Canceling a reopened chat preview preserves its draft");
+        await InvokeWhenReadyAsync("chat-send-preview");
+        await WaitForAsync(() => Find<TextBox>("chat-send-preview-text") is { IsLoaded: true });
+        Assert(ChatPreviewMatches(answerAtOpen, Find<TextBox>("chat-send-preview-text")!.Text),
+            "Final chat confirmation shows the complete unchanged draft");
+        Invoke(await WaitForPrimaryAsync());
+        await WaitForAsync(() => !_busy && _chatMessages.Any(line => line.Text.Contains("钉钉机器人已确认接收")));
+        Assert(_chatDraftId is null, "Confirmed synthetic chat send consumes its draft");
+        await InvokeWhenReadyAsync("chat-resolve-send");
+        await WaitForAsync(() => !_busy && _chatMessages.Any(line => line.Text.Contains("没有可解除的未知发送记录")));
+        Assert(Find<ContentDialog>("chat-resolve-confirm") is null && _chatDraftId is null,
+            "No recovery confirmation appears without an unknown send");
+        await InvokeWhenReadyAsync("chat-reset");
+        await WaitForAsync(() => !_busy && _chatMessages.Count == 0);
+        Assert(_chatDraftId is null, "Clearing chat removes the conversation and pending draft");
+    }
+
+    private async Task VerifyChatLayoutAsync(SizeInt32 size, string output)
+    {
+        if (!_smoke) throw new InvalidOperationException("Chat layout checks require synthetic smoke mode.");
+        var previousMessages = _chatMessages.ToArray();
+        string previousInput = _chatInput;
+        string? previousDraftId = _chatDraftId;
+        string previousDraftAnswer = _chatDraftAnswer;
+        bool previousSendRequested = _chatSendRequested;
+        string previousStatus = StatusText.Text;
+        bool previousPaneOpen = Navigation.IsPaneOpen;
+        string language = UiStrings.ResolvedLanguage;
+        try
+        {
+            Navigation.IsPaneOpen = true;
+            _chatDraftId = null;
+            _chatDraftAnswer = "";
+            _chatSendRequested = false;
+            string statusLine = language == "zh-CN" ? "CI 虚构布局检查" : "CI synthetic layout check";
+            StatusText.Text = statusLine;
+            RootGrid.UpdateLayout();
+            double singleLineHeight = StatusText.ActualHeight;
+            StatusText.Text = statusLine + (language == "zh-CN" ? "\n不会访问真实服务" : "\nNo live services are accessed");
+            foreach (string scenario in new[] { "empty", "multiline" })
+            {
+                _chatMessages.Clear();
+                _chatInput = "";
+                if (scenario == "multiline")
+                {
+                    _chatInput = "CI synthetic input\nSecond line";
+                    _chatMessages.Add(new ChatLine("你", "CI synthetic layout question"));
+                    _chatMessages.Add(new ChatLine("助手", string.Join("\n", Enumerable.Range(1, 30)
+                        .Select(line => $"CI synthetic answer line {line}"))));
+                }
+                RefreshChatIfVisible();
+                await Task.Delay(60);
+                RootGrid.UpdateLayout();
+                var chatScroll = Find<ScrollViewer>("chat-scroll")!;
+                string context = $"{language} {size.Width}x{size.Height} {scenario}";
+                _smokeDiagnostics.Add($"chat-layout {context}: actualWindow={AppWindow.Size.Width}x{AppWindow.Size.Height}; " +
+                    $"scale={RootGrid.XamlRoot.RasterizationScale}; pageHeight={PageHost.ActualHeight}; " +
+                    $"statusHeight={StatusText.ActualHeight}; singleLineHeight={singleLineHeight}; " +
+                    $"scrollHeight={chatScroll.ActualHeight}; viewportHeight={chatScroll.ViewportHeight}; " +
+                    $"scrollableHeight={chatScroll.ScrollableHeight}");
+                if (size.Width == 640 && size.Height <= 540)
+                    await CaptureAsync(Path.Combine(output, $"chat-layout-{language}-{size.Width}x{size.Height}-{scenario}.png"));
+                Assert(Navigation.IsPaneOpen && Navigation.DisplayMode == NavigationViewDisplayMode.Expanded,
+                    "Chat layout uses expanded navigation at " + context);
+                Assert(singleLineHeight > 0 && StatusText.ActualHeight >= singleLineHeight * 1.9,
+                    "Chat layout uses an explicit two-line status at " + context);
+                Assert(chatScroll.ActualHeight >= 45, "Chat conversation remains visible at " + context);
+                AssertChatControlInside(chatScroll, "Chat conversation remains inside its page at " + context);
+                var input = Find<TextBox>("chat-message-input")!;
+                Assert(Math.Abs(input.ActualHeight - 84) < 1, "Chat input keeps its 84 DIP height at " + context);
+                AssertChatControlInside(input, "Chat composer remains visible at " + context);
+                foreach (string id in new[] { "chat-ask", "chat-reset", "chat-send-preview", "chat-resolve-send" })
+                    AssertChatControlInside(Find<Button>(id)!, $"Chat button {id} remains visible at {context}");
+                if (scenario == "multiline")
+                    Assert(chatScroll.ScrollableHeight > 0, "Synthetic multiline chat can scroll at " + context);
+            }
+        }
+        finally
+        {
+            _chatMessages.Clear();
+            _chatMessages.AddRange(previousMessages);
+            _chatInput = previousInput;
+            _chatDraftId = previousDraftId;
+            _chatDraftAnswer = previousDraftAnswer;
+            _chatSendRequested = previousSendRequested;
+            StatusText.Text = previousStatus;
+            Navigation.IsPaneOpen = previousPaneOpen;
+            RefreshChatIfVisible();
+            RootGrid.UpdateLayout();
+        }
+    }
+
+    private void AssertChatControlInside(FrameworkElement control, string description)
+    {
+        AssertInside(control, description);
+        Rect bounds = control.TransformToVisual(PageHost).TransformBounds(new Rect(0, 0, control.ActualWidth, control.ActualHeight));
+        Assert(control.ActualWidth > 0 && control.ActualHeight > 0 &&
+            bounds.Left >= -2 && bounds.Top >= -2 && bounds.Right <= PageHost.ActualWidth + 2 &&
+            bounds.Bottom <= PageHost.ActualHeight + 2, description + " inside chat page");
+    }
+
+    private void VerifyChatMultilineControls()
+    {
+        // Same synthetic text and settings; vary only when multiline is enabled.
+        foreach (var (label, newline) in new[] { ("LF", "\n"), ("CRLF", "\r\n"), ("CR", "\r") })
+        {
+            string original = "A" + newline + "B 🧪\t  " + newline + newline + "C  " + newline;
+            var textFirst = new TextBox
+            {
+                Text = original, IsReadOnly = true, AcceptsReturn = true,
+                TextWrapping = TextWrapping.Wrap, Height = 240
+            };
+            var acceptsReturnFirst = new TextBox
+            {
+                AcceptsReturn = true, Text = original, IsReadOnly = true,
+                TextWrapping = TextWrapping.Wrap, Height = 240
+            };
+            RecordSmokeTextComparison($"textbox-{label}-text-first", original, textFirst.Text, textFirst.IsLoaded);
+            RecordSmokeTextComparison($"textbox-{label}-accepts-return-first", original, acceptsReturnFirst.Text, acceptsReturnFirst.IsLoaded);
+            Assert(ChatPreviewMatches(original, "A\nB 🧪\t  \n\nC  \n") && ChatPreviewMatches(original, acceptsReturnFirst.Text),
+                $"AcceptsReturn-first {label} native textbox retains every line and character");
+            Assert(!ChatPreviewMatches(original, "A") && !ChatPreviewMatches(original, original + newline) &&
+                !ChatPreviewMatches(original, original.Replace("B", "X")) && !ChatPreviewMatches(original, original.Trim()),
+                $"Strict {label} preview comparison rejects truncation, extra lines, changed characters and trimmed whitespace");
+        }
+    }
+
+    private void RecordSmokeTextComparison(string label, string expected, string actual, bool isLoaded)
+    {
+        if (!_smoke) return;
+        int firstDifference = 0;
+        while (firstDifference < expected.Length && firstDifference < actual.Length &&
+            expected[firstDifference] == actual[firstDifference]) firstDifference++;
+        if (firstDifference == expected.Length && firstDifference == actual.Length) firstDifference = -1;
+        string UnitAt(string text) => firstDifference < 0 ? "none" : firstDifference >= text.Length ? "END" :
+            $"0x{(int)text[firstDifference]:X4}";
+        // UTF-16 code units, counts and equality only. Never record text or draft IDs.
+        _smokeDiagnostics.Add($"{label}: isLoaded={isLoaded}; " +
+            $"expectedUtf16Length={expected.Length}; actualUtf16Length={actual.Length}; " +
+            $"expectedLines={NormalizeChatNewlines(expected).Split('\n').Length}; actualLines={NormalizeChatNewlines(actual).Split('\n').Length}; " +
+            $"expectedCR={expected.Count(c => c == '\r')}; expectedLF={expected.Count(c => c == '\n')}; " +
+            $"actualCR={actual.Count(c => c == '\r')}; actualLF={actual.Count(c => c == '\n')}; " +
+            $"firstMismatchUtf16Index={firstDifference}; expectedUnit={UnitAt(expected)}; actualUnit={UnitAt(actual)}; " +
+            $"exactEqual={expected == actual}; newlineNormalizedEqual={ChatPreviewMatches(expected, actual)}");
+    }
+
     private async Task VerifyCollectionProgressControlsAsync()
     {
         var savedBefore = await Worker.SendAsync("initialize");
@@ -404,6 +697,14 @@ public sealed partial class MainWindow
         Assert(batchSize.Header.ToString() == "每批采集任务数（1–700）" && batchSize.Value == 300 &&
             batchSize.Minimum == 1 && batchSize.Maximum == 700,
             "Native schedule exposes the legacy default as a bounded collection batch size");
+        var concurrent = Find<NumberBox>("task-concurrency")!;
+        Assert(concurrent.Header.ToString() == "并行读取任务数（1–4）" && concurrent.Value == 4 &&
+            concurrent.Minimum == 1 && concurrent.Maximum == 4,
+            "Native schedule exposes bounded task concurrency without increasing aggregate API rate");
+        concurrent.Value = 2.5;
+        await WaitForAsync(() => _state.Number("max_concurrent_tasks", 0) == 2 && concurrent.Value == 2);
+        concurrent.Value = 4;
+        await WaitForAsync(() => _state.Number("max_concurrent_tasks", 0) == 4);
         batchSize.Value = 700;
         await WaitForAsync(() => _state.Number("max_tasks_per_run", 0) == 700);
         _state.SetSecretDraft("openai_api_key", "ci-unsaved-cache-clear-draft");
@@ -524,7 +825,7 @@ public sealed partial class MainWindow
         await CaptureAsync(Path.Combine(output, "general-english-light.png"));
         Assert(FindIn<CommunityToolkit.WinUI.Controls.SettingsCard>(PageHost, _ => true) is not null,
             "General page uses actual PowerToys-matched CommunityToolkit SettingsCard controls");
-        foreach (var size in new[] { new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540) })
+        foreach (var size in new[] { new SizeInt32(900, 700), new SizeInt32(760, 620), new SizeInt32(640, 540), new SizeInt32(640, 520) })
         {
             AppWindow.Resize(size);
             foreach (string route in _routes.Keys)
@@ -532,6 +833,10 @@ public sealed partial class MainWindow
                 Navigate(route); await Task.Delay(40); RootGrid.UpdateLayout();
                 Assert(PageHost.ActualWidth > 300 && PageHost.ActualHeight > 150,
                     $"English light interface layout {route} {size.Width}x{size.Height}");
+                if (route == "chat")
+                {
+                    await VerifyChatLayoutAsync(size, output);
+                }
                 if (route == "schedule")
                 {
                     var clearProgress = Find<Button>("clear-collection-progress")!;
@@ -628,7 +933,7 @@ public sealed partial class MainWindow
             const string suffix = "\"}}\n";
             int padding = length - System.Text.Encoding.UTF8.GetByteCount(prefix + suffix);
             byte[] bytes = System.Text.Encoding.UTF8.GetBytes(prefix + new string('x', padding) + suffix);
-            Task<string?> read = WorkerClient.ReadBoundedLineAsync(client);
+            Task<string?> read = new WorkerLineReader(client).ReadAsync(default);
             await server.WriteAsync(bytes);
             await server.FlushAsync();
             string? line = await read.WaitAsync(TimeSpan.FromSeconds(3));
@@ -727,7 +1032,8 @@ public sealed partial class MainWindow
         string output = Path.Combine(AppContext.BaseDirectory, "smoke-output");
         Directory.CreateDirectory(output);
         File.WriteAllText(Path.Combine(output, "result.txt"), message +
-            "\nCurrent page: " + _page + "\nCompleted steps:\n" + string.Join("\n", _smokeSteps));
+            "\nCurrent page: " + _page + "\nCompleted steps:\n" + string.Join("\n", _smokeSteps) +
+            "\nSynthetic chat text diagnostics:\n" + string.Join("\n", _smokeDiagnostics));
         Environment.ExitCode = success ? 0 : 1;
         _exitRequested = true;
         Close();

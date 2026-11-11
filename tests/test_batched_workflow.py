@@ -1,4 +1,4 @@
-"""End-to-end large-project workflow with synthetic GET/model/sender boundaries."""
+"""End-to-end large-project workflow with synthetic MCP/model/sender boundaries."""
 
 from dataclasses import replace
 from datetime import datetime
@@ -19,9 +19,9 @@ class ModelBoundary:
     def __init__(self):
         self.calls = 0
 
-    def summarize(self, *args, **kwargs):
+    def summarize_activities(self, key, model, effort, rows, rules, service_tier="default"):
         self.calls += 1
-        raise AssertionError("No comment text needs a model")
+        return {row["task_key"]: {"category": "new", "summary": ""} for row in rows}
 
 
 class SenderBoundary:
@@ -35,7 +35,8 @@ class SenderBoundary:
 
 class BatchedWorkflowTests(unittest.TestCase):
     def setup_workflow(self, directory, *, policy=None):
-        tasks = [samples.task(i, updated="2020-01-01T00:00:00Z", uniqueId=i + 1,
+        # Future-updated candidates remain included without a report-end upper bound.
+        tasks = [samples.task(i, updated="2026-01-03T12:00:00+08:00", uniqueId=i + 1,
                     executorId="fictional-owner", tfsId="fictional-open", isDone=False,
                     project={"_id": "fictional-project", "uniqueIdPrefix": "SYNTH"})
                  for i in range(1201)]
@@ -48,20 +49,29 @@ class BatchedWorkflowTests(unittest.TestCase):
         def factory(tenant_id, *, credentials):
             return Client(tenant_id, credentials=credentials, transport=transport,
                           sleep=clock.sleep, clock=clock, batch_mode=True,
-                          checkpoint=progress, batch_policy=policy or BatchPolicy())
+                          checkpoint=progress, batch_policy=policy or BatchPolicy(),
+                          mcp_envelope_validator=samples.fictional_envelope,
+                          archive_contract_validator=samples.fictional_archive)
 
         settings = dict(DEFAULT_SETTINGS, tenant_id="fictional-tenant", project_id="fictional-project",
                         api_contract_verified=True,
                         view={"verified": True, "evidence": "synthetic test scope", "task_equals": {}},
                         owner_names={"fictional-owner": "虚构负责人"},
                         status_names={"fictional-open": "待处理"}, resolved_status_ids=[])
-        credentials = {"teambition_app_id": "fictional-app", "teambition_app_secret": "fictional-secret",
+        credentials = {"teambition_mcp_token": "fictional-token",
                        "dingtalk_webhook": "https://oapi.dingtalk.com/robot/send?access_token=fictional-only",
                        "dingtalk_signing_secret": "fictional-signing",
+                       "openai_api_key": "synthetic-api-key",
                        "delivery_ledger_id": initialize_ledger(Path(directory) / "delivery_ledger.sqlite3")}
+        from upcam_app.secrets import teambition_mcp_identity, MCP_AUTHORIZATION_FIELD
+        credentials[MCP_AUTHORIZATION_FIELD] = teambition_mcp_identity(credentials)
         model, sender = ModelBoundary(), SenderBoundary()
+        from upcam_app.openai_models import OpenAIModelCatalog
+        catalog = OpenAIModelCatalog(Path(directory) / "models.json",
+                                     transport=lambda *_: b'{"data":[{"id":"gpt-6-luna"}]}')
+        catalog.refresh(credentials["openai_api_key"])
         workflow = DigestWorkflow(settings, credentials, Path(directory), client_factory=factory,
-                                  summarizer=model, ding_sender=sender)
+                                  summarizer=model, ding_sender=sender, model_catalog=catalog)
         return workflow, model, sender, transport
 
     def run_workflow(self, workflow):
@@ -74,7 +84,7 @@ class BatchedWorkflowTests(unittest.TestCase):
             result = self.run_workflow(workflow)
             self.assertEqual(result["state"], "sent")
             self.assertEqual(len(transport.detail_ids), 1201)
-            self.assertEqual(model.calls, 0)
+            self.assertEqual(model.calls, 1)
             self.assertEqual(len(sender.calls), 1)
             self.assertEqual(len(result["report"]["digest"]["tasks"]), 1)
             self.assertEqual(result["report"]["digest"]["tasks"][0]["category"], "new")

@@ -13,6 +13,26 @@ from upcam_app.smoke_data import make_smoke_service, SyntheticClient
 
 
 class DetailedWorkerTests(unittest.TestCase):
+    def test_detailed_export_uses_full_project_audit_instead_of_updated_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service, window, _calls = self.fixture(directory)
+            modes = []
+            previous = service.client_factory
+
+            class RecordingMode(previous):
+                def collect(self, *args, **kwargs):
+                    modes.append(kwargs.get("candidate_mode", "updated_since_start"))
+                    return super().collect(*args, **kwargs)
+
+            service.client_factory = RecordingMode
+            target = Path(directory) / "full-audit.json"
+            result = service.dispatch({"op": "export_detailed_diagnostic_to_file", "payload": {
+                **window, "path": str(target), "include_project_content": True}})
+            self.assertEqual(modes, ["full_project"])
+            self.assertTrue(result["detailed_export"]["saved"])
+            snapshot = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["scope"]["selection"]["candidate_scope"], "current-visible-project-tasks")
+
     def test_parent_replaced_at_writer_entry_is_not_followed(self):
         from upcam_app.diagnostic_files import write_private_diagnostic
         with tempfile.TemporaryDirectory() as directory:
@@ -105,13 +125,13 @@ class DetailedWorkerTests(unittest.TestCase):
             class CredentialAction(previous):
                 def collect(self, *args, **kwargs):
                     result = super().collect(*args, **kwargs)
-                    result["records"][0]["activities"][-1]["action"] = "synthetic-app-secret"
+                    result["records"][0]["activities"][-1]["action"] = "synthetic-mcp-token"
                     return result
 
             service.client_factory = CredentialAction
             result = service.dispatch({"op": "diagnose", "payload": window})
             self.assertFalse(result["ok"])
-            self.assertNotIn("synthetic-app-secret", json.dumps(result, ensure_ascii=False))
+            self.assertNotIn("synthetic-mcp-token", json.dumps(result, ensure_ascii=False))
             self.assertIn("凭据", result["message"])
 
     def fixture(self, directory):
@@ -163,7 +183,7 @@ class DetailedWorkerTests(unittest.TestCase):
             result = service.dispatch({"op": "export_detailed_diagnostic_to_file", "payload": {
                 **window, "path": str(target), "include_project_content": True}})
             self.assertEqual(len(calls), 1)
-            self.assertFalse(result["ok"])  # Unsupported source remains blocked.
+            self.assertTrue(result["ok"])  # Unknown activity semantics belong to the model.
             self.assertTrue(result["detailed_export"]["saved"])
             self.assertTrue(result["export_available"])
             raw = target.read_text(encoding="utf-8")
@@ -175,7 +195,7 @@ class DetailedWorkerTests(unittest.TestCase):
             self.assertIn("虚构旧阶段", raw)
             self.assertIn("future.synthetic.move", raw)
             self.assertIn("synthetic-business-level", raw)
-            for private in ("synthetic-app-secret", "synthetic-app-id", "synthetic-key-cannot-call-openai",
+            for private in ("synthetic-mcp-token", "synthetic-app-id", "synthetic-key-cannot-call-openai",
                             "access_token=synthetic-only", "synthetic-secret-cannot-export"):
                 self.assertNotIn(private, raw)
             self.assertNotIn("虚构旧阶段", json.dumps(result, ensure_ascii=False))

@@ -1,5 +1,7 @@
 name: Windows desktop build
 on:
+  push:
+    branches: [fix/diagnostic-progress-cancel, fix/standalone-filter-concurrency, fix/server-updated-candidates, fix/teambition-mcp-only]
   workflow_dispatch:
     inputs:
       publish_stable:

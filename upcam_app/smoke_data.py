@@ -5,13 +5,16 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import uuid
+import time
+
+from collection_progress import report_collection
 
 from report_contract import updated_selection
 from render_digest import BLOCK_SEPARATOR
 
 from .config import DEFAULT_SETTINGS, SettingsStore
 from .openai_models import OpenAIModelCatalog
-from .secrets import MemorySecretStore
+from .secrets import MemorySecretStore, teambition_mcp_identity, MCP_AUTHORIZATION_FIELD
 from .worker_api import WorkerService
 from .workflow import DigestWorkflow
 from .dingtalk import DingTalkSender
@@ -25,6 +28,9 @@ class SyntheticClient:
     def __init__(self, tenant_id, **_kwargs):
         self.tenant_id = tenant_id
 
+    def list_projects(self):
+        return [{"id": "demo-project", "name": "CI 虚构项目", "organizationId": "demo-org"}]
+
     def collect(self, project_id, *, day, window, include_archived=False, **_kwargs):
         start, end = window
         instant = start + (end - start) / 2
@@ -32,7 +38,8 @@ class SyntheticClient:
         return {
             "tenant_id": self.tenant_id, "project_id": project_id,
             "include_archived": include_archived, "pagination_complete": True,
-            "selection": updated_selection(day, start, end),
+            "selection": updated_selection(day, start, end,
+                                           candidate_mode=_kwargs.get("candidate_mode", "updated_since_start")),
             "batch_id": str(uuid.uuid4()),
             "collected_at": datetime.now(timezone.utc).isoformat(),
             "records": [{
@@ -128,8 +135,11 @@ class SyntheticSummarizer:
     def summarize(self, _key, _model, _effort, rows, _rules, service_tier="default"):
         return {row["task_key"]: "CI 虚构摘要" for row in rows}
 
+    def summarize_activities(self, _key, _model, _effort, rows, _rules, service_tier="default"):
+        return {row["task_key"]: {"category": "progress", "summary": "CI 虚构摘要"} for row in rows}
 
-def make_smoke_service(directory: Path) -> WorkerService:
+
+def make_smoke_service(directory: Path, *, slow_diagnostic=False) -> WorkerService:
     """Never read an actual user profile, credentials, registry, or environment secrets."""
     directory = Path(directory)
     settings = deepcopy(DEFAULT_SETTINGS)
@@ -147,7 +157,8 @@ def make_smoke_service(directory: Path) -> WorkerService:
     store.save(settings)
     secret_store = MemorySecretStore()
     secret_store.save({
-        "teambition_app_id": "synthetic-app-id", "teambition_app_secret": "synthetic-app-secret",
+        "teambition_mcp_token": "synthetic-mcp-token",
+        MCP_AUTHORIZATION_FIELD: teambition_mcp_identity({"teambition_mcp_token": "synthetic-mcp-token"}),
         "openai_api_key": "synthetic-key-cannot-call-openai",
         "dingtalk_webhook": "https://oapi.dingtalk.com/robot/send?access_token=synthetic-only",
         "dingtalk_signing_secret": "synthetic-only",
@@ -163,10 +174,34 @@ def make_smoke_service(directory: Path) -> WorkerService:
                               summarizer=SyntheticSummarizer(),
                               ding_sender=SyntheticDingTalk(settings), **kwargs)
 
-    return WorkerService(
+    class SlowSyntheticClient(SyntheticClient):
+        def collect(self, *args, **kwargs):
+            report_collection("collecting", completed=1, total=3, requests=2, batches=1)
+            time.sleep(10)  # Isolated fixture: enough time to exercise the real Cancel control.
+            return super().collect(*args, **kwargs)
+
+    service = WorkerService(
         directory, settings_store=store, secret_store=secret_store,
-        model_catalog=catalog, client_factory=SyntheticClient,
+        model_catalog=catalog, client_factory=SlowSyntheticClient if slow_diagnostic else SyntheticClient,
         workflow_factory=workflow,
         startup_configurer=lambda *_args, **_kwargs: None,
         update_manager=synthetic_update_manager(directory, APP_VERSION),
     )
+    # This explicit replacement has no external transport and cannot use a real
+    # profile. It exercises the same worker/session and send admission boundary.
+    from .chat_worker import ChatWorker, send_chat_markdown
+    class SyntheticChatPlanner:
+        def plan(self, question, history):
+            return {'operation': 'tasks', 'search': None, 'task_id': None, 'start': None, 'end': None,
+                    'summarize': False, 'send_requested': False, 'reply': None}
+        def summarize(self, question, source, history=None):
+            return 'CI 虚构聊天摘要'
+    class SyntheticChatReader:
+        def execute(self, plan):
+            return {'kind': 'tasks', 'rows': [{'id': 'ci-chat-task', 'content': 'CI 虚构聊天任务'}],
+                    'snapshot_guaranteed': False}
+    service._chat_worker = ChatWorker(service, planner_factory=lambda *_: SyntheticChatPlanner(),
+        reader_factory=lambda *_: SyntheticChatReader(),
+        sender=lambda webhook, secret, content: send_chat_markdown(
+            webhook, secret, content, transport=lambda *_: {'errcode': 0}))
+    return service

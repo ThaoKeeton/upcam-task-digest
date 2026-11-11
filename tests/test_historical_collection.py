@@ -3,13 +3,12 @@
 import copy
 import json
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 import unittest
 
 from digest_pipeline import build_digest
 from report_contract import updated_selection
 from teambition_readonly import CollectionError
-from test_collection import FakeTransport, client, page
+from test_collection import FakeTransport, arguments, client, page
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -35,23 +34,24 @@ class HistoricalCollectionTests(unittest.TestCase):
         self.assertEqual(len(report["digest"]["tasks"]), 1)
         self.assertEqual(report["audit"][0]["event_counts"], {"comment": 2})
         for request in (transport.requests[0], transport.requests[-1]):
-            self.assertNotIn("q", parse_qs(urlsplit(request.full_url).query))
+            self.assertEqual(arguments(request)["tql"], updated_selection(self.day)["q"])
         self.assertEqual(collection["selection"]["basis"], "activity-createTime")
         self.assertFalse(collection["selection"]["historical_event_coverage"])
         self.assertFalse(collection["selection"]["snapshot_guaranteed"])
 
-    def test_activity_milliseconds_after_task_updated_is_not_excluded(self):
+    def test_full_audit_retains_activity_when_task_updated_is_before_window(self):
         task = dict(self.record["task"], updated="2026-01-01T23:59:59.990+08:00")
         event = {"id": "fictional-skew-event", "action": "create", "content": "",
                  "createTime": "2026-01-02T00:00:00.108+08:00",
                  "boundToObjectId": task["id"], "boundToObjectType": "task"}
-        collection = client(self.transport(task, [event])).collect("demo-project", day=self.day)
+        collection = client(self.transport(task, [event])).collect("demo-project", day=self.day, candidate_mode="full_project")
         self.assertEqual(build_digest(collection, self.config, self.day)["audit"][0]["event_ids"],
                          [event["id"]])
 
     def test_inactive_old_project_task_does_not_become_empty_evidence_failure(self):
         task = dict(self.record["task"], updated="2020-01-01T00:00:00Z")
-        collection = client(self.transport(task)).collect("demo-project", day=self.day)
+        collection = client(self.transport(task)).collect("demo-project", day=self.day,
+                                                        candidate_mode="full_project")
         report = build_digest(collection, self.config, self.day)
         self.assertEqual(report["digest"]["tasks"], [])
         self.assertTrue(report["ready_to_send"])
@@ -72,7 +72,7 @@ class HistoricalCollectionTests(unittest.TestCase):
         self.assertEqual(collection["records"], [])
         self.assertEqual(len(transport.requests), 2)
         with self.assertRaises(CollectionError):
-            client(FakeTransport(page(), page([], "cycle"), page([], "cycle"))).collect(
+            client(FakeTransport(page(), page([], "same"), page([], "same")), max_pages=2).collect(
                 "demo-project", day=self.day)
 
     def test_activity_pages_are_exhausted_without_time_or_order_shortcut(self):

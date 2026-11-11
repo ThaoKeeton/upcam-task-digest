@@ -18,10 +18,10 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import quote
 
-from upcam_app import RULESET_REVISION
+from upcam_app import APP_VERSION, PLUGIN_BACKEND_VERSION, RULESET_REVISION
 from upcam_app.config import DEFAULT_SETTINGS, SettingsStore
 from upcam_app.preferences import PREFERENCE_DEFAULTS, preference_values
-from upcam_app.secrets import SecretStoreError
+from upcam_app.secrets import SecretStoreError, teambition_mcp_identity, MCP_AUTHORIZATION_FIELD
 from upcam_app.smoke_data import make_smoke_service
 from upcam_app.worker_api import WorkerApiError, WorkerService
 from upcam_app.workflow import DigestWorkflow
@@ -31,7 +31,7 @@ from report_contract import updated_selection
 REPOSITORY = Path(__file__).resolve().parents[1]
 HANDSHAKE = {
     "protocol_version": 1,
-    "backend_version": "0.4.3",
+    "backend_version": PLUGIN_BACKEND_VERSION,
     "nonce": "0123456789abcdef0123456789abcdef",
 }
 WINDOW = {"start": "2026-11-03 16:50", "end": "2026-11-04 08:50"}
@@ -56,7 +56,11 @@ class PluginWorkerTests(unittest.TestCase):
     def ready(self, plugin):
         result = plugin.dispatch({"op": "plugin_handshake", "payload": HANDSHAKE})
         self.assertEqual(result["mode"], "project-workbench")
-        return plugin.dispatch({"op": "initialize", "payload": {}})
+        self.assertEqual(result["backend_version"], PLUGIN_BACKEND_VERSION)
+        initialized = plugin.dispatch({"op": "initialize", "payload": {}})
+        self.assertEqual(initialized["application_version"], PLUGIN_BACKEND_VERSION)
+        self.assertNotEqual(PLUGIN_BACKEND_VERSION, APP_VERSION)
+        return initialized
 
     def authorized_fixture(self, name="authorized-profile"):
         directory = self.root / name
@@ -170,7 +174,8 @@ class PluginWorkerTests(unittest.TestCase):
     def test_bad_handshake_locks_session_without_profile_or_factory_side_effects(self):
         invalid = [
             {**HANDSHAKE, "protocol_version": 2}, {**HANDSHAKE, "protocol_version": True},
-            {**HANDSHAKE, "backend_version": "0.4.2"}, {**HANDSHAKE, "nonce": "a" * 31},
+            {**HANDSHAKE, "backend_version": "0.4.2"}, {**HANDSHAKE, "backend_version": APP_VERSION},
+            {**HANDSHAKE, "nonce": "a" * 31},
             {**HANDSHAKE, "nonce": "A" * 32}, {**HANDSHAKE, "nonce": "g" * 32},
             {**HANDSHAKE, "extra": True}, {},
         ]
@@ -331,7 +336,7 @@ class PluginWorkerTests(unittest.TestCase):
     def test_existing_non_secret_field_cannot_leak_saved_secret_on_initialize(self):
         directory = self.root / "standalone"
         standalone = make_smoke_service(directory)
-        secret = standalone.secret_store.load()["teambition_app_secret"]
+        secret = standalone.secret_store.load()["teambition_mcp_token"]
         settings = standalone.settings_store.load()
         settings["tenant_id"] = secret
         standalone.settings_store.save(settings)
@@ -404,7 +409,7 @@ class PluginWorkerTests(unittest.TestCase):
         self.assertEqual((directory / "delivery_ledger.sqlite3").read_bytes(), ledger_before)
         self.assertEqual((directory / ".plugin-synthetic.json").read_bytes(), marker_before)
         self.assertFalse((directory / "credentials.dpapi").exists())
-        self.assertNotIn(b"synthetic-app-secret", marker_before)
+        self.assertNotIn(b"synthetic-mcp-token", marker_before)
         self.assertNotIn(b"synthetic-key-cannot-call-openai", marker_before)
 
     def test_synthetic_missing_ledger_is_never_recreated_on_restart(self):
@@ -871,7 +876,7 @@ class PluginWorkerTests(unittest.TestCase):
         self.assertIs(result["authorized"], True)
         self.assertRegex(result["authorization_fingerprint"], r"^[0-9a-f]{64}$")
         self.assertEqual(result["data_directory"], str(directory.resolve()))
-        self.assertEqual(result["application_version"], "0.4.3")
+        self.assertEqual(result["application_version"], PLUGIN_BACKEND_VERSION)
         self.assertEqual(result["ruleset_revision"], RULESET_REVISION)
         self.assertEqual({name: (directory / name).read_bytes() for name in files}, before)
         self.assertEqual(service.secret_store.load(), credentials)
@@ -935,15 +940,16 @@ class PluginWorkerTests(unittest.TestCase):
         original = service.secret_store.load()
         original_proof = self.authorization(plugin)["authorization_fingerprint"]
         replacements = {
-            "teambition_app_id": "synthetic-rotated-app-id",
-            "teambition_app_secret": "synthetic-rotated-app-secret",
+            "teambition_mcp_token": "synthetic-rotated-app-secret",
             "openai_api_key": "synthetic-rotated-openai-key",
             "dingtalk_webhook": "https://oapi.dingtalk.com/robot/send?access_token=synthetic-rotated-token",
             "dingtalk_signing_secret": "synthetic-rotated-signing-secret",
         }
         for key, replacement in replacements.items():
             with self.subTest(credential_field=key):
-                service.secret_store.save(dict(original, **{key: replacement}))
+                changed = dict(original, **{key: replacement})
+                changed[MCP_AUTHORIZATION_FIELD] = teambition_mcp_identity(changed)
+                service.secret_store.save(changed)
                 if key == "openai_api_key":
                     service.model_catalog.refresh(replacement)
                 result = self.authorization(plugin)
@@ -994,7 +1000,7 @@ class PluginWorkerTests(unittest.TestCase):
         self.assertEqual(self.authorization(plugin)["authorization_fingerprint"], proof)
 
     def test_auto_authorization_rejects_every_missing_required_credential(self):
-        for key in ("teambition_app_id", "teambition_app_secret", "openai_api_key", "dingtalk_webhook",
+        for key in ("teambition_mcp_token", "openai_api_key", "dingtalk_webhook",
                     "dingtalk_signing_secret", "delivery_ledger_id"):
             with self.subTest(missing_field=key):
                 plugin, service, directory = self.authorized_fixture("missing-" + key)
@@ -1002,7 +1008,7 @@ class PluginWorkerTests(unittest.TestCase):
                 credentials.pop(key)
                 service.secret_store.save(credentials)
                 before = (directory / "delivery_ledger.sqlite3").read_bytes()
-                with self.assertRaisesRegex(WorkerApiError, "启用自动运行前"):
+                with self.assertRaisesRegex(WorkerApiError, "启用自动运行前|确认授权本机连接"):
                     plugin.dispatch({"op": "plugin_auto_authorization", "payload": {}})
                 self.assertEqual(service.secret_store.load(), credentials)
                 self.assertEqual((directory / "delivery_ledger.sqlite3").read_bytes(), before)
@@ -1044,7 +1050,8 @@ class PluginWorkerTests(unittest.TestCase):
         changed_scope = self.authorization(plugin)["authorization_fingerprint"]
         self.assertNotEqual(changed_scope, original)
         credentials = service.secret_store.load()
-        credentials["teambition_app_secret"] = "synthetic-new-scope-app-secret"
+        credentials["teambition_mcp_token"] = "synthetic-new-scope-app-secret"
+        credentials[MCP_AUTHORIZATION_FIELD] = teambition_mcp_identity(credentials)
         service.secret_store.save(credentials)
         changed_key = self.authorization(plugin)["authorization_fingerprint"]
         self.assertNotIn(changed_key, (original, changed_scope))
@@ -1097,7 +1104,8 @@ class PluginWorkerTests(unittest.TestCase):
                 if kind == "scope":
                     settings["project_id"] = "synthetic-profile-B"
                 elif kind == "credential":
-                    credentials["teambition_app_secret"] = "synthetic-profile-B-secret"
+                    credentials["teambition_mcp_token"] = "synthetic-profile-B-secret"
+                    credentials[MCP_AUTHORIZATION_FIELD] = teambition_mcp_identity(credentials)
                 elif kind == "model":
                     settings.update(openai_model="ci-unknown-model", openai_reasoning_effort="default")
                 elif kind == "schedule":
@@ -1130,7 +1138,7 @@ class PluginWorkerTests(unittest.TestCase):
                 live_settings, live_secrets = service.settings_store, service.secret_store
                 settings_b = dict(settings_a, project_id="synthetic-project-B", morning_run_at="09:30",
                                   morning_start_at="17:10", openai_model="ci-unknown-model", openai_reasoning_effort="default")
-                credentials_b = dict(credentials_a, teambition_app_secret="synthetic-secret-B",
+                credentials_b = dict(credentials_a, teambition_mcp_token="synthetic-secret-B",
                                      dingtalk_webhook="https://oapi.dingtalk.com/robot/send?access_token=synthetic-destination-B")
                 seen = {"clients": [], "models": [], "destinations": [], "workflow": []}
 
@@ -1179,7 +1187,7 @@ class PluginWorkerTests(unittest.TestCase):
                 self.assertEqual(result["events"][0]["state"], "sent")
                 self.assertEqual(seen["workflow"], [(settings_a, credentials_a, directory)])
                 self.assertEqual(seen["clients"], [(settings_a["tenant_id"],
-                    (credentials_a["teambition_app_id"], credentials_a["teambition_app_secret"]))])
+                    credentials_a["teambition_mcp_token"])])
                 self.assertEqual(seen["models"], [("gpt-6-luna", "max")])
                 self.assertEqual(seen["destinations"], [(credentials_a["dingtalk_webhook"], credentials_a["dingtalk_signing_secret"])])
                 row = service.history.list_runs()[0]

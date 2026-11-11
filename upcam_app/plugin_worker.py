@@ -19,10 +19,10 @@ import sys
 import threading
 from urllib.parse import parse_qsl, urlsplit
 
-from . import APP_VERSION, RULESET_REVISION
+from . import PLUGIN_BACKEND_VERSION, RULESET_REVISION
 from .config import DEFAULT_SETTINGS, SettingsError, SettingsStore, atomic_write, validate_settings
 from .preferences import PREFERENCE_DEFAULTS, preference_values
-from .secrets import INTERNAL_SECRET_FIELDS, SECRET_FIELDS, MemorySecretStore, SecretStoreError
+from .secrets import INTERNAL_SECRET_FIELDS, SECRET_FIELDS, MemorySecretStore, SecretStoreError, teambition_mcp_identity, MCP_AUTHORIZATION_FIELD
 from .windows_integration import StartupIntegrationError
 from .worker_api import WorkerApiError, WorkerService, _reject_duplicate_json_keys
 
@@ -182,7 +182,7 @@ class PluginWorkerService:
             if (operation != "plugin_handshake" or set(payload) != {"protocol_version", "backend_version", "nonce"}
                     or type(payload.get("protocol_version")) is not int
                     or payload["protocol_version"] != PROTOCOL_VERSION
-                    or payload.get("backend_version") != APP_VERSION
+                    or payload.get("backend_version") != PLUGIN_BACKEND_VERSION
                     or not isinstance(payload.get("nonce"), str)
                     or not re.fullmatch(r"[0-9a-f]{32}", payload["nonce"])):
                 raise WorkerApiError(_HANDSHAKE_ERROR)
@@ -192,6 +192,10 @@ class PluginWorkerService:
                 service = factory(self.data_directory)
                 if Path(service.data_dir).resolve() != self.data_directory:
                     raise WorkerApiError(_PROFILE_ERROR)
+                # Every construction route, including injected acceptance
+                # factories, preserves the plugin's original comment-only
+                # contract. This never writes into the shared profile.
+                service._set_pipeline_mode("legacy")
                 service.settings_store = _PreferencePreservingSettingsStore(service.settings_store)
 
                 def preserve_startup(enabled, **_kwargs):
@@ -237,6 +241,10 @@ class PluginWorkerService:
                 result = self._run_due_authorized(payload)
             else:
                 result = self._service.dispatch(request)
+                if operation == "initialize":
+                    # Native acceptance and PluginState require the pinned backend
+                    # identity. Standalone initialize keeps APP_VERSION.
+                    result = {**result, "application_version": PLUGIN_BACKEND_VERSION}
             self._shutdown = bool(getattr(self._service, "_shutdown", False))
             secrets.extend(_credential_values(self._service.secret_store.load()))
             _require_secret_free(result, secrets)
@@ -274,7 +282,7 @@ class PluginWorkerService:
         authorization = {
             "schema_version": 1,
             "data_directory": str(self.data_directory),
-            "application_version": APP_VERSION,
+            "application_version": PLUGIN_BACKEND_VERSION,
             "ruleset_revision": RULESET_REVISION,
             "settings": {key: value for key, value in settings.items() if key not in PREFERENCE_DEFAULTS},
             "credential_fingerprint": credential_fingerprint,
@@ -286,7 +294,7 @@ class PluginWorkerService:
             "authorized": True,
             "authorization_fingerprint": fingerprint,
             "data_directory": str(self.data_directory),
-            "application_version": APP_VERSION,
+            "application_version": PLUGIN_BACKEND_VERSION,
             "ruleset_revision": RULESET_REVISION,
         }
 
@@ -349,7 +357,7 @@ def _make_production_service(directory):
     store = SettingsStore(directory / "settings.json")
     if not store.path.exists():
         store.save(deepcopy(DEFAULT_SETTINGS))
-    return WorkerService(directory, settings_store=store)
+    return WorkerService(directory, settings_store=store, pipeline_mode="legacy")
 
 
 class _SyntheticSecretStore(MemorySecretStore):
@@ -364,7 +372,8 @@ class _SyntheticSecretStore(MemorySecretStore):
         self.marker = marker
         fixture = json.loads(marker.read_text(encoding="utf-8"))
         self.values = {
-            "teambition_app_id": "synthetic-app-id", "teambition_app_secret": "synthetic-app-secret",
+            "teambition_mcp_token": "synthetic-mcp-token",
+            MCP_AUTHORIZATION_FIELD: teambition_mcp_identity({"teambition_mcp_token": "synthetic-mcp-token"}),
             "openai_api_key": "synthetic-key-cannot-call-openai",
             "dingtalk_webhook": "https://oapi.dingtalk.com/robot/send?access_token=synthetic-only",
             "dingtalk_signing_secret": "synthetic-only",
@@ -405,10 +414,12 @@ def _make_synthetic_service(directory):
 
     def workflow(settings, credentials, data_dir, **kwargs):
         return DigestWorkflow(settings, credentials, data_dir, client_factory=SyntheticClient,
-                              summarizer=SyntheticSummarizer(), ding_sender=SyntheticDingTalk(settings), **kwargs)
+                              summarizer=SyntheticSummarizer(), ding_sender=SyntheticDingTalk(settings),
+                              pipeline_mode="legacy", **kwargs)
 
     return WorkerService(directory, settings_store=store, secret_store=_SyntheticSecretStore(marker),
-                         model_catalog=catalog, client_factory=SyntheticClient, workflow_factory=workflow)
+                         model_catalog=catalog, client_factory=SyntheticClient, workflow_factory=workflow,
+                         pipeline_mode="legacy")
 
 
 def _response(output, request_id, *, result=None, error=None):

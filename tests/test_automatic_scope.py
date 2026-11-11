@@ -51,6 +51,8 @@ class AutomaticScopeTests(unittest.TestCase):
                        "end": self.end.strftime("%Y-%m-%d %H:%M")}
 
     def save(self, settings=None, **payload):
+        # Synthetic UI consent is explicit for every new fixture Token.
+        payload.setdefault("authorize_teambition_mcp", bool(payload.get("secret_values", {}).get("teambition_mcp_token")))
         return self.service.dispatch({"op": "save", "payload": {
             "settings": settings if settings is not None else self.service.settings_store.load(),
             **payload,
@@ -87,11 +89,11 @@ class AutomaticScopeTests(unittest.TestCase):
         self.service.secret_store.save({})
 
         result = self.save(proposed, verification_window=self.window, secret_values={
-            "teambition_app_id": "new-synthetic-app", "teambition_app_secret": "new-synthetic-secret"})
+            "teambition_mcp_token": "new-synthetic-secret"})
 
         self.assert_verified(result)
         self.assertEqual(len(self.readonly.calls), 1)
-        self.assertEqual(self.readonly.calls[0]["credentials"], ("new-synthetic-app", "new-synthetic-secret"))
+        self.assertEqual(self.readonly.calls[0]["credentials"], "new-synthetic-secret")
         self.assertNotIn("new-synthetic-secret", str(result))
 
     def test_automatic_save_returns_safe_discovery_ids_without_comment_text_or_credentials(self):
@@ -101,7 +103,7 @@ class AutomaticScopeTests(unittest.TestCase):
         self.assertEqual(result["scope_probe"]["owner_ids"], ["demo-person", "demo-person-2"])
         self.assertEqual(result["scope_probe"]["status_ids"], ["demo-open"])
         self.assertEqual(result["scope_probe"]["status_name_suggestions"], {})
-        for private in ("CI 虚构：验证原生界面布局", "synthetic-app-secret", "credentials", "credential_identity"):
+        for private in ("CI 虚构：验证原生界面布局", "synthetic-mcp-token", "credentials", "credential_identity"):
             self.assertNotIn(private, str(result))
 
     def test_consumed_pending_probe_also_returns_discovery_without_another_query(self):
@@ -159,7 +161,7 @@ class AutomaticScopeTests(unittest.TestCase):
                 self.assertIs(query["include_archived"], settings["include_archived"])
 
     def test_changed_teambition_credential_revalidates_with_proposed_identity(self):
-        for key in ("teambition_app_id", "teambition_app_secret"):
+        for key in ("teambition_mcp_token",):
             with self.subTest(key=key):
                 self.legacy_verified()
                 self.readonly.calls.clear()
@@ -170,11 +172,11 @@ class AutomaticScopeTests(unittest.TestCase):
                 self.assertEqual(len(self.readonly.calls), 1)
                 expected = self.service.secret_store.load()
                 self.assertEqual(self.readonly.calls[0]["credentials"],
-                                 (expected["teambition_app_id"], expected["teambition_app_secret"]))
+                                 expected["teambition_mcp_token"])
 
     def test_reentering_same_teambition_credentials_preserves_verified_scope(self):
         self.legacy_verified()
-        self.assert_verified(self.save(secret_values={"teambition_app_secret": "synthetic-app-secret"}))
+        self.assert_verified(self.save(secret_values={"teambition_mcp_token": "synthetic-mcp-token"}))
         self.assertEqual(self.readonly.calls, [])
 
     def test_unrelated_secret_change_preserves_scope_verification(self):
@@ -187,12 +189,12 @@ class AutomaticScopeTests(unittest.TestCase):
         self.readonly.failure = CollectionError("synthetic authentication failure")
 
         result = self.save(verification_window=self.window,
-                           secret_values={"teambition_app_secret": "replacement-secret"})
+                           secret_values={"teambition_mcp_token": "replacement-secret"})
 
         self.assert_blocked(result)
         self.assertEqual(len(self.readonly.calls), 2)
-        self.assertEqual(self.readonly.calls[-1]["credentials"][1], "replacement-secret")
-        self.assertEqual(self.service.secret_store.load()["teambition_app_secret"], "replacement-secret")
+        self.assertEqual(self.readonly.calls[-1]["credentials"], "replacement-secret")
+        self.assertEqual(self.service.secret_store.load()["teambition_mcp_token"], "replacement-secret")
 
     def test_pending_probe_for_different_scope_cannot_verify_changed_scope(self):
         self.service.dispatch({"op": "probe_project", "payload": self.window})
@@ -274,13 +276,13 @@ class AutomaticScopeTests(unittest.TestCase):
         with patch.object(self.service, "workflow_factory", side_effect=AssertionError("No workflow during save")), \
                 patch.object(self.service.model_catalog, "refresh", side_effect=AssertionError("No model calls during save")):
             result = self.save(proposed, verification_window=self.window,
-                               secret_values={"teambition_app_secret": "new-local-secret"})
+                               secret_values={"teambition_mcp_token": "new-local-secret"})
             due = self.service.dispatch({"op": "run_due"})
 
         self.assert_blocked(result)
         self.assertEqual(due["started"], 0)
         self.assertEqual(self.service.settings_store.load()["tenant_id"], "changed-synthetic-tenant")
-        self.assertEqual(self.service.secret_store.load()["teambition_app_secret"], "new-local-secret")
+        self.assertEqual(self.service.secret_store.load()["teambition_mcp_token"], "new-local-secret")
         self.assertEqual(self.service.history.list_runs(), [])
         self.assertNotIn("sensitive synthetic server body", str(result))
         self.assertNotIn("new-local-secret", str(result))
@@ -303,10 +305,10 @@ class AutomaticScopeTests(unittest.TestCase):
     def test_removing_teambition_credential_invalidates_scope_and_does_not_query(self):
         self.legacy_verified(automatic=True)
 
-        result = self.save(clear_secrets=["teambition_app_secret"], verification_window=self.window)
+        result = self.save(clear_secrets=["teambition_mcp_token"], verification_window=self.window)
 
         self.assert_blocked(result)
-        self.assertNotIn("teambition_app_secret", self.service.secret_store.load())
+        self.assertNotIn("teambition_mcp_token", self.service.secret_store.load())
         self.assertEqual(self.readonly.calls, [])
 
     def test_clear_credentials_invalidates_scope_and_retains_internal_delivery_identity(self):

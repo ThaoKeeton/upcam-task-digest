@@ -1,19 +1,12 @@
-"""Small, fail-closed Teambition enterprise v3 GET client (stdlib only)."""
+"""Bounded, fail-closed Teambition MCP-only collection coordinator."""
 
-import base64
-import hashlib
-import hmac
 import json
-import os
 import re
 import time
 import uuid
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import HTTPRedirectHandler, Request, build_opener
-from report_contract import task_updated_timestamp, updated_selection
+from report_contract import task_is_candidate, task_updated_timestamp, updated_selection
+from collection_progress import refresh_collection_progress
 
 
 class CollectionError(RuntimeError):
@@ -47,40 +40,44 @@ def validate_binding(raw, task_id):
         raise CollectionError('Missing or mismatched activity task binding')
 
 
-def app_jwt(app_id, secret, now=None, ttl=300):
-    if not app_id or not secret or not 1 <= ttl <= 300:
-        raise CollectionError("Missing credentials or invalid token lifetime")
-    now = int(time.time() if now is None else now)
-    def encode(value):
-        return base64.urlsafe_b64encode(value).rstrip(b"=")
-    header = encode(b'{"alg":"HS256","typ":"JWT"}')
-    payload = encode(json.dumps({"_appId": app_id, "iat": now, "exp": now + ttl},
-                                separators=(",", ":")).encode())
-    signing = header + b"." + payload
-    return (signing + b"." + encode(hmac.new(secret.encode(), signing, hashlib.sha256).digest())).decode()
+def records_equal(left, right):
+    """Compare JSON by type as well as value (True must not equal 1)."""
+    try:
+        def encode(value):
+            return json.dumps(value, sort_keys=True, ensure_ascii=False,
+                              separators=(',', ':'), allow_nan=False)
+        return encode(left) == encode(right)
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        raise CollectionError('Invalid collection JSON') from None
 
-
-class NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
 
 
 class Client:
-    ORIGIN = "https://open.teambition.com"
-    PATH = re.compile(r"/api/v3/(?:project/[A-Za-z0-9_-]+/task/query|task/query|task/[A-Za-z0-9_-]+/activity/list)")
-
     def __init__(self, tenant_id, *, transport=None, sleep=time.sleep, clock=time.monotonic,
                  credentials=None, interval=0.25, attempts=3, max_pages=50,
                  max_requests=1000, max_tasks=300, max_records=50000, max_seconds=310,
                  max_response_bytes=128 * 1024 * 1024, batch_mode=False,
                  max_project_tasks=10000, checkpoint=None, shared_budget=None,
-                 batch_policy=None):
-        self.tenant_id = identifier(tenant_id)
+                 batch_policy=None, concurrent_tasks=1, request_gate=None, cancel_event=None,
+                 mcp_adapter_factory=None, mcp_envelope_validator=None, archive_contract_validator=None,
+                 project_discovery=False):
+        if type(project_discovery) is not bool or (project_discovery and tenant_id is not None):
+            raise CollectionError('Invalid project discovery scope')
+        self.tenant_id = None if project_discovery else identifier(tenant_id)
+        self.project_discovery = project_discovery
+        if type(concurrent_tasks) is not int or not 1 <= concurrent_tasks <= 4:
+            raise CollectionError("Invalid concurrent task limit")
+        if cancel_event is not None and not callable(getattr(cancel_event, 'is_set', None)):
+            raise CollectionError("Invalid collection cancellation signal")
+        self.concurrent_tasks, self.request_gate, self.cancel_event = concurrent_tasks, request_gate, cancel_event
         self.injected_transport = transport is not None
-        self.transport = transport or build_opener(NoRedirect()).open
+        self.transport = transport
         self.sleep, self.clock = sleep, clock
-        self.credentials = credentials or (lambda: (os.environ.get("TEAMBITION_APP_ID"),
-                                                   os.environ.get("TEAMBITION_APP_SECRET")))
+        self.credentials = credentials or (lambda: None)
+        self.mcp_adapter_factory = mcp_adapter_factory
+        self.mcp_envelope_validator = mcp_envelope_validator
+        self.archive_contract_validator = archive_contract_validator
+        self._adapter = None
         if interval < 0.25 or not 1 <= attempts <= 5 or not 1 <= max_pages <= 100:
             raise CollectionError("Invalid request limits")
         if (type(max_requests) is not int or not 1 <= max_requests <= 2000
@@ -103,6 +100,8 @@ class Client:
         self.last_request = None
 
     def _remaining(self):
+        if self.request_gate is not None:
+            self.request_gate.check_cancelled()
         if self.shared_budget is not None:
             self.shared_budget.check_time()
         if self.started is None:
@@ -117,104 +116,241 @@ class Client:
             self.shared_budget.before_wait(delay)
         if delay >= self._remaining():
             raise BatchBudgetExceeded("Wait would exceed collection time budget")
-        self.sleep(delay)
+        if self.request_gate is not None:
+            self.request_gate.wait(delay, check=self._remaining)
+        else:
+            self.sleep(delay)
 
-    def get(self, path, params):
-        if not self.PATH.fullmatch(path):
-            raise CollectionError("Endpoint outside read-only allowlist")
-        for attempt in range(self.attempts):
-            if self.request_count >= self.max_requests:
-                raise BatchBudgetExceeded("Collection request budget exhausted")
-            self._remaining()
-            if self.last_request is not None:
-                self._wait(max(0, self.interval - (self.clock() - self.last_request)))
-            reservation = None
-            request_params, body_limit = params, 8 * 1024 * 1024
+    def _before_mcp(self, metadata):
+        """Durably reserve request and response budgets before each HTTP attempt."""
+        if self.request_count >= self.max_requests:
+            raise BatchBudgetExceeded("Collection request budget exhausted")
+        self._remaining()
+        page_size = metadata.get('pageSize', 1) if metadata.get('method') == 'tools/call' else 1
+        if type(page_size) is not int or not 1 <= page_size <= 100:
+            raise CollectionError('Invalid page size')
+        response_limit = metadata.get('response_limit')
+        if type(response_limit) is not int or response_limit < 1:
+            raise CollectionError('Invalid response byte reservation')
+        remaining_bytes = self.max_response_bytes - self.response_bytes
+        if remaining_bytes <= 1:
+            raise BatchBudgetExceeded('Collection response byte budget exhausted')
+        effective_limit = min(response_limit, remaining_bytes - 1)
+        page_tool = metadata.get('method') == 'tools/call' and metadata.get('tool_name') in {
+            'teambition.project.query', 'teambition.project.task-query', 'teambition.task.activity',
+            'teambition.member.query'}
+        original_page_size = page_size
+        if metadata.get('method') == 'tools/call':
+            remaining_records = self.max_records - self.record_count
+            if remaining_records <= 0:
+                raise BatchBudgetExceeded('Collection record budget exhausted')
+            if page_tool:
+                page_size = min(page_size, remaining_records)
+        reservation = None
+        charged = False
+        try:
             if self.shared_budget is not None:
-                reservation = self.shared_budget.plan_request(params, detail=path == "/api/v3/task/query")
-                request_params, body_limit = reservation["params"], reservation["body_limit"]
-            request = Request(self.ORIGIN + path + "?" + urlencode(request_params), method="GET", headers={
-                "Authorization": "Bearer " + app_jwt(*self.credentials()),
-                "X-Tenant-Id": self.tenant_id, "X-Tenant-Type": "organization",
-                "Accept": "application/json",
-            })
-            self.last_request = self.clock()
-            self.request_count += 1
-            delay = 2 ** attempt
-            try:
-                timeout = min(30, self._remaining())
-                if self.shared_budget is not None:
-                    self.shared_budget.before_request(reservation)
-                    # Durable accounting can take time. Check the deadline and
-                    # start the rate interval at the actual transport boundary.
-                    timeout = min(30, self._remaining())
-                    self.last_request = self.clock()
-                with self.transport(request, timeout=timeout) as response:
-                    if response.status != 200:
-                        raise CollectionError("Unexpected HTTP status")
-                    body = response.read(body_limit + 1)
-                    if self.shared_budget is not None:
-                        if len(body) > body_limit:
-                            raise CollectionError("Response size limit exceeded")
-                        data = json.loads(body)
-                        rows = data.get("result") if isinstance(data, dict) else None
-                        count = len(rows) if isinstance(rows, list) else int(isinstance(rows, dict))
-                        # Settle both charges atomically before __exit__ can fail.
-                        # An uncertain read/parse retains the write-ahead reservation.
-                        self.shared_budget.finish_response(reservation, len(body), count)
-                if self.shared_budget is None:
-                    self._remaining()
-                if len(body) > body_limit:
-                    raise CollectionError("Response size limit exceeded")
-                if self.shared_budget is not None:
-                    self._remaining()
-                if self.response_bytes + len(body) > self.max_response_bytes:
-                    raise BatchBudgetExceeded("Collection response byte budget exhausted")
-                self.response_bytes += len(body)
-                if self.shared_budget is None:
-                    data = json.loads(body)
-                if not isinstance(data, dict) or type(data.get("code")) is not int or data["code"] != 200:
-                    raise CollectionError("API rejected request or malformed envelope")
-                return data
-            except HTTPError as exc:
-                status = exc.code
-                retry_after = exc.headers.get("Retry-After") if exc.headers else None
-                exc.close()
-                if status not in (429, 500, 502, 503, 504):
-                    raise CollectionError("HTTP request rejected") from None
-                if retry_after:
+                reservation = self.shared_budget.plan_request({'pageSize': page_size}, detail=not page_tool,
+                                                                preferred_bytes=effective_limit + 1)
+                charged = '_concurrent_reservation' in reservation
+                self.shared_budget.before_request(reservation)
+                charged = True
+                effective_limit = min(effective_limit, reservation['body_limit'])
+            else:
+                reservation = {}
+            if effective_limit < 1:
+                raise CollectionError('Collection session response byte budget exhausted')
+            if effective_limit < response_limit:
+                reservation['_mcp_response_limit'] = effective_limit
+            effective_page_size = reservation.get('params', {}).get('pageSize', page_size)
+            if page_tool and effective_page_size < original_page_size:
+                reservation['_mcp_page_size'] = effective_page_size
+            # A concurrent budget proxy performs an owner-thread RPC for counters.
+            # All such bookkeeping must finish before the final send admission.
+            refresh_collection_progress(requests=self.shared_budget.counters['requests']
+                                        if self.shared_budget is not None else self.request_count + 1)
+            remaining = self._remaining()
+            if self.shared_budget is not None:
+                remaining_fn = getattr(self.shared_budget, 'remaining_seconds', None)
+                if remaining_fn is not None:
+                    remaining = min(remaining, remaining_fn())
+            if remaining <= 0:
+                raise BatchBudgetExceeded('Collection time budget exhausted')
+            if remaining < 30:
+                reservation['_mcp_timeout'] = remaining
+            return reservation
+        except BaseException:
+            if reservation is not None:
+                if charged:
                     try:
-                        delay = max(delay, float(retry_after))
-                    except ValueError:
-                        try:
-                            delay = max(delay, (parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)).total_seconds())
-                        except (ValueError, TypeError):
-                            raise CollectionError("Invalid Retry-After") from None
-                    if not 0 <= delay <= 60:
-                        raise CollectionError("Retry-After exceeds bounded retry budget") from None
-            except (URLError, TimeoutError, OSError):
-                pass  # Retrying GET is safe; sending has a separate no-retry boundary.
-            except (ValueError, UnicodeError):
-                raise CollectionError("Malformed JSON response") from None
-            if attempt + 1 < self.attempts:
+                        self.shared_budget.cancel_unsent(reservation)
+                    except Exception:
+                        pass  # Retain conservative charges if rollback cannot be persisted.
+                end = getattr(self.shared_budget, 'end_request', None)
+                if end is not None:
+                    end(reservation)
+            raise
+
+    def _dispatch_mcp(self, metadata):
+        """Apply rate/time limits immediately before the actual HTTP dispatch."""
+        if self.request_count >= self.max_requests:
+            raise BatchBudgetExceeded('Collection request budget exhausted')
+        timeout = metadata.get('timeout', 30)
+        if type(timeout) not in (int, float) or not 0 < timeout <= 30:
+            raise CollectionError('Invalid MCP request timeout')
+        if self.request_gate is None and self.last_request is not None:
+            self._wait(max(0, self.interval - (self.clock() - self.last_request)))
+        remaining = self._remaining()
+        if self.shared_budget is not None:
+            remaining_fn = getattr(self.shared_budget, 'remaining_seconds', None)
+            if remaining_fn is not None:
+                remaining = min(remaining, remaining_fn())
+        started = self.clock()
+        if self.request_gate is not None:
+            self.request_gate.acquire(check=self._remaining)
+        remaining -= max(0, self.clock() - started)
+        if remaining <= 0:
+            raise BatchBudgetExceeded('Collection time budget exhausted')
+        self.last_request = self.clock()
+        self.request_count += 1
+        return min(timeout, remaining)
+
+    def _after_mcp(self, reservation, outcome):
+        try:
+            used = outcome.get('response_bytes')
+            if type(used) is not int or used < 0:
+                raise CollectionError('Invalid MCP request accounting')
+            self.response_bytes += used
+            if self.response_bytes > self.max_response_bytes:
+                raise BatchBudgetExceeded('Collection response byte budget exhausted')
+            if outcome.get('dispatched') is False:
+                if used != 0:
+                    raise CollectionError('Invalid MCP request accounting')
+                if self.shared_budget is not None:
+                    self.shared_budget.cancel_unsent(reservation)
+                return
+            if outcome.get('completed') is True and outcome.get('uncertain') is False:
+                count = outcome.get('result_count')
+                if type(count) is not int or count < 0:
+                    raise CollectionError('Invalid MCP request accounting')
+                if self.shared_budget is not None:
+                    self.shared_budget.finish_response(reservation, used, count)
+                self.record_count += count
+                if self.record_count > self.max_records:
+                    raise BatchBudgetExceeded('Collection record budget exhausted')
+                self._remaining()
+            elif outcome.get('dispatched') is True:
+                self._remaining()
+        finally:
+            end = getattr(self.shared_budget, 'end_request', None)
+            if reservation is not None and end is not None:
+                end(reservation)
+
+    def _mcp(self):
+        if self._adapter is None:
+            if self.mcp_adapter_factory is not None:
+                self._adapter = self.mcp_adapter_factory(self)
+            else:
+                from teambition_mcp import MCPTransport
+                from mcp_collection_adapter import MCPCollectionAdapter
+                from mcp_service_contract import VERIFIED_VALIDATORS, task_archive_is_boolean
+                transport = MCPTransport(token_provider=self.credentials, transport=self.transport,
+                                         before_request=self._before_mcp, before_dispatch=self._dispatch_mcp,
+                                         after_request=self._after_mcp,
+                                         clock=self.clock)
+                self._adapter = MCPCollectionAdapter(
+                    transport, validate_envelope=(self.mcp_envelope_validator
+                        if self.mcp_envelope_validator is not None else VERIFIED_VALIDATORS),
+                    validate_task_archive=(self.archive_contract_validator
+                        if self.archive_contract_validator is not None else task_archive_is_boolean),
+                    organization_id=self.tenant_id, max_pages=self.max_pages,
+                    max_records=self.max_records)
+        return self._adapter
+
+    def list_projects(self):
+        """List the current user's visible projects after complete MCP pagination."""
+        if not self.project_discovery:
+            raise CollectionError('Project discovery requires a separate unscoped client')
+        rows = self._mcp().projects()
+        result = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise CollectionError('Invalid project discovery result')
+            project, organization, name = identifier(row.get('id')), identifier(row.get('organizationId')), row.get('name')
+            if not isinstance(name, str) or not name.strip() or name != name.strip():
+                raise CollectionError('Invalid project discovery result')
+            choice = {'id': project, 'name': name, 'organizationId': organization}
+            prefix = row.get('uniqueIdPrefix')
+            if prefix is not None and prefix != '':
+                from task_display import TaskDisplayError, validate_task_prefix
+                try:
+                    choice['uniqueIdPrefix'] = validate_task_prefix(prefix, allow_empty=False)
+                except TaskDisplayError:
+                    raise CollectionError('Invalid project discovery result') from None
+            result.append(choice)
+        return result
+
+    def get(self, operation, params):
+        """Dispatch fixed collection operations exclusively to approved MCP tools."""
+        if not isinstance(params, dict):
+            raise CollectionError('Invalid collection operation')
+        if operation == 'project.tasks':
+            if set(params) - {'projectId', 'pageSize', 'pageToken', 'includeArchived', 'q'}:
+                raise CollectionError('Invalid collection operation')
+            project = identifier(params.get('projectId'))
+            query = params.get('q')
+            match = None if query is None else re.fullmatch(r"updated >= '([^']+)'", query)
+            if query is not None and match is None:
+                raise CollectionError('Invalid candidate query')
+            action = lambda: self._mcp().task_page(
+                project, updated_since=match.group(1) if match else None,
+                include_archived=params.get('includeArchived', False),
+                page_size=params.get('pageSize', 100), page_token=params.get('pageToken'))
+        elif operation == 'task.activities':
+            if set(params) - {'taskId', 'projectId', 'pageSize', 'pageToken'}:
+                raise CollectionError('Invalid collection operation')
+            task = identifier(params.get('taskId'))
+            project = params.get('projectId')
+            if project is not None:
+                project = identifier(project)
+            action = lambda: self._mcp().activity_page(task, project_id=project,
+                                                        page_size=params.get('pageSize', 100),
+                                                        page_token=params.get('pageToken'))
+        elif operation == 'task.details':
+            if set(params) - {'taskId', 'projectId', 'includeArchived'}:
+                raise CollectionError('Invalid collection operation')
+            task, project = identifier(params.get('taskId')), identifier(params.get('projectId'))
+            action = lambda: self._mcp().detail_envelope(task, project_id=project,
+                                     include_archived=params.get('includeArchived', False))
+        else:
+            raise CollectionError('Operation outside read-only allowlist')
+        from teambition_mcp import MCPHTTPError, MCPResponseLimitError
+        for attempt in range(self.attempts):
+            try:
+                return action()
+            except MCPResponseLimitError:
+                raise BatchBudgetExceeded('Collection response byte budget exhausted') from None
+            except MCPHTTPError as exc:
+                if not exc.retryable or attempt + 1 >= self.attempts:
+                    raise CollectionError('Teambition MCP request failed') from None
+                delay = max(2 ** attempt, exc.retry_after or 0)
+                if self.request_gate is not None and exc.status == 429:
+                    self.request_gate.defer(delay)
                 self._wait(delay)
-        raise CollectionError("GET retry budget exhausted")
+        raise CollectionError('Teambition MCP request failed')
 
     def pages(self, path, params, *, max_items=None):
         params = dict(params)
-        seen_tokens, seen_records = set(), {}
+        seen_records = {}
         for _ in range(self.max_pages):
             data = self.get(path, params)
             rows = data.get("result")
             if not isinstance(rows, list) or "nextPageToken" not in data:
                 raise CollectionError("Invalid page envelope")
             for row in rows:
-                self.record_count += 1
-                if self.record_count > self.max_records:
-                    raise BatchBudgetExceeded("Collection record budget exhausted")
-                key = record_id(row, task_fallback=not path.endswith("/activity/list"))
+                key = record_id(row, task_fallback=path != "task.activities")
                 if key in seen_records:
-                    if row != seen_records[key]:
+                    if not records_equal(row, seen_records[key]):
                         raise CollectionError("Conflicting duplicate; collection is not a snapshot")
                     continue
                 seen_records[key] = row
@@ -224,18 +360,19 @@ class Client:
             token = data["nextPageToken"]
             if token is None or token == "":
                 return
-            if not isinstance(token, str) or len(token) > 8192 or token in seen_tokens:
-                raise CollectionError("Invalid or repeated pagination token")
-            seen_tokens.add(token)
+            if not isinstance(token, str) or len(token) > 8192:
+                raise CollectionError("Invalid pagination token")
             params["pageToken"] = token
         raise CollectionError("Pagination limit exceeded; incomplete collection")
 
     def collect(self, project_id, *, include_archived=False, day=None, page_size=100, window=None,
-                batch_mode=None):
+                batch_mode=None, candidate_mode="updated_since_start"):
+        if self.project_discovery:
+            raise CollectionError('Project discovery client cannot collect tasks')
         # Caller freezes the Shanghai report date and optional half-open window
-        # before any request. Task updated timestamps never select candidates.
+        # before any request. Candidate time never changes the activity window.
         try:
-            selection = updated_selection(day, *(window or (None, None)))
+            selection = updated_selection(day, *(window or (None, None)), candidate_mode=candidate_mode)
         except (ValueError, TypeError):
             raise CollectionError('Canonical report day and timezone-aware window must be fixed before collection') from None
         if type(page_size) is not int or not 1 <= page_size <= 100:
@@ -259,11 +396,14 @@ class Client:
         project_id = identifier(project_id)
         if type(include_archived) is not bool:
             raise CollectionError("include_archived must be boolean")
-        params = {'pageSize': page_size, 'includeArchived': str(include_archived).lower()}
-        full_project = selection['mode'] == 'v3-project-activities-half-open'
-        tasks = list(self.pages(f"/api/v3/project/{project_id}/task/query", params, max_items=self.max_tasks))
+        params = {'projectId': project_id, 'pageSize': page_size, 'includeArchived': include_archived}
+        if selection.get('q') is not None:
+            params['q'] = selection['q']
+        activity_scope = selection['mode'] == 'v3-project-activities-half-open'
+        tasks = list(self.pages("project.tasks", params, max_items=self.max_tasks))
+        project_tasks = tasks
         selected_updates = {}
-        if full_project:
+        if activity_scope:
             try:
                 for task in tasks:
                     if task.get('projectId') != project_id or type(task.get('isArchived')) is not bool:
@@ -271,17 +411,21 @@ class Client:
                     if task['isArchived'] and not include_archived:
                         raise CollectionError('Candidate identity or archive scope mismatch')
                     selected_updates[record_id(task)] = task_updated_timestamp(task.get('updated'))
+                    if selection.get('q') is not None and not task_is_candidate(task.get('updated'), selection):
+                        raise CollectionError('Server returned task outside requested updated candidate range')
+                # Validate the complete listing before skipping any histories.
+                tasks = [task for task in tasks if task_is_candidate(task.get('updated'), selection)]
             except ValueError:
                 raise CollectionError('Invalid task updated timestamp') from None
         output = []
         for task in tasks:
             task_id = record_id(task)
-            detail = self.get("/api/v3/task/query", {"taskId": task_id}).get("result")
+            detail = self.get("task.details", {"taskId": task_id, "projectId": project_id, "includeArchived": include_archived}).get("result")
             if isinstance(detail, list) and len(detail) == 1:
                 detail = detail[0]
             if record_id(detail) != task_id or detail.get("projectId") != project_id:
                 raise CollectionError("Detail identity or project mismatch")
-            if full_project:
+            if activity_scope:
                 try:
                     current_update = task_updated_timestamp(detail.get('updated'))
                 except ValueError:
@@ -295,19 +439,22 @@ class Client:
                 continue
             # Exhaust history without assuming updated/createTime ordering or
             # stopping when a page happens to contain only out-of-window events.
-            activities = list(self.pages(f"/api/v3/task/{task_id}/activity/list", {"pageSize": page_size}))
+            activities = list(self.pages("task.activities", {"taskId": task_id, "projectId": project_id, "pageSize": page_size}))
             for activity in activities:
                 validate_binding(activity, task_id)
             output.append({"task": detail, "activities": activities})
-        if full_project:
-            closing = list(self.pages(f"/api/v3/project/{project_id}/task/query", params,
+        if activity_scope:
+            closing = list(self.pages("project.tasks", params,
                                       max_items=self.max_tasks))
-            if {record_id(row): row for row in tasks} != {record_id(row): row for row in closing}:
+            if not records_equal({record_id(row): row for row in project_tasks},
+                                 {record_id(row): row for row in closing}):
                 # The API has no snapshot token. This detects observable drift,
                 # but cannot attest deleted/inaccessible tasks or an atomic read.
                 raise CollectionError('Task changed during collection; retry a fresh bounded run')
+        from mcp_collection_adapter import metadata_from_tasks
+        metadata = metadata_from_tasks(project_tasks + [record['task'] for record in output])
         return {"tenant_id": self.tenant_id, "project_id": project_id, "include_archived": include_archived,
                 "selection": selection,
                 "batch_id": str(uuid.uuid4()),
                 "collected_at": datetime.now(timezone.utc).isoformat(),
-                "pagination_complete": True, "records": output}
+                "pagination_complete": True, "records": output, "metadata": metadata}

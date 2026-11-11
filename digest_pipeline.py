@@ -8,7 +8,8 @@ from pathlib import Path
 import sys
 
 from render_digest import render_digest, text
-from report_contract import SHANGHAI, canonical_window, report_window, strict_day, updated_selection, task_updated_timestamp
+from report_contract import (SHANGHAI, canonical_window, report_window, strict_day,
+                             validate_selection, task_updated_timestamp)
 from teambition_readonly import Client, CollectionError, identifier, record_id
 from activity_adapter import (comment_input, parse_activity, validate_binding, status_transition,
                               executor_change, standard_commit_candidate, stage_movement,
@@ -62,6 +63,24 @@ def safe_label(value):
         return "待复核"
 
 
+def identity_label(task, field_name, names, label, *, allow_unresolved):
+    """Display a missing source label honestly without inventing a mapping."""
+    object_id = task.get(field_name)
+    if isinstance(object_id, str) and object_id in names:
+        return safe_label(names[object_id])
+    if not allow_unresolved:
+        return "待复核"
+    if field_name == 'executorId' and field_name in task and object_id is None:
+        return '未分配'
+    try:
+        value = identifier(object_id)
+        if len(value) <= 128:
+            return f'未解析{label}（ID：{value}）'
+    except CollectionError:
+        pass
+    return f'未解析{label}'
+
+
 def validate_view(config):
     view = config.get("view", {})
     if not isinstance(view, dict) or set(view) - {"verified", "evidence", "task_equals"}:
@@ -106,8 +125,10 @@ def build_digest(collection, config, day, window=None):
         issues.append("API 字段及事件规则尚未核验")
     activity_selection = isinstance(selection, dict) and selection.get('mode') == ACTIVITY_SELECTION_MODE
     if activity_selection:
-        if selection != updated_selection(report_day, start, end):
-            raise CollectionError('Selection contract differs from report window')
+        try:
+            validate_selection(selection, report_day, start, end)
+        except (TypeError, ValueError):
+            raise CollectionError('Selection contract differs from report window') from None
     elif isinstance(selection, dict) and selection.get('mode') == 'v3-project-updated-half-open':
         raise CollectionError('Selection contract differs from report window')
     else:
@@ -354,8 +375,11 @@ def build_digest(collection, config, day, window=None):
             summary_inputs.append({'task_id': task_id, 'comments': comments,
                                    'semantic_summary': None, 'needs_review': True})
         title = safe_label(task.get("content"))
-        owner = safe_label(config.get("owner_names", {}).get(task.get("executorId")))
-        status = safe_label(config.get("status_names", {}).get(task.get("tfsId")))
+        allow_unresolved = config.get('allow_unresolved_display') is True
+        owner = identity_label(task, 'executorId', config.get('owner_names', {}), '成员',
+                               allow_unresolved=allow_unresolved)
+        status = identity_label(task, 'tfsId', config.get('status_names', {}), '状态',
+                                allow_unresolved=allow_unresolved)
         if "待复核" in (title, owner, status):
             review = True
             descriptions.append("标题、负责人或当前状态待复核")

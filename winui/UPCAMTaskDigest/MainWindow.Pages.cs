@@ -12,12 +12,12 @@ public sealed partial class MainWindow
     private FrameworkElement BuildHome()
     {
         var hero = Column(
-            Paragraph(UiStrings.T("让日报按时完成"), size: 28),
-            Paragraph(UiStrings.T("先在本机收集和校验 Teambition 数据，只将摘要所需内容交给 OpenAI，再发送到配置的钉钉群。"), true),
+            Paragraph(UiStrings.T("Teambition 工作助手"), size: 28),
+            Paragraph(UiStrings.T("先在本机检查采集范围，再将选定范围内的任务上下文和原始动态发送给 OpenAI 整理，最后发送到配置的钉钉群；不会下载附件正文。"), true),
             Paragraph(UiStrings.T(_savedAuto ? "● 自动运行已开启" : "○ 自动运行尚未开启"), size: 18),
-            Toolbar(NavigationButton("运行与诊断", "run"), NavigationButton("配置项目范围", "project")));
+            Toolbar(NavigationButton("运行与诊断", "run"), NavigationButton("选择日报项目", "project")));
         var summary = Pair(
-            Card(Column(Paragraph(UiStrings.T("项目与映射"), size: 18),
+            Card(Column(Paragraph(UiStrings.T("固定日报 · 项目"), size: 18),
                 Paragraph(string.IsNullOrEmpty(_state.Text("project_id")) ? UiStrings.T("尚未选择项目") : _state.Text("project_id"), true),
                 Paragraph(UiStrings.F("{0} 位成员 · {1} 个状态", _state.Map("owner_names").Count, _state.Map("status_names").Count)),
                 Paragraph(UiStrings.T(_state.ScopeVerified ? "项目范围只读核验已通过" : "保存配置以自动核验当前项目范围"), true))),
@@ -42,14 +42,22 @@ public sealed partial class MainWindow
         {
             Header = UiStrings.T("Teambition"), IsClosable = false,
             Content = LocalScroll(Column(Card(Column(
+                Paragraph(UiStrings.T("1. MCP Token 与连接授权"), size: 18),
+                SecretInput("Teambition MCP 个人 Token", "teambition_mcp_token"),
+                Paragraph(UiStrings.T(_state.SecretPresence["teambition_mcp_authorized"]?.GetValue<bool>() == true
+                    ? "本机 MCP 连接已授权；定时运行需另行开启。" : "本机 MCP 连接尚未授权；保存 Token 后仍需主动确认。"), true),
+                Paragraph(UiStrings.T("使用 Teambition 官方 MCP 个人 Token。授权后成员姓名与任务状态自动读取；仅在无法解析时使用高级覆盖。旧 App 凭据不会用于连接。"), true),
+                Paragraph(UiStrings.T("输入框留空会保留已保存的密钥。新值只在保存后由当前 Windows 用户 DPAPI 加密；不显示已保存的原值。"), true),
+                Paragraph(UiStrings.T("先填写 Token，再保存并确认连接授权；无需先填写项目。此按钮也会保存其他已编辑配置。"), true),
+                ActionButton("保存配置并确认 MCP 授权", "save-mcp-settings", SaveCoreAsync),
+                Paragraph(UiStrings.T("2. 加载并选择项目"), size: 18),
+                BuildProjectPicker(),
                 Pair(SettingText("Tenant / Organization ID", "tenant_id", "tenant-id"),
                      SettingText("Project ID", "project_id", "project-id")),
-                SecretInput("Teambition App ID", "teambition_app_id"),
-                SecretInput("Teambition App Secret", "teambition_app_secret"),
-                Paragraph(UiStrings.T("输入框留空会保留已保存的密钥。新值只在保存后由当前 Windows 用户 DPAPI 加密；不显示已保存的原值。"), true),
-                ActionButton("只读测试连接", "test-teambition", async () =>
+                ActionButton("授权并只读测试连接", "test-teambition", async () =>
                 {
-                    await EnsureSavedAsync();
+                    await SaveCoreAsync();
+                    if (_state.SecretPresence["teambition_mcp_authorized"]?.GetValue<bool>() != true) return;
                     var result = await Worker.SendAsync("test_teambition");
                     SetStatus(UiStrings.F("Teambition 只读查询成功；读取 {0} 个任务。", result["records"]));
                 })))))
@@ -61,6 +69,56 @@ public sealed partial class MainWindow
         });
         tabs.TabItems.Add(new TabViewItem { Header = UiStrings.T("OpenAI"), IsClosable = false, Content = BuildOpenAi() });
         return tabs;
+    }
+
+    private FrameworkElement BuildProjectPicker()
+    {
+        var choices = Identify(new ComboBox
+        {
+            Header = UiStrings.T("选择我的项目"), PlaceholderText = UiStrings.T("点击加载项目；也可手动输入下方 ID"),
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        }, "project-choice");
+        foreach (JsonNode? row in _state.ProjectChoices)
+        {
+            var item = new ComboBoxItem
+            {
+                Tag = Value(row, "id"),
+                Content = UiStrings.F("{0} · 企业 {1} · 项目 {2}", Value(row, "name"), Value(row, "organizationId"), Value(row, "id"))
+            };
+            choices.Items.Add(item);
+            if (Value(row, "id") == _state.Text("project_id") && Value(row, "organizationId") == _state.Text("tenant_id"))
+                choices.SelectedItem = item;
+        }
+        choices.SelectionChanged += async (_, _) =>
+        {
+            if (_busy || choices.SelectedItem is not ComboBoxItem selected || selected.Tag is not string projectId) return;
+            bool applied = await RunOperationAsync("正在选择项目…", async () =>
+            {
+                var result = await Worker.SendAsync("select_project", new JsonObject { ["project_id"] = projectId });
+                _state.Set("tenant_id", Value(result, "tenant_id"));
+                _state.Set("project_id", Value(result, "project_id"));
+                if (result["task_number_prefix"] is JsonValue prefix && result["task_display_scope"] is JsonObject scope)
+                {
+                    _state.Set("task_number_prefix", prefix.DeepClone());
+                    _state.Set("task_display_scope", scope.DeepClone());
+                }
+                Navigate("accounts");
+                SetStatus(Value(result, "status"));
+            });
+            if (!applied) choices.SelectedIndex = -1;
+        };
+        return Column(choices, ActionButton("加载我的项目", "load-projects", async () =>
+        {
+            if ((_state.SecretDrafts.TryGetValue("teambition_mcp_token", out var pendingToken) && !string.IsNullOrEmpty(pendingToken)) ||
+                _state.SecretPresence["teambition_mcp_authorized"]?.GetValue<bool>() != true)
+                throw new InvalidOperationException("请先保存个人 Token 并确认连接授权，再加载项目列表；加载操作不会替你保存其他编辑。");
+            _state.ProjectChoices.Clear();
+            choices.Items.Clear();
+            var result = await Worker.SendAsync("list_projects");
+            _state.ProjectChoices = result["projects"]!.DeepClone().AsArray();
+            Navigate("accounts");
+            SetStatus(Value(result, "status"));
+        }), Paragraph(UiStrings.T("仅点击加载后才读取当前账号参与的可见项目（不含归档），列表可能不完整。找不到项目可手动填写下方 ID；选择后还需保存。"), true));
     }
 
     private FrameworkElement BuildDingTalk()
@@ -178,17 +236,17 @@ public sealed partial class MainWindow
         archived.Click += (_, _) => _state.Set("include_archived", archived.IsChecked == true);
         var scope = Card(Column(
             Paragraph(UiStrings.F("项目：{0}", _state.Text("project_id", UiStrings.T("尚未配置"))), size: 18),
-            Paragraph(UiStrings.T("推荐范围：扫描指定 Project ID 下当前可读任务的动态，按动态发生时间筛选日报窗口；默认不含归档，不添加其他条件。任务在截止后再更新也会检查；已删除或不可见任务无法保证追溯。"), true),
+            Paragraph(UiStrings.T("推荐范围：按更新时间筛选候选，再按动态发生时间筛选日报窗口；默认不含归档，不添加其他条件。截止后再次更新的任务仍检查；未推进更新时间的动态可能遗漏，已删除或不可见任务无法保证追溯。"), true),
             Paragraph(UiStrings.T("保存配置即采用当前项目、归档选项和筛选条件。范围或 Teambition 凭据变化时，会使用下面的时间区间自动只读核验；核验未通过时仍保存编辑，自动运行会关闭。"), true),
             archived, BuildFilterEditor()));
-        var probe = Card(Column(Paragraph(UiStrings.T("只读核验与映射发现"), size: 18), TimeInputs(),
-            Paragraph(UiStrings.T("选择含任务动态的区间。保存时会校验完整翻页、来源与字段样本，并发现映射 ID。任务当前更新时间不必落在所选区间；成员姓名和状态名称仍需核对。"), true),
-            ActionButton("只读验证项目并发现映射 ID", "probe-project", async () =>
+        var probe = Card(Column(Paragraph(UiStrings.T("项目与时间"), size: 18), TimeInputs(),
+            Paragraph(UiStrings.T("选择含任务动态的区间。MCP 返回的成员与状态字段作为原始上下文，不代表已确认状态的完成语义；日报分类由 OpenAI 根据任务上下文和原始动态判断。"), true),
+            ActionButton("只读验证项目", "probe-project", async () =>
             {
                 if (_state.SecretDrafts.Any(x => !string.IsNullOrEmpty(x.Value))) await SaveCoreAsync();
                 var result = await Worker.SendAsync("probe_project", _state.WindowPayload(scope: true));
                 _state.ApplyProbe(result);
-                _state.Output = UiStrings.F("完整读取 {0} 个任务、{1} 条动态。核对成员/状态映射后保存配置，保存时会采用当前项目范围。", result["task_count"], result["activity_count"]);
+                _state.Output = UiStrings.F("完整读取 {0} 个任务、{1} 条动态。保存配置即可使用当前项目范围；成员与状态自动读取。", result["task_count"], result["activity_count"]);
                 Navigate("project");
                 SetStatus(_state.Output);
             }, accent: true)));
@@ -202,7 +260,12 @@ public sealed partial class MainWindow
         var tabs = Identify(new TabView { IsAddTabButtonVisible = false, CanDragTabs = false,
             CanReorderTabs = false }, "project-tabs");
         tabs.TabItems.Add(new TabViewItem { Header = UiStrings.T("采集范围"), IsClosable = false,
-            Content = LocalScroll(Column(scope, probe)) });
+            Content = LocalScroll(Column(scope, probe, new Expander
+            {
+                Header = UiStrings.T("高级覆盖（可选）"), HorizontalAlignment = HorizontalAlignment.Stretch,
+                Content = Column(Paragraph(UiStrings.T("通常无需设置成员或状态。旧映射原样保留；与 MCP 数据冲突时会明确提示。"), true),
+                    Toolbar(NavigationButton("成员覆盖（可选）", "members"), NavigationButton("状态覆盖（可选）", "statuses")))
+            })) });
         tabs.TabItems.Add(new TabViewItem { Header = UiStrings.T("任务编号与链接"), IsClosable = false, Content = references });
         return tabs;
     }
@@ -259,7 +322,7 @@ public sealed partial class MainWindow
                 Content = Pair(Paragraph(id, true), Paragraph(name)) });
         }
         return FillLayout(Column(
-            Paragraph(UiStrings.F("已保存或待保存 {0} 条映射。当前批准的接口只能发现样本 ID，不是完整成员名册；员工编号不能代替 API ID。", _state.Map("owner_names").Count), true),
+            Paragraph(UiStrings.F("高级可选覆盖：已有 {0} 条本机成员覆盖。MCP 每次自动读取姓名；仅未解析时补充已核对的值，冲突时停止并提示。", _state.Map("owner_names").Count), true),
             Toolbar(
                 ActionButton("添加成员", "member-add", () => EditMemberAsync(null)),
                 ActionButton("编辑选中成员", "member-edit", () => EditMemberAsync((list.SelectedItem as ListViewItem)?.Tag as string)),
@@ -317,12 +380,12 @@ public sealed partial class MainWindow
             row.Children.Add(Column(Paragraph(id, true), Paragraph(name, size: 16)));
             var hint = Paragraph(string.IsNullOrEmpty(suggestion) ? "" : UiStrings.F("样本建议：{0}", suggestion), true);
             row.Children.Add(hint); Grid.SetColumn(hint, 1);
-            var done = Paragraph(UiStrings.T(resolved.Contains(id) ? "✓ 已解决" : "未解决"), true);
+            var done = Paragraph(UiStrings.T(resolved.Contains(id) ? "✓ 已解决" : _state.Map("status_names").ContainsKey(id) ? "未解决" : "未解析"), true);
             row.Children.Add(done); Grid.SetColumn(done, 2);
             list.Items.Add(new ListViewItem { Tag = id, HorizontalContentAlignment = HorizontalAlignment.Stretch, Content = row });
         }
         return FillLayout(Column(
-            Paragraph(UiStrings.T("状态名称必须与真实项目一致。样本动态返回的名称只作建议，不能凭 ID 猜名称；请逐项确认已解决状态。"), true),
+            Paragraph(UiStrings.T("高级可选覆盖：仅填写人工核实的状态名称与完成含义。MCP 返回的状态字段不代表已确认其完成语义；不能凭名称或 ID 猜测完成状态。"), true),
             Toolbar(
                 ActionButton("添加状态", "status-add", () => EditStatusAsync(null)),
                 ActionButton("编辑选中状态", "status-edit", () => EditStatusAsync((list.SelectedItem as ListViewItem)?.Tag as string), accent: true),
@@ -376,6 +439,18 @@ public sealed partial class MainWindow
         {
             if (!double.IsNaN(limit.Value)) _state.Set("max_tasks_per_run", (int)limit.Value);
         };
+        var concurrent = Identify(new NumberBox
+        {
+            Header = UiStrings.T("并行读取任务数（1–4）"), Minimum = 1, Maximum = 4,
+            Value = _state.Number("max_concurrent_tasks", 4), SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact
+        }, "task-concurrency");
+        concurrent.ValueChanged += (_, _) =>
+        {
+            if (double.IsNaN(concurrent.Value)) return;
+            int count = (int)Math.Clamp(concurrent.Value, 1, 4);
+            _state.Set("max_concurrent_tasks", count);
+            if (concurrent.Value != count) concurrent.Value = count;
+        };
         FrameworkElement Slot(string label, string prefix) => Card(Column(Paragraph(UiStrings.T(label), size: 18),
             SettingText("运行时间", prefix + "_run_at", prefix + "-run-at", "HH:MM"),
             Pair(SettingText(prefix == "morning" ? "采集开始（前一日）" : "采集开始", prefix + "_start_at", prefix + "-start-at", "HH:MM"),
@@ -384,8 +459,9 @@ public sealed partial class MainWindow
             Card(Column(Toggle("应用运行期间自动采集、校验、摘要并发送", "auto_send_enabled", "auto-run"),
                 Paragraph(UiStrings.T("保存后生效。电脑关机、休眠、未登录或断网时无法执行；重开后只补跑最近 24 小时内、自动执行启用期间且没有本机记录的时段。"), true))),
             Pair(Slot("上午日报", "morning"), Slot("下午日报", "afternoon")),
-            Card(Column(limit,
-                Paragraph(UiStrings.T("默认每批 300 个任务；这不是项目总数限制，全项目最多 10,000 个当前可读任务。缩短时间窗不会减少基础扫描。"), true),
+            Card(Column(limit, concurrent,
+                Paragraph(UiStrings.T("默认并行读取 4 个任务；所有线程共用限流器，限流目标间隔为 0.25 秒，遇到 429 会共同退避。实际请求间距可能受系统调度影响。可降到 1；实际速度取决于候选数量与接口延迟。"), true),
+                Paragraph(UiStrings.T("默认每批 300 个任务；这不是项目总数限制，单次最多 10,000 个候选。普通模式按更新时间向 Teambition 筛选，详细诊断仍会全项目复核。"), true),
                 Paragraph(UiStrings.T("整次采集最多 50,000 次请求、1,000,000 条返回记录、512 MiB 响应、128 MiB 保留数据及两小时（含进度缓存年龄），最多进行 3 轮来源重核；各批仍受分页、请求、记录、响应体和时间预算约束。超过任一限制会阻断摘要与发送，不会截断采集。"), true),
                 Paragraph(UiStrings.T("完整读取任务及全部动态分页后才保存短期进度。取消或断电保留未完成进度，自本次采集开始最多两小时；下次会重列任务并刷新变更。这不是历史快照。"), true),
                 Toolbar(ActionButton("清除未完成的采集进度", "clear-collection-progress", async () =>
@@ -412,14 +488,12 @@ public sealed partial class MainWindow
         var toolbar = Toolbar(
             ActionButton("只读诊断", "diagnose", async () =>
             {
-                await EnsureSavedAsync();
+                RequireDiagnosticSaved();
                 _state.ExportAvailable = false;
                 _state.DiagnosticFileStem = "";
                 _state.DiagnosticText = "";
                 Navigate("run");
-                var result = await Worker.SendAsync("diagnose", _state.WindowPayload());
-                ApplyDiagnosticResult(result);
-                Navigate("run"); SetStatus(Value(result, "safety", "未调用 OpenAI；未发送钉钉。"));
+                await DiagnoseWithProgressAsync();
             }, accent: true),
             ActionButton("生成并自动发送", "run-manual", async () =>
             {
@@ -493,7 +567,10 @@ public sealed partial class MainWindow
         {
             int inWindow = counts["unknown_events_in_report_window"]?.GetValue<int>() ?? 0;
             int unknownTime = counts["unknown_events_with_unknown_time"]?.GetValue<int>() ?? 0;
-            _state.Output += UiStrings.F("\n\n窗口内未支持动作：{0} 条。时间归属无法判断的未支持动作：{1} 条。", inWindow, unknownTime);
+            _state.Output += UiStrings.F("\n\n辅助结构分析：窗口内旧解析器未分类动作 {0} 条；这项统计不阻断，正式生成时仍交由 OpenAI 整理。", inWindow);
+            _state.Output += UiStrings.F("\n时间归属无法判断的动作：{0} 条。", unknownTime);
+            if (unknownTime > 0)
+                _state.Output += UiStrings.T("\n时间不明的动态仍需检查，不能判断其是否属于报告时间段。");
             if (counts["catalog_complete"]?.GetValue<bool>() != true)
                 _state.Output += UiStrings.T("\n诊断目录未完整，以上仅为已扫描部分，不能据此认定没有其他动态。");
         }
@@ -510,6 +587,7 @@ public sealed partial class MainWindow
             Title = UiStrings.T("详细诊断包含项目内容"), PrimaryButtonText = UiStrings.T("选择本机文件夹"), CloseButtonText = UiStrings.T("取消"),
             DefaultButton = ContentDialogButton.Close,
             Content = new ScrollViewer { MaxHeight = 360, Content = Paragraph(UiStrings.T("文件会保留所选时间段的任务标题、动态正文、引用、实际动作及必要映射，供私下分析。" +
+                "按照当前归档及项目范围配置，详细导出会复核全部可见任务和历史动态，可能耗时较长。" +
                 "应用将剔除配置凭据和识别到的认证字段；项目正文仍可能含手工写入的私人信息。" +
                 "请选择未同步的本机文件夹，勿放入代码仓库或公开分享。此操作只读采集，不调用模型、不发送群消息。")) }
         }, "detailed-export-consent");
@@ -548,7 +626,7 @@ public sealed partial class MainWindow
         package.SetText(_state.DiagnosticText);
         if (!Windows.ApplicationModel.DataTransfer.Clipboard.SetContentWithOptions(package, DiagnosticClipboardOptions()))
             throw new InvalidOperationException("剪贴板暂时不可用，请重试复制或导出脱敏结构。");
-        SetStatus("已复制本机诊断文字，含动作类型与任务/成员 ID，不含评论正文或凭据。分享前请检查内容。");
+        SetStatus("已复制本次范围检查与辅助统计文字，不含评论正文或凭据。旧解析器的动作类型与 ID 仅在可用的辅助导出中；分享前请检查内容。");
     }
 
     private static Windows.ApplicationModel.DataTransfer.ClipboardContentOptions DiagnosticClipboardOptions() =>

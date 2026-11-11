@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ctypes
+from copy import deepcopy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,15 +14,18 @@ from .config import atomic_write
 
 
 SECRET_FIELDS = (
-    "teambition_app_id",
-    "teambition_app_secret",
+    "teambition_mcp_token",
     "dingtalk_webhook",
     "dingtalk_signing_secret",
     "openai_api_key",
 )
+# Retained solely to preserve existing encrypted data, never used for authentication.
+LEGACY_SECRET_FIELDS = ("teambition_app_id", "teambition_app_secret")
 UPDATE_SECRET_FIELDS = ("github_update_token",)
 INTERNAL_SECRET_FIELDS = ("delivery_ledger_id",)
-ALL_SECRET_FIELDS = SECRET_FIELDS + UPDATE_SECRET_FIELDS + INTERNAL_SECRET_FIELDS
+MCP_AUTHORIZATION_FIELD = "teambition_mcp_authorized_identity"
+ALL_SECRET_FIELDS = (SECRET_FIELDS + UPDATE_SECRET_FIELDS + INTERNAL_SECRET_FIELDS
+                     + LEGACY_SECRET_FIELDS + (MCP_AUTHORIZATION_FIELD,))
 
 
 class SecretStoreError(RuntimeError):
@@ -114,3 +119,40 @@ class MemorySecretStore:
 
     def save(self, values: Mapping[str, str]) -> None:
         self.values = DpapiSecretStore._validate(dict(values))
+
+
+def revoke_missing_mcp_authorization(settings: dict, credentials: Mapping[str, str]) -> dict:
+    """Old App credentials cannot retain an authorization or automatic-run claim."""
+    if mcp_connection_authorized(credentials):
+        return settings
+    migrated = dict(settings)
+    previous_view = settings.get("view", {})
+    if ("mcp_migration_previous_authorization" not in migrated and
+            (settings.get("auto_send_enabled") or settings.get("auto_send_enabled_since_local")
+             or settings.get("api_contract_verified") or previous_view.get("verified")
+             or previous_view.get("evidence"))):
+        # Recovery reference only: never read by authorization, scope or scheduling.
+        # Preserve the first pre-MCP preferences instead of replacing them on restart.
+        migrated["mcp_migration_previous_authorization"] = {
+            "auto_send_enabled": settings.get("auto_send_enabled", False),
+            "auto_send_enabled_since_local": settings.get("auto_send_enabled_since_local", ""),
+            "api_contract_verified": settings.get("api_contract_verified", False),
+            "view": deepcopy(previous_view),
+        }
+    return dict(migrated, api_contract_verified=False, auto_send_enabled=False,
+                auto_send_enabled_since_local="",
+                view=dict(previous_view, verified=False, evidence=""))
+
+
+def teambition_mcp_identity(credentials: Mapping[str, str]) -> str | None:
+    """Bind proofs to a single MCP Token without exposing the credential."""
+    token = credentials.get("teambition_mcp_token")
+    if not isinstance(token, str) or not token.strip():
+        return None
+    return hashlib.sha256(("teambition-mcp/v1\0" + token).encode("utf-8")).hexdigest()
+
+
+def mcp_connection_authorized(credentials: Mapping[str, str]) -> bool:
+    """Only a deliberate local grant for this Token enables official MCP use."""
+    identity = teambition_mcp_identity(credentials)
+    return bool(identity and credentials.get(MCP_AUTHORIZATION_FIELD) == identity)
