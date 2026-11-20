@@ -132,6 +132,18 @@ internal sealed class DesktopState
             StatusSuggestions[item.Key] = item.Value!.GetValue<string>();
     }
 
+    public void ApplyDingTalkSelection(JsonObject result)
+    {
+        if (result["settings"]?["dingtalk_destination_id"] is JsonValue destinationId)
+            Settings["dingtalk_destination_id"] = destinationId.DeepClone();
+        if (result["secret_presence"] is JsonObject presence)
+            SecretPresence = (JsonObject)presence.DeepClone();
+        if (result["dingtalk_destinations"] is JsonObject robots)
+            DingTalkDestinations = (JsonObject)robots.DeepClone();
+        SecretDrafts.Remove("dingtalk_webhook");
+        SecretDrafts.Remove("dingtalk_signing_secret");
+    }
+
     public void Apply(JsonObject result)
     {
         if (result["settings"] is JsonObject settings)

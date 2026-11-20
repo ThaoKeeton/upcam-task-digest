@@ -132,14 +132,7 @@ public sealed partial class MainWindow
     private void ShowDingTalk(JsonObject? result = null)
     {
         if (result is not null)
-        {
-            if (result["settings"]?["dingtalk_destination_id"] is JsonValue destinationId)
-                _state.Settings["dingtalk_destination_id"] = destinationId.DeepClone();
-            if (result["secret_presence"] is JsonObject presence) _state.SecretPresence = (JsonObject)presence.DeepClone();
-            if (result["dingtalk_destinations"] is JsonObject robots) _state.DingTalkDestinations = (JsonObject)robots.DeepClone();
-            _state.SecretDrafts.Remove("dingtalk_webhook");
-            _state.SecretDrafts.Remove("dingtalk_signing_secret");
-        }
+            _state.ApplyDingTalkSelection(result);
         Navigate("accounts");
         if (Find<TabView>("account-tabs") is TabView tabs) tabs.SelectedIndex = 1;
     }

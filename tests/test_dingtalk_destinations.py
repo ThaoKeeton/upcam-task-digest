@@ -139,6 +139,20 @@ class DingTalkDestinationTests(unittest.TestCase):
         self.assertFalse(self.store.load()["auto_send_enabled"])
         self.assertEqual(CaptureWorkflow.instances, [])
 
+    def test_selection_refresh_stays_inside_desktop_state(self):
+        root = Path(__file__).parents[1] / "winui" / "UPCAMTaskDigest"
+        page = (root / "MainWindow.Pages.cs").read_text(encoding="utf-8")
+        state = (root / "DesktopState.cs").read_text(encoding="utf-8")
+        show = page.split("private void ShowDingTalk", 1)[1].split("private FrameworkElement BuildDingTalk", 1)[0]
+        self.assertIn("_state.ApplyDingTalkSelection(result)", show)
+        self.assertNotIn("_state.SecretPresence", show)
+        self.assertNotIn("_state.DingTalkDestinations", show)
+        method = state.split("public void ApplyDingTalkSelection", 1)[1].split("public void Apply(", 1)[0]
+        self.assertIn("SecretPresence =", method)
+        self.assertIn("DingTalkDestinations =", method)
+        self.assertNotIn("Settings =", method)
+        self.assertNotIn("Dirty", method)
+
 
 if __name__ == "__main__":
     unittest.main()
