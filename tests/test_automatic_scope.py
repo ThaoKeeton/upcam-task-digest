@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from datetime import datetime, timedelta
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -342,11 +343,20 @@ class AutomaticScopeTests(unittest.TestCase):
 
         self.service.dispatch({"op": "refresh_models"})
         credentials = self.service.secret_store.load()
-        credentials.pop("dingtalk_signing_secret")
+        credentials.pop("dingtalk_signing_secret", None)
+        stored = json.loads(credentials["dingtalk_destinations"])
+        for profile in stored["profiles"]:
+            profile["secret"] = ""
+        credentials["dingtalk_destinations"] = json.dumps(stored, ensure_ascii=False)
         self.service.secret_store.save(credentials)
         with self.assertRaisesRegex(ValueError, "凭据"):
             self.save(proposed)
+        credentials = self.service.secret_store.load()
         credentials["dingtalk_signing_secret"] = "synthetic-only"
+        stored = json.loads(credentials["dingtalk_destinations"])
+        for profile in stored["profiles"]:
+            profile["secret"] = "synthetic-only"
+        credentials["dingtalk_destinations"] = json.dumps(stored, ensure_ascii=False)
         self.service.secret_store.save(credentials)
         (Path(self.temporary.name) / "delivery_ledger.sqlite3").unlink()
         with self.assertRaisesRegex(ValueError, "防重账本"):

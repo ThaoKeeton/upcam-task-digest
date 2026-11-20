@@ -75,8 +75,10 @@ def reject_credential_mentions(settings: dict, *credential_sets: dict) -> None:
     targets = tuple(target for group in options.values() for target in group)
     if not targets:
         return
+    from .dingtalk_destinations import credential_material
     values = set()
     for credentials in credential_sets:
+        credentials = credential_material(credentials) if isinstance(credentials, dict) else credentials
         for value in credentials.values():
             if not isinstance(value, str) or not value:
                 continue

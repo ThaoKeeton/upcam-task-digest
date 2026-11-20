@@ -146,6 +146,9 @@ class WorkerService:
             "preview_sample": self._preview_sample,
             "test_teambition": self._test_teambition,
             "validate_dingtalk_config": self._validate_dingtalk_config,
+            "list_dingtalk_destinations": self._list_dingtalk_destinations,
+            "save_dingtalk_destination": self._save_dingtalk_destination,
+            "select_dingtalk_destination": self._select_dingtalk_destination,
             "run_manual": self._run_manual,
             "run_due": self._run_due,
             "history": self._history,
@@ -186,6 +189,7 @@ class WorkerService:
             # Its absence falls back to Windows defaults; ordinary UI loading continues.
             pass
         credentials = self.secret_store.load()
+        settings, credentials = self._sync_dingtalk(settings, credentials)
         reject_credential_mentions(settings, credentials)
         migrated = revoke_missing_mcp_authorization(settings, credentials)
         if migrated != settings:
@@ -213,6 +217,7 @@ class WorkerService:
             "application_version": APP_VERSION,
             "ruleset_revision": RULESET_REVISION,
             "preferences": preference_values(settings),
+            "dingtalk_destinations": self._dingtalk_view(settings, credentials),
         }
 
     def _save_preferences(self, payload: dict) -> dict:
@@ -351,6 +356,17 @@ class WorkerService:
             if identity is None:
                 raise WorkerApiError("请先输入 Teambition MCP 个人 Token，再确认连接授权。")
             proposed_secrets[MCP_AUTHORIZATION_FIELD] = identity
+        from .dingtalk_destinations import absorb_flat_edit
+        destination_settings = dict(previous_settings)
+        absorb_flat_edit(
+            destination_settings, proposed_secrets,
+            webhook=entered.get("dingtalk_webhook"),
+            signing_secret=entered.get("dingtalk_signing_secret"),
+            clear_webhook="dingtalk_webhook" in clear_secrets,
+            clear_secret="dingtalk_signing_secret" in clear_secrets,
+        )
+        settings_input = dict(settings_input)
+        settings_input["dingtalk_destination_id"] = destination_settings.get("dingtalk_destination_id", "")
         credential_identity = _teambition_identity(proposed_secrets)
         previous_identity = _teambition_identity(previous_secrets)
         proposed = _verified_settings_for_save(
@@ -448,6 +464,7 @@ class WorkerService:
         settings["auto_send_enabled"] = False
         settings["auto_send_enabled_since_local"] = ""
         settings["api_contract_verified"] = False
+        settings["dingtalk_destination_id"] = ""
         settings["view"] = dict(settings["view"], verified=False, evidence="")
         self.settings_store.save(settings)
         retained = {key: value for key, value in current.items()
@@ -907,10 +924,9 @@ class WorkerService:
 
     def _validate_dingtalk_config(self, payload: dict) -> dict:
         self._require_empty_payload(payload)
-        settings = self.settings_store.load()
+        settings, credentials = self._sync_dingtalk(self.settings_store.load(), self.secret_store.load())
         options = mention_options(settings)
         mention_count = sum(len(targets) for targets in options.values())
-        credentials = self.secret_store.load()
         reject_credential_mentions(settings, credentials)
         webhook = credentials.get("dingtalk_webhook", "")
         secret = credentials.get("dingtalk_signing_secret", "")
@@ -921,9 +937,68 @@ class WorkerService:
             signed_webhook(webhook, secret, 1)
         except (ValueError, TypeError):
             raise WorkerApiError("钉钉 Webhook 或签名密钥格式无效；没有发送测试消息。") from None
-        return {"status": f"Webhook 与签名格式通过本机检查；提醒对象 {mention_count} 个，仅校验本机格式，未核验群成员资格；没有发送测试消息。",
+        view = self._dingtalk_view(settings, credentials)
+        return {"status": "Webhook 与签名格式通过本机检查；提醒对象 "
+                f"{mention_count} 个，仅校验本机格式，未核验群成员资格；没有发送测试消息。当前目标："
+                f"{view['current_role'] or '未选择'}。",
                 "mention_count": mention_count, "mention_mode": settings["dingtalk_mention_mode"],
+                "dingtalk_destinations": view,
                 "safety": "未调用 OpenAI；未发送钉钉。"}
+
+    def _sync_dingtalk(self, settings: dict, secrets: dict) -> tuple[dict, dict]:
+        from .dingtalk_destinations import ensure
+        settings, secrets = dict(settings), dict(secrets)
+        if ensure(settings, secrets):
+            self.secret_store.save(secrets)
+            self.settings_store.save(validate_settings(settings))
+            settings = self.settings_store.load()
+            secrets = self.secret_store.load()
+        return settings, secrets
+
+    def _dingtalk_view(self, settings: dict, secrets: dict) -> dict:
+        from .dingtalk_destinations import public_view
+        return public_view(settings, secrets)
+
+    def _destination_result(self, settings: dict, secrets: dict, status: str) -> dict:
+        return {"settings": validate_settings(settings), "secret_presence": _secret_presence(secrets),
+                "dingtalk_destinations": self._dingtalk_view(settings, secrets),
+                "status": status, "safety": "未调用 OpenAI；未发送钉钉。"}
+
+    def _list_dingtalk_destinations(self, payload: dict) -> dict:
+        self._require_empty_payload(payload)
+        settings, secrets = self._sync_dingtalk(self.settings_store.load(), self.secret_store.load())
+        return self._destination_result(settings, secrets, "已读取本机机器人配置；没有发送消息。")
+
+    def _save_dingtalk_destination(self, payload: dict) -> dict:
+        from .dingtalk_destinations import save_profile
+        if self._job_lock.locked():
+            raise WorkerApiError("已有日报或诊断任务正在运行；未更改发送目标，也未发送。")
+        settings, secrets = self._sync_dingtalk(self.settings_store.load(), self.secret_store.load())
+        previous_settings, previous_secrets = self.settings_store.load(), self.secret_store.load()
+        auto_before = bool(previous_settings.get("auto_send_enabled"))
+        save_profile(settings, secrets, payload)
+        if bool(settings.get("auto_send_enabled")) != auto_before:
+            raise WorkerApiError("保存机器人配置不应改变自动发送；未保存。")
+        self.secret_store.save(secrets)
+        self.settings_store.save(validate_settings(settings))
+        stored_settings, stored_secrets = self.settings_store.load(), self.secret_store.load()
+        return self._destination_result(stored_settings, stored_secrets, "机器人配置已加密保存；没有发送消息。")
+
+    def _select_dingtalk_destination(self, payload: dict) -> dict:
+        from .dingtalk_destinations import select_profile
+        if set(payload) != {"id"}:
+            raise WorkerApiError("请选择一套已保存的机器人配置；未发送。")
+        if self._job_lock.locked():
+            raise WorkerApiError("已有日报或诊断任务正在运行；未更改发送目标，也未发送。")
+        settings, secrets = self._sync_dingtalk(self.settings_store.load(), self.secret_store.load())
+        select_profile(settings, secrets, payload.get("id"))
+        self.secret_store.save(secrets)
+        self.settings_store.save(validate_settings(settings))
+        stored_settings, stored_secrets = self.settings_store.load(), self.secret_store.load()
+        ready = self._dingtalk_view(stored_settings, stored_secrets)["current_ready"]
+        status = ("已切换当前发送目标；没有发送消息。" if ready
+                  else "已切换到不完整的机器人配置；发送会失败，直到补全 Webhook 和签名密钥。没有发送消息。")
+        return self._destination_result(stored_settings, stored_secrets, status)
 
     def _run_manual(self, payload: dict) -> dict:
         if set(payload) - {"start", "end", "manual_request_id"}:
@@ -993,8 +1068,7 @@ class WorkerService:
             raise WorkerApiError("已有日报或诊断任务正在运行；当前操作未并行执行。")
         try:
             pipeline_mode = self._pipeline_mode
-            settings = self.settings_store.load()
-            secrets = self.secret_store.load()
+            settings, secrets = self._sync_dingtalk(self.settings_store.load(), self.secret_store.load())
             ready, message = self._ensure_ledger(secrets)
             if not ready:
                 raise WorkerApiError(message)
@@ -1294,8 +1368,10 @@ def _credentials_fingerprint(credentials: dict) -> str:
 
 def _redact_known_diagnostic_credentials(message: str, *credential_sets: dict) -> str:
     """Diagnostic names/IDs must not echo configured credential values."""
+    from .dingtalk_destinations import credential_material
     values = set()
     for credentials in credential_sets:
+        credentials = credential_material(credentials)
         for value in credentials.values():
             if isinstance(value, str) and value:
                 values.add(value)

@@ -41,7 +41,8 @@ class ReportCredentialGuard:
                     or any(type(key) is not str or type(value) is not str
                            for key, value in credentials.items())):
                 raise CredentialExposureBlocked()
-            self._known, _ = _known_pattern(credentials)
+            from .dingtalk_destinations import credential_material
+            self._known, _ = _known_pattern(credential_material(credentials))
         except Exception:
             raise CredentialExposureBlocked() from None
 

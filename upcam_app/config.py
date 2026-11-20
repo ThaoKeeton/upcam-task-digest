@@ -49,6 +49,7 @@ DEFAULT_SETTINGS = {
     "openai_service_tier": "default",
     "dingtalk_mention_mode": "mobile",
     "dingtalk_mentions": "",
+    "dingtalk_destination_id": "",
 }
 
 
@@ -126,6 +127,9 @@ def validate_settings(settings: dict) -> dict:
         raise SettingsError("OpenAI reasoning effort is invalid")
     if merged.get("openai_service_tier") not in ("default", "fast"):
         raise SettingsError("OpenAI API service tier must be Standard or Fast")
+    destination_id = merged.get("dingtalk_destination_id")
+    if not isinstance(destination_id, str) or not re.fullmatch(r"[0-9a-f]{0,32}", destination_id):
+        raise SettingsError("DingTalk destination selection is invalid")
     morning_start = parse_clock(merged["morning_start_at"], "Morning collection start")
     morning_end = parse_clock(merged["morning_end_at"], "Morning collection end")
     parse_clock(merged["morning_run_at"], "Morning schedule")

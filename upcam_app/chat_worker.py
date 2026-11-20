@@ -81,8 +81,8 @@ class ChatWorker:
 
     def _load(self):
         from .worker_api import WorkerApiError
-        settings = self.service.settings_store.load()
-        credentials = self.service.secret_store.load()
+        settings, credentials = self.service._sync_dingtalk(
+            self.service.settings_store.load(), self.service.secret_store.load())
         if not settings.get('tenant_id') or not settings.get('project_id'):
             raise WorkerApiError('请先在项目范围中保存企业和项目。')
         if not mcp_connection_authorized(credentials):

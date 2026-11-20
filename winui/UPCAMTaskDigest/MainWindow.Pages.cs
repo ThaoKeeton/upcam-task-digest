@@ -121,8 +121,102 @@ public sealed partial class MainWindow
         }), Paragraph(UiStrings.T("仅点击加载后才读取当前账号参与的可见项目（不含归档），列表可能不完整。找不到项目可手动填写下方 ID；选择后还需保存。"), true));
     }
 
+    private static string DingTalkRole(string? role) => role switch
+    {
+        "test" => "测试群",
+        "formal" => "正式群",
+        "unspecified" => "未标明",
+        _ => "未选择",
+    };
+
+    private void ShowDingTalk(JsonObject? result = null)
+    {
+        if (result is not null)
+        {
+            if (result["settings"]?["dingtalk_destination_id"] is JsonValue destinationId)
+                _state.Settings["dingtalk_destination_id"] = destinationId.DeepClone();
+            if (result["secret_presence"] is JsonObject presence) _state.SecretPresence = (JsonObject)presence.DeepClone();
+            if (result["dingtalk_destinations"] is JsonObject robots) _state.DingTalkDestinations = (JsonObject)robots.DeepClone();
+            _state.SecretDrafts.Remove("dingtalk_webhook");
+            _state.SecretDrafts.Remove("dingtalk_signing_secret");
+        }
+        Navigate("accounts");
+        if (Find<TabView>("account-tabs") is TabView tabs) tabs.SelectedIndex = 1;
+    }
+
     private FrameworkElement BuildDingTalk()
     {
+        var saved = _state.DingTalkDestinations;
+        string role = saved["current_role"]?.GetValue<string>() ?? "";
+        string name = saved["current_name"]?.GetValue<string>() ?? "";
+        bool ready = saved["current_ready"]?.GetValue<bool>() == true;
+        string current = string.IsNullOrEmpty(name)
+            ? UiStrings.T("未选择")
+            : UiStrings.T(DingTalkRole(role)) + " · " + name + (ready ? "" : " · " + UiStrings.T("不完整，不会发送"));
+        var choices = Identify(new ComboBox
+        {
+            Header = UiStrings.T("已保存的机器人"),
+            PlaceholderText = UiStrings.T("选择一套配置"),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        }, "dingtalk-destination");
+        if (saved["profiles"] is JsonArray profiles)
+        {
+            foreach (JsonNode? row in profiles)
+            {
+                if (row is not JsonObject profile || profile["id"]?.GetValue<string>() is not string id) continue;
+                string itemRole = UiStrings.T(DingTalkRole(profile["role"]?.GetValue<string>()));
+                string itemName = profile["name"]?.GetValue<string>() ?? "";
+                string suffix = profile["ready"]?.GetValue<bool>() == true ? "" : " · " + UiStrings.T("不完整，不会发送");
+                var item = new ComboBoxItem { Content = itemRole + " · " + itemName + suffix, Tag = id };
+                choices.Items.Add(item);
+                if (profile["selected"]?.GetValue<bool>() == true) choices.SelectedItem = item;
+            }
+        }
+        var profileName = Identify(new TextBox
+        {
+            Header = UiStrings.T("配置名称"),
+            PlaceholderText = UiStrings.T("例如：测试群、正式群"),
+            MaxLength = 32,
+        }, "dingtalk-destination-name");
+        var profileRole = Identify(new ComboBox
+        {
+            Header = UiStrings.T("这套配置用于"),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        }, "dingtalk-destination-role");
+        profileRole.Items.Add(UiStrings.T("测试群"));
+        profileRole.Items.Add(UiStrings.T("正式群"));
+        profileRole.SelectedIndex = 0;
+        choices.SelectionChanged += (_, _) =>
+        {
+            if (choices.SelectedItem is not ComboBoxItem item || saved["profiles"] is not JsonArray rows) return;
+            foreach (JsonNode? row in rows)
+            {
+                if (row is JsonObject profile && profile["id"]?.GetValue<string>() == item.Tag as string)
+                {
+                    profileName.Text = profile["name"]?.GetValue<string>() ?? "";
+                    profileRole.SelectedIndex = profile["role"]?.GetValue<string>() switch
+                    {
+                        "formal" => 1,
+                        "test" => 0,
+                        _ => -1,
+                    };
+                }
+            }
+        };
+        if (choices.SelectedItem is ComboBoxItem selected && saved["profiles"] is JsonArray existing)
+        {
+            foreach (JsonNode? row in existing)
+            {
+                if (row is JsonObject profile && profile["id"]?.GetValue<string>() == selected.Tag as string)
+                    profileName.Text = profile["name"]?.GetValue<string>() ?? "";
+            }
+            profileRole.SelectedIndex = saved["current_role"]?.GetValue<string>() switch
+            {
+                "formal" => 1,
+                "test" => 0,
+                _ => -1,
+            };
+        }
         var mode = Identify(new ComboBox { Header = UiStrings.T("艾特标识类型"), HorizontalAlignment = HorizontalAlignment.Stretch },
             "dingtalk-mention-mode");
         mode.Items.Add(UiStrings.T("手机号"));
@@ -133,8 +227,57 @@ public sealed partial class MainWindow
         targets.Height = 112;
         targets.MaxLength = 8000;
         return LocalScroll(Column(
-            Card(Column(SecretInput("机器人 Webhook（含 access_token）", "dingtalk_webhook"),
-                SecretInput("机器人签名密钥", "dingtalk_signing_secret"))),
+            Card(Column(
+                Paragraph(UiStrings.F("当前发送目标：{0}。切换和保存不会发送消息。", current), size: 18),
+                Paragraph(UiStrings.T("手动发送和定时发送都只使用这一套 Webhook 与签名。不会同时发给其他已保存的群。"), true),
+                choices,
+                profileName,
+                profileRole,
+                SecretInput("机器人 Webhook（含 access_token）", "dingtalk_webhook"),
+                SecretInput("机器人签名密钥", "dingtalk_signing_secret"),
+                Paragraph(UiStrings.T("列表只显示名称和测试/正式标记。Webhook 与签名密钥留在本机加密存储中，留空表示保留已保存的值。"), true),
+                Toolbar(
+                    ActionButton("保存机器人配置", "save-dingtalk-destination", async () =>
+                    {
+                        if (profileRole.SelectedIndex < 0)
+                            throw new InvalidOperationException("请把这套配置标为测试群或正式群。");
+                        var body = new JsonObject
+                        {
+                            ["name"] = profileName.Text.Trim(),
+                            ["role"] = profileRole.SelectedIndex == 1 ? "formal" : "test",
+                            ["webhook"] = _state.SecretDrafts.GetValueOrDefault("dingtalk_webhook", ""),
+                            ["signing_secret"] = _state.SecretDrafts.GetValueOrDefault("dingtalk_signing_secret", ""),
+                        };
+                        if (choices.SelectedItem is ComboBoxItem editing && editing.Tag is string existingId
+                            && !string.IsNullOrEmpty(profileName.Text))
+                            body["id"] = existingId;
+                        var result = await Worker.SendAsync("save_dingtalk_destination", body);
+                        ShowDingTalk(result);
+                        SetStatus(Value(result, "status"));
+                    }),
+                    ActionButton("另存为新配置", "save-new-dingtalk-destination", async () =>
+                    {
+                        if (profileRole.SelectedIndex < 0)
+                            throw new InvalidOperationException("请把这套配置标为测试群或正式群。");
+                        var body = new JsonObject
+                        {
+                            ["name"] = profileName.Text.Trim(),
+                            ["role"] = profileRole.SelectedIndex == 1 ? "formal" : "test",
+                            ["webhook"] = _state.SecretDrafts.GetValueOrDefault("dingtalk_webhook", ""),
+                            ["signing_secret"] = _state.SecretDrafts.GetValueOrDefault("dingtalk_signing_secret", ""),
+                        };
+                        var result = await Worker.SendAsync("save_dingtalk_destination", body);
+                        ShowDingTalk(result);
+                        SetStatus(Value(result, "status"));
+                    }),
+                    ActionButton("设为当前发送目标", "select-dingtalk-destination", async () =>
+                    {
+                        if (choices.SelectedItem is not ComboBoxItem item || item.Tag is not string id)
+                            throw new InvalidOperationException("请先选择一套已保存的机器人配置。");
+                        var result = await Worker.SendAsync("select_dingtalk_destination", new JsonObject { ["id"] = id });
+                        ShowDingTalk(result);
+                        SetStatus(Value(result, "status"));
+                    })))),
             Card(Column(Paragraph(UiStrings.T("艾特指定成员"), size: 18), mode, targets,
                 Paragraph(UiStrings.T("可用换行、逗号、分号或空格分隔。填写群内成员的手机号或钉钉 userId；不要填写姓名、员工编号或 Teambition 成员 ID。"), true),
                 Paragraph(UiStrings.T("填写后会在群消息末尾添加 @ 标识；实际通知与姓名显示由钉钉处理。留空沿用原消息，不艾特所有人。"), true))),
@@ -142,8 +285,9 @@ public sealed partial class MainWindow
             {
                 await EnsureSavedAsync();
                 var result = await Worker.SendAsync("validate_dingtalk_config");
+                ShowDingTalk(result);
                 SetStatus(UiStrings.F("Webhook 与签名格式通过本机检查；提醒对象 {0} 个，仅校验本机格式，未核验群成员资格；没有发送测试消息。", result["mention_count"]));
-            }), Paragraph(UiStrings.T("这里只检查本机格式，不验证群成员，也不发送测试消息。"), true)));
+            }), Paragraph(UiStrings.T("这里只检查当前发送目标的本机格式，不验证群成员，也不发送测试消息。"), true)));
     }
 
     private FrameworkElement SecretInput(string label, string key)

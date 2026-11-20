@@ -7,6 +7,7 @@ internal sealed class DesktopState
 {
     public JsonObject Settings { get; private set; } = new();
     public JsonObject SecretPresence { get; private set; } = new();
+    public JsonObject DingTalkDestinations { get; private set; } = new();
     public JsonObject Efforts { get; set; } = new();
     public JsonArray Models { get; set; } = new();
     public JsonArray FastModels { get; set; } = new();
@@ -139,6 +140,7 @@ internal sealed class DesktopState
             InvalidateDiagnostic();
         }
         if (result["secret_presence"] is JsonObject presence) SecretPresence = (JsonObject)presence.DeepClone();
+        if (result["dingtalk_destinations"] is JsonObject robots) DingTalkDestinations = (JsonObject)robots.DeepClone();
         if (!GeneralDirty && result["settings"] is JsonObject saved)
             GeneralPreferences = new JsonObject(GeneralKeys.Select(key =>
                 KeyValuePair.Create<string, JsonNode?>(key, saved[key]?.DeepClone())));

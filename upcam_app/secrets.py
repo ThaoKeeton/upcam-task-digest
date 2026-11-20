@@ -24,8 +24,11 @@ LEGACY_SECRET_FIELDS = ("teambition_app_id", "teambition_app_secret")
 UPDATE_SECRET_FIELDS = ("github_update_token",)
 INTERNAL_SECRET_FIELDS = ("delivery_ledger_id",)
 MCP_AUTHORIZATION_FIELD = "teambition_mcp_authorized_identity"
+# Encrypted JSON of named robot profiles. Not a SECRET_FIELDS editor key:
+# callers cannot replace the blob through ordinary secret_values.
+DINGTALK_DESTINATIONS_FIELD = "dingtalk_destinations"
 ALL_SECRET_FIELDS = (SECRET_FIELDS + UPDATE_SECRET_FIELDS + INTERNAL_SECRET_FIELDS
-                     + LEGACY_SECRET_FIELDS + (MCP_AUTHORIZATION_FIELD,))
+                     + LEGACY_SECRET_FIELDS + (MCP_AUTHORIZATION_FIELD, DINGTALK_DESTINATIONS_FIELD))
 
 
 class SecretStoreError(RuntimeError):

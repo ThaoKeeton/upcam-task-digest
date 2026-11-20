@@ -60,7 +60,12 @@ class ChatWorkerTests(unittest.TestCase):
         self.call('chat_reset')
         self.assertEqual(self.call('chat_send', {'draft_id': first['draft_id'], 'request_id': str(uuid.uuid4())})['state'], 'not_sent')
         second = self.call('chat_turn', {'message': '查询'})
-        secrets = self.service.secret_store.load(); secrets['dingtalk_signing_secret'] = 'changed-synthetic-secret'
+        secrets = self.service.secret_store.load()
+        secrets['dingtalk_signing_secret'] = 'changed-synthetic-secret'
+        stored = json.loads(secrets['dingtalk_destinations'])
+        for profile in stored['profiles']:
+            profile['secret'] = 'changed-synthetic-secret'
+        secrets['dingtalk_destinations'] = json.dumps(stored, ensure_ascii=False)
         self.service.secret_store.save(secrets)
         self.assertEqual(self.call('chat_send', {'draft_id': second['draft_id'], 'request_id': str(uuid.uuid4())})['state'], 'not_sent')
         self.assertEqual(self.sends, [])
