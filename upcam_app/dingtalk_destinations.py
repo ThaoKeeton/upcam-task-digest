@@ -108,7 +108,11 @@ def ensure(settings: dict, secrets: dict) -> bool:
         webhook = secrets.get("dingtalk_webhook", "")
         secret = secrets.get("dingtalk_signing_secret", "")
         if webhook or secret:
-            identity = uuid.uuid4().hex
+            # Reuse a destination id already stored with this legacy pair. A new
+            # worker must not mint another id and change the authorization binding.
+            identity = settings.get("dingtalk_destination_id") or ""
+            if not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{32}", identity):
+                identity = uuid.uuid4().hex
             profiles = [{"id": identity, "name": _LEGACY_NAME, "role": "unspecified",
                          "webhook": webhook if isinstance(webhook, str) else "",
                          "secret": secret if isinstance(secret, str) else ""}]

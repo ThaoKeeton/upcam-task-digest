@@ -885,6 +885,28 @@ class PluginWorkerTests(unittest.TestCase):
             self.assertNotIn(value, serialized)
         self.assertNotIn("synthetic-only", serialized)
 
+    def test_synthetic_worker_restart_keeps_the_authorization_fingerprint(self):
+        directory = self.root / "synthetic-restart"
+        first = self.plugin(directory, synthetic=True)
+        initialized = self.ready(first)
+        first.dispatch({"op": "probe_project", "payload": WINDOW})
+        saved = first.dispatch({"op": "save", "payload": {
+            "settings": initialized["settings"], "verification_window": WINDOW}})
+        first.dispatch({"op": "refresh_models", "payload": {}})
+        first.dispatch({"op": "save", "payload": {
+            "settings": dict(saved["settings"], auto_send_enabled=True)}})
+        proof = self.authorization(first)
+        identity = SettingsStore(directory / "settings.json").load()["dingtalk_destination_id"]
+        self.assertRegex(identity, r"^[0-9a-f]{32}$")
+        restarted = self.plugin(directory, synthetic=True)
+        self.ready(restarted)
+        self.assertEqual(self.authorization(restarted)["authorization_fingerprint"],
+                         proof["authorization_fingerprint"])
+        self.assertEqual(SettingsStore(directory / "settings.json").load()["dingtalk_destination_id"], identity)
+        marker = json.loads((directory / ".plugin-synthetic.json").read_text(encoding="utf-8"))
+        self.assertEqual(set(marker) - {"format", "delivery_ledger_id"}, set())
+        self.assertNotIn("synthetic-only", (directory / ".plugin-synthetic.json").read_text(encoding="utf-8"))
+
     def test_auto_authorization_is_stable_across_checks_and_worker_restarts(self):
         plugin, service, directory = self.authorized_fixture()
         first = self.authorization(plugin)

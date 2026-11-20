@@ -153,6 +153,22 @@ class DingTalkDestinationTests(unittest.TestCase):
         self.assertNotIn("Settings =", method)
         self.assertNotIn("Dirty", method)
 
+    def test_missing_blob_reuses_the_saved_destination_id(self):
+        from upcam_app.dingtalk_destinations import ensure
+        kept = "ab" * 16
+        settings = {"dingtalk_destination_id": kept}
+        secrets = {"dingtalk_webhook": TEST_HOOK, "dingtalk_signing_secret": TEST_SECRET}
+        self.assertTrue(ensure(settings, secrets))
+        self.assertEqual(settings["dingtalk_destination_id"], kept)
+        stored = json.loads(secrets["dingtalk_destinations"])
+        self.assertEqual(stored["profiles"][0]["id"], kept)
+        self.assertEqual(secrets["dingtalk_webhook"], TEST_HOOK)
+        self.assertEqual(secrets["dingtalk_signing_secret"], TEST_SECRET)
+        restarted = {"dingtalk_webhook": TEST_HOOK, "dingtalk_signing_secret": TEST_SECRET}
+        ensure(settings, restarted)
+        self.assertEqual(settings["dingtalk_destination_id"], kept)
+        self.assertEqual(json.loads(restarted["dingtalk_destinations"])["profiles"][0]["id"], kept)
+
 
 if __name__ == "__main__":
     unittest.main()
