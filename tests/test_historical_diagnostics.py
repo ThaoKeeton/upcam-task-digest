@@ -4,6 +4,7 @@ import json
 import unittest
 
 from automated_digest import diagnose_automatic_source
+from report_contract import updated_selection
 from upcam_app.detailed_diagnostic import build_detailed_snapshot
 import test_historical_pipeline as fixtures
 
@@ -76,6 +77,19 @@ class HistoricalDiagnosticTests(unittest.TestCase):
         self.assertTrue(diagnostic["ok"])
         self.assertIn("当前项目范围内 1 个可读任务", diagnostic["message"])
         self.assertIn("1 个任务有窗口内动态", diagnostic["message"])
+        self.assertIn("不代表已删除、已不可见任务", diagnostic["message"])
+        self.assertNotIn("完整采集", diagnostic["message"])
+
+    def test_candidate_success_message_discloses_unadvanced_updated_limit(self):
+        collection = self.sample.collection(self.sample.event("create"))
+        collection["selection"] = updated_selection(fixtures.DAY)
+        diagnostic = self.diagnose(collection)
+        self.assertTrue(diagnostic["ok"])
+        self.assertIn("读取 1 个候选任务", diagnostic["message"])
+        self.assertIn("1 个任务有窗口内动态", diagnostic["message"])
+        self.assertIn("未推进更新时间的旧任务动态可能漏采", diagnostic["message"])
+        self.assertIn("详细诊断导出", diagnostic["message"])
+        self.assertNotIn("扫描当前项目范围内 1 个可读任务", diagnostic["message"])
         self.assertIn("不代表已删除、已不可见任务", diagnostic["message"])
         self.assertNotIn("完整采集", diagnostic["message"])
 

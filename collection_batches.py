@@ -16,9 +16,10 @@ import math
 import time
 import uuid
 
-from report_contract import task_updated_timestamp
+from collection_progress import report_collection
+from report_contract import task_is_candidate, task_updated_timestamp
 from teambition_readonly import (BatchBudgetExceeded, Client, CollectionError,
-                                identifier, record_id, validate_binding)
+                                identifier, record_id, records_equal, validate_binding)
 
 
 def _json_bytes(value):
@@ -151,7 +152,7 @@ class SessionBudget:
         if self.counters[key] > maximum:
             raise CollectionError(f"Collection session {label} budget exhausted")
 
-    def plan_request(self, params, *, detail=False):
+    def plan_request(self, params, *, detail=False, minimum_bytes=0, minimum_records=0, preferred_bytes=0):
         """Reserve a bounded response before an attempt can leave the process.
 
         An unknown interrupted read retains these charges. Complete decoded
@@ -162,6 +163,16 @@ class SessionBudget:
             raise CollectionError("Collection session request budget exhausted")
         remaining_rows = self.policy.max_records - self.counters["records"]
         remaining_bytes = self.policy.max_response_bytes - self.counters["response_bytes"]
+        if type(minimum_bytes) is not int or minimum_bytes < 0:
+            raise CollectionError("Invalid response byte reservation")
+        if type(minimum_records) is not int or minimum_records < 0:
+            raise CollectionError("Invalid response record reservation")
+        if type(preferred_bytes) is not int or preferred_bytes < 0:
+            raise CollectionError("Invalid response byte reservation")
+        if remaining_bytes < minimum_bytes:
+            raise CollectionError("Collection session response byte budget exhausted")
+        if remaining_rows < minimum_records:
+            raise CollectionError("Collection session record budget exhausted")
         if remaining_rows <= 0:
             raise CollectionError("Collection session record budget exhausted")
         if remaining_bytes <= 1:
@@ -173,9 +184,13 @@ class SessionBudget:
         reserved_rows = min(requested_rows, remaining_rows)
         if not detail:
             effective_params["pageSize"] = reserved_rows
-        reserved_bytes = min(8 * 1024 * 1024 + 1, remaining_bytes)
+        reserved_bytes = min(8 * 1024 * 1024 + 1, remaining_bytes,
+                             preferred_bytes if preferred_bytes else 8 * 1024 * 1024 + 1)
         return {"params": effective_params, "records": reserved_rows,
                 "response_bytes": reserved_bytes, "body_limit": reserved_bytes - 1}
+
+    def remaining_seconds(self):
+        return self.policy.max_seconds - self.age - (self.clock() - self.started)
 
     def before_request(self, reservation):
         self.check_time()
@@ -202,6 +217,17 @@ class SessionBudget:
             raise CollectionError("Collection session record budget exhausted")
         if settled["response_bytes"] > self.policy.max_response_bytes:
             raise CollectionError("Collection session response byte budget exhausted")
+
+    def cancel_unsent(self, reservation):
+        """Release a reservation only when dispatch is known not to have occurred."""
+        settled = dict(self.counters)
+        settled['requests'] -= 1
+        settled['records'] -= reservation['records']
+        settled['response_bytes'] -= reservation['response_bytes']
+        if min(settled['requests'], settled['records'], settled['response_bytes']) < 0:
+            raise CollectionError('Invalid collection checkpoint counters')
+        self.save(settled)
+        self.counters = settled
 
     def add_response_bytes(self, amount):
         self._add("response_bytes", amount, self.policy.max_response_bytes, "response byte")
@@ -248,9 +274,26 @@ class _Coordinator:
         self.worker, self.worker_tasks, self.budget = None, 0, None
         self.candidates, self.completed = {}, {}
         self.candidate_bytes, self.record_bytes = 0, 0
+        self.project_tasks_listed = 0
         self.resumed_ids = set()
         self.initial_resumed = False
         self.credentials = None
+        self.request_gate = None
+        if client.concurrent_tasks > 1 or client.cancel_event is not None:
+            from collection_concurrency import RequestGate
+            self.request_gate = RequestGate(interval=client.interval, clock=client.clock,
+                                            sleep=client.sleep, cancel_event=client.cancel_event)
+            not_before = getattr(client, '_next_collection_request', 0.0)
+            if client.last_request is not None:
+                not_before = max(not_before, client.last_request + client.interval)
+            self.request_gate.defer(max(0.0, not_before - client.clock()))
+
+    def _progress(self, phase, *, total=None):
+        counters = self.budget.counters if self.budget is not None else {}
+        report_collection(phase, completed=len(self.completed),
+                          total=len(self.candidates) if total is None else total,
+                          requests=counters.get("requests", 0),
+                          batches=counters.get("batches", 0), passes=counters.get("passes", 0))
 
     def _store(self, action, *args, **kwargs):
         try:
@@ -260,16 +303,15 @@ class _Coordinator:
 
     def _start(self):
         try:
-            pair = self.client.credentials()
-            if (not isinstance(pair, (tuple, list)) or len(pair) != 2
-                    or any(not isinstance(item, str) or not item for item in pair)):
+            token = self.client.credentials()
+            if not isinstance(token, str) or not token:
                 raise ValueError
-            self.credentials = tuple(pair)
+            self.credentials = token
         except Exception:
             raise CollectionError("Missing or invalid collection credentials") from None
         batch = {key: getattr(self.client, key) for key in
                  ("max_tasks", "max_requests", "max_records", "max_response_bytes",
-                  "max_seconds", "max_pages", "attempts", "interval")}
+                  "max_seconds", "max_pages", "attempts", "interval", "concurrent_tasks")}
         policy = asdict(self.policy)
         policy.update(max_project_tasks=self.max_tasks, batch=batch)
         context = {"policy": policy, "tenant_id": self.client.tenant_id,
@@ -302,6 +344,10 @@ class _Coordinator:
         self.worker = Client(self.client.tenant_id, transport=self.client.transport,
                              sleep=self.client.sleep, clock=self.client.clock,
                              credentials=lambda: self.credentials, shared_budget=self.budget,
+                             request_gate=self.request_gate,
+                             mcp_adapter_factory=self.client.mcp_adapter_factory,
+                             mcp_envelope_validator=self.client.mcp_envelope_validator,
+                             archive_contract_validator=self.client.archive_contract_validator,
                              **limits)
         self.worker.last_request = last_request
         self.worker_tasks = 0
@@ -330,7 +376,7 @@ class _Coordinator:
         for activity in record["activities"]:
             event_id = record_id(activity, task_fallback=False)
             validate_binding(activity, task_id)
-            if event_id in events and events[event_id] != activity:
+            if event_id in events and not records_equal(events[event_id], activity):
                 raise CollectionError("Conflicting checkpoint activity identity")
             events[event_id] = activity
 
@@ -338,21 +384,38 @@ class _Coordinator:
         return self.candidate_bytes + self.record_bytes
 
     def _scan(self):
-        params = {"pageSize": self.page_size, "includeArchived": str(self.include_archived).lower()}
+        phase = "reconciling" if self.budget is not None and self.budget.counters.get("passes", 0) else "listing"
+        self._progress(phase)
+        params = {"projectId": self.project_id, "pageSize": self.page_size,
+                  "includeArchived": self.include_archived}
+        if self.selection.get("q") is not None:
+            params["q"] = self.selection["q"]
         # Restart an interrupted local scan at its first page, with bounded retry.
         for attempt in range(2):
             if self.worker is None:
                 self._new_batch()
             old_pages = self.worker.max_pages
             self.worker.max_pages = 100
-            candidates, used = {}, 2
+            candidates, used, listed, listing_bytes = {}, 2, 0, 2
             try:
-                for row in self.worker.pages(f"/api/v3/project/{self.project_id}/task/query", params,
+                for row in self.worker.pages("project.tasks", params,
                                              max_items=self.max_tasks):
                     task_id = self._validate_task(row)
+                    listed += 1
+                    # pages() retains its duplicate-detection rows until the
+                    # iterator ends, including rows excluded from history reads.
+                    listing_bytes += _size(row) + (1 if listed > 1 else 0)
+                    self.budget.retained(self._live_bytes() + listing_bytes)
+                    if not task_is_candidate(row["updated"], self.selection):
+                        if self.selection.get("q") is not None:
+                            raise CollectionError("Server returned task outside requested updated candidate range")
+                        continue
                     used += _size(row) + (1 if candidates else 0)
-                    self.budget.retained(self._live_bytes() + used)
                     candidates[task_id] = row
+                    if len(candidates) % self.page_size == 0:
+                        self._progress(phase, total=len(candidates))
+                self._progress(phase, total=len(candidates))
+                self.project_tasks_listed = listed
                 return candidates, used
             except BatchBudgetExceeded:
                 if attempt:
@@ -367,12 +430,13 @@ class _Coordinator:
         self.candidates, self.candidate_bytes = candidates, candidate_bytes
         self.completed = {key: {"candidate": candidates[key], "record": value["record"]}
                           for key, value in self.completed.items()
-                          if key in candidates and value["candidate"] == candidates[key]}
+                          if key in candidates and records_equal(value["candidate"], candidates[key])}
         self.record_bytes = sum(_size(value["record"]) for value in self.completed.values())
         self.budget.retained(self._live_bytes())
         self._store("prune", list(candidates))
 
     def _load_completed(self):
+        self._progress("loading_cache")
         for task_id, candidate in self.candidates.items():
             if task_id in self.completed:
                 continue
@@ -384,15 +448,17 @@ class _Coordinator:
                     or self._validate_task(value["candidate"]) != task_id):
                 raise CollectionError("Invalid complete task checkpoint")
             self._validate_record(task_id, value["candidate"], value["record"])
-            if value["candidate"] == candidate:
+            if records_equal(value["candidate"], candidate):
                 self.completed[task_id] = {"candidate": candidate, "record": value["record"]}
                 self.record_bytes += _size(value["record"])
                 if self.initial_resumed:
                     self.resumed_ids.add(task_id)
             self.budget.retained(self._live_bytes())
+            self._progress("loading_cache")
 
     def _read_task(self, task_id, candidate):
-        detail = self.worker.get("/api/v3/task/query", {"taskId": task_id}).get("result")
+        detail = self.worker.get("task.details", {"taskId": task_id, "projectId": self.project_id,
+                                                   "includeArchived": self.include_archived}).get("result")
         if isinstance(detail, list) and len(detail) == 1:
             detail = detail[0]
         if self._validate_task(detail, require_scope=False) != task_id:
@@ -403,8 +469,8 @@ class _Coordinator:
         record = {"task": detail, "activities": []}
         used = _size(record)
         self.budget.retained(self._live_bytes() + used)
-        for activity in self.worker.pages(f"/api/v3/task/{task_id}/activity/list",
-                                          {"pageSize": self.page_size}):
+        for activity in self.worker.pages("task.activities", {"taskId": task_id, "projectId": self.project_id,
+                                                                "pageSize": self.page_size}):
             validate_binding(activity, task_id)
             used += _size(activity) + (1 if record["activities"] else 0)
             self.budget.retained(self._live_bytes() + used)
@@ -421,8 +487,17 @@ class _Coordinator:
         self._store("save_task", task_id, candidate, record)
         self.completed[task_id] = {"candidate": candidate, "record": record}
         self.record_bytes += used
+        self._progress("collecting")
 
     def _collect_tasks(self):
+        if self.client.concurrent_tasks > 1:
+            from collection_concurrency import collect_tasks
+            self._progress("collecting")
+            return collect_tasks(self)
+        return self._collect_tasks_serial()
+
+    def _collect_tasks_serial(self):
+        self._progress("collecting")
         for task_id, candidate in self.candidates.items():
             if task_id in self.completed:
                 continue
@@ -444,6 +519,7 @@ class _Coordinator:
 
     def run(self):
         try:
+            self._progress("starting")
             self._start()
             candidates, used = self._scan()
             while True:
@@ -452,15 +528,21 @@ class _Coordinator:
                 self._collect_tasks()
                 self.budget.before_closing_scan()
                 closing, closing_bytes = self._scan()
-                if {key: value["candidate"] for key, value in self.completed.items()} == closing:
+                if self.request_gate is not None:
+                    self.request_gate.check_cancelled()
+                if records_equal({key: value["candidate"] for key, value in self.completed.items()}, closing):
+                    from mcp_collection_adapter import metadata_from_tasks
+                    records = [self.completed[key]["record"] for key in closing]
+                    metadata = metadata_from_tasks(list(closing.values()) + [r['task'] for r in records])
                     output = {"tenant_id": self.client.tenant_id, "project_id": self.project_id,
                               "include_archived": self.include_archived, "selection": self.selection,
                               "batch_id": str(uuid.uuid4()),
                               "collected_at": datetime.now(timezone.utc).isoformat(),
                               "pagination_complete": True,
-                              "records": [self.completed[key]["record"] for key in closing],
+                              "records": records, "metadata": metadata,
                               "collection_stats": dict(self.budget.counters,
                                                        tasks_scanned=len(closing),
+                                                       project_tasks_listed=self.project_tasks_listed,
                                                        resumed_tasks=len(self.resumed_ids))}
                     self._store("clear")
                     return output
@@ -474,6 +556,10 @@ class _Coordinator:
                 self.client.response_bytes = self.budget.counters["response_bytes"]
             if self.worker is not None:
                 self.client.last_request = self.worker.last_request
+            if self.request_gate is not None:
+                self.client._next_collection_request = self.request_gate.next_allowed
+                if self.request_gate.last_admission is not None:
+                    self.client.last_request = self.request_gate.last_admission
             self._store("close")
 
 

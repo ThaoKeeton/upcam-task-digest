@@ -3,6 +3,7 @@
 import hashlib
 import json
 import unittest
+from copy import deepcopy
 from unittest.mock import patch
 
 from report_contract import updated_selection
@@ -107,6 +108,79 @@ class DiagnosticExportBudgetTests(unittest.TestCase):
         self.assertIn("event_detail_byte_budget", report["detail_truncation_reasons"])
         self.assertTrue(report["protocol_catalog"]["complete"])
         self.assertEqual(self.group(report, "future.synthetic.late")["event_count"], 2)
+
+    def test_window_and_unknown_time_events_survive_a_thousand_old_details(self):
+        task_id = "synthetic-task"
+        events = [self.event(task_id, f"old-{i}", createTime="2020-01-01T00:00:00Z")
+                  for i in range(1000)]
+        events.extend([
+            self.event(task_id, "window", content={"comment": "PRIVATE_WINDOW_BODY"}),
+            self.event(task_id, "unknown-time", createTime=None),
+        ])
+        records = [self.record(task_id, events)]
+        original = deepcopy(records)
+
+        report = self.export(records)
+
+        details = report["tasks"][0]["activities"]
+        self.assertEqual([item["event_id"] for item in details[:2]],
+                         ["synthetic-event-window", "synthetic-event-unknown-time"])
+        self.assertEqual([item["in_report_window"] for item in details[:2]], [True, None])
+        self.assertEqual(len(details), 1000)
+        self.assertEqual(report["activity_count"], 1002)
+        self.assertEqual(report["truncated_activity_count"], 2)
+        self.assertEqual(report["tasks"][0]["truncated_activity_count"], 2)
+        self.assertIn("activity_count_limit", report["detail_truncation_reasons"])
+        self.assertTrue(report["pagination_complete"])
+        self.assertEqual(records, original)
+        self.assertNotIn("PRIVATE_WINDOW_BODY", self.encoded(report).decode())
+
+    def test_old_detail_bytes_cannot_displace_a_later_window_event(self):
+        task_id = "synthetic-task"
+        records = [self.record(task_id, [
+            self.event(task_id, "old-large", "comment", {"comment": "PRIVATE_OLD_BODY<br>" * 64},
+                       createTime="2020-01-01T00:00:00Z"),
+            self.event(task_id, "window"),
+        ])]
+        with patch.object(exporter, "_MAX_EVENT_DETAIL_BYTES", 4096):
+            report = self.export(records)
+
+        self.assertEqual([item["event_id"] for item in report["tasks"][0]["activities"]],
+                         ["synthetic-event-window"])
+        self.assertEqual(report["truncated_activity_count"], 1)
+        self.assertLessEqual(report["export_limits"]["charged_event_detail_bytes"], 4096)
+        self.assertIn("event_detail_byte_budget", report["detail_truncation_reasons"])
+        self.assertNotIn("PRIVATE_OLD_BODY", self.encoded(report).decode())
+
+    def test_old_details_cannot_take_global_budget_before_other_tasks_window_events(self):
+        first_id, second_id = "synthetic-first", "synthetic-second"
+        first_events = [self.event(first_id, "first-window")]
+        first_events.extend(self.event(first_id, f"old-{i}", createTime="2020-01-01T00:00:00Z")
+                            for i in range(100))
+        records = [self.record(first_id, first_events),
+                   self.record(second_id, [self.event(second_id, "second-window")])]
+        with patch.object(exporter, "_MAX_EVENT_DETAIL_BYTES", 6000):
+            report = self.export(records)
+
+        self.assertEqual([item["event_id"] for item in report["tasks"][1]["activities"]],
+                         ["synthetic-event-second-window"])
+        self.assertEqual(report["tasks"][1]["truncated_activity_count"], 0)
+        self.assertEqual(report["truncated_activity_count"],
+                         102 - sum(len(row["activities"]) for row in report["tasks"]))
+        self.assertLessEqual(report["export_limits"]["charged_event_detail_bytes"], 6000)
+
+    def test_missing_window_keeps_source_order_without_inferring_relevance(self):
+        task_id = "synthetic-task"
+        records = [self.record(task_id, [
+            self.event(task_id, "old", createTime="2020-01-01T00:00:00Z"),
+            self.event(task_id, "later"),
+            self.event(task_id, "unknown-time", createTime=None),
+        ])]
+        report = self.export(records, day=None)
+        self.assertEqual([item["event_id"] for item in report["tasks"][0]["activities"]],
+                         ["synthetic-event-old", "synthetic-event-later", "synthetic-event-unknown-time"])
+        self.assertTrue(all(item["in_report_window"] is None
+                            for item in report["tasks"][0]["activities"]))
 
     def test_task_metadata_budget_can_omit_every_task_without_losing_catalog(self):
         records = [self.record(f"synthetic-task-{i}", [

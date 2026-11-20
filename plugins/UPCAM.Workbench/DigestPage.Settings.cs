@@ -311,6 +311,16 @@ internal sealed partial class DigestPage
         {
             if (!double.IsNaN(limit.Value)) _state.Edit(profile, data => data.Set("max_tasks_per_run", (int)limit.Value));
         };
+        var concurrent = Identify(new NumberBox { Header = "并行读取任务数（1–4）", Minimum = 1, Maximum = 4,
+            Value = profile.Data.Number("max_concurrent_tasks", 4), IsEnabled = _state.Ready,
+            SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact }, "task-concurrency", "Concurrent task readers");
+        concurrent.ValueChanged += (_, _) =>
+        {
+            if (double.IsNaN(concurrent.Value)) return;
+            int count = (int)Math.Clamp(concurrent.Value, 1, 4);
+            _state.Edit(profile, data => data.Set("max_concurrent_tasks", count));
+            if (concurrent.Value != count) concurrent.Value = count;
+        };
         FrameworkElement Slot(string name, string prefix)
         {
             var panel = Column(Paragraph(name, 18),
@@ -341,7 +351,8 @@ internal sealed partial class DigestPage
             Paragraph("恢复还要求已有运行意图、原目录和业务设置 / 凭据指纹一致。明确停止会清除运行意图；保存关闭自动发送、清除凭据或切换目录还会撤销恢复偏好及旧绑定。"),
             Paragraph("主机安全凭据服务只保存插件生成的 32 字节恢复校验密钥。Teambition、OpenAI 和钉钉密钥仍只使用原数据目录的 Windows 用户 DPAPI，不复制、迁移或双写，独立版回退继续使用原数据。"),
             Paragraph("Only existing core recovery rules apply: at most the last 24 hours, during the saved authorization period, with no existing local run record. An uncertain or confirmed delivery is not automatically retried."),
-            Slot("Morning digest", "morning"), Slot("Afternoon digest", "afternoon"), limit,
+            Slot("Morning digest", "morning"), Slot("Afternoon digest", "afternoon"), limit, concurrent,
+            Paragraph("默认并行读取 4 个任务；所有线程共用至少 0.25 秒的请求间隔，遇到 429 会共同退避。可降到 1；不提高程序原有请求速率上限，实际速度取决于候选数量与接口延迟。"),
             Paragraph("A batch defaults to 300 tasks; this is not a project limit. A complete run supports up to 10,000 currently readable tasks, 50,000 requests, 1,000,000 returned records, 512 MiB responses, 128 MiB retained data and two hours including checkpoint age. Up to three source verification rounds run within these budgets. Exceeding a budget blocks summary and sending rather than truncating."),
             Paragraph("Completed task/activity pages can be saved as a short-lived DPAPI progress checkpoint. Cancellation retains incomplete progress for up to two hours; resumption re-lists tasks and refreshes changes. This is not a historic snapshot."),
             ActionButton("Clear incomplete collection progress", "clear-collection-progress", async () =>

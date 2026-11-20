@@ -4,19 +4,17 @@ from datetime import datetime, timedelta
 import hashlib
 import importlib
 import importlib.util
-import io
-import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
-from urllib.parse import parse_qs, urlsplit
 
 from report_contract import SHANGHAI, updated_selection
 from teambition_readonly import CollectionError
 from upcam_app.collection_checkpoint import DpapiCollectionCheckpoint
 from upcam_app.config import DEFAULT_SETTINGS
+from upcam_app.secrets import teambition_mcp_identity, MCP_AUTHORIZATION_FIELD
 from upcam_app.smoke_data import make_smoke_service, SyntheticClient
 from upcam_app.worker_api import WorkerApiError, WorkerService
 from upcam_app.workflow import DigestWorkflow, WorkflowBlocked
@@ -26,9 +24,10 @@ SUCCESS = "未完成的采集进度已清除；配置、凭据、模型缓存、
 BUSY = "采集正在进行，暂不能清除进度；请等待完成或退出应用后重试。"
 FAILURE = "本地采集进度无法安全清除；请退出应用后重试。"
 EXPLICIT_CREDENTIALS = {
-    "teambition_app_id": "fictional-desktop-app",
-    "teambition_app_secret": "fictional-desktop-secret",
+    "teambition_mcp_token": "fictional-desktop-token",
 }
+
+EXPLICIT_CREDENTIALS[MCP_AUTHORIZATION_FIELD] = teambition_mcp_identity(EXPLICIT_CREDENTIALS)
 
 
 def synthetic_checkpoint(path):
@@ -86,7 +85,7 @@ class CollectionRuntimeTests(unittest.TestCase):
             "tenant_id": "demo-org", "project_id": "demo-project",
             "include_archived": False, "selection": updated_selection("2026-01-02"),
             "policy": {"synthetic": True},
-            "credential_identity": hashlib.sha256(b"fictional-credential-pair").hexdigest(),
+            "credential_identity": hashlib.sha256(b"fictional-token").hexdigest(),
         }
         checkpoint.start(context, now=100)
         candidate = {"id": "fictional-task", "projectId": "demo-project", "isArchived": False,
@@ -114,11 +113,12 @@ class CollectionRuntimeTests(unittest.TestCase):
             client = runtime.make_collection_client(
                 settings, credentials, self.directory, client_factory=RecordingClient,
                 checkpoint_factory=checkpoint_factory)
-        credentials["teambition_app_secret"] = "fictional-rotated-secret"
+        credentials["teambition_mcp_token"] = "fictional-rotated-secret"
         self.assertEqual(client.tenant_id, "demo-org")
         self.assertEqual(client.kwargs["credentials"](),
-                         ("fictional-desktop-app", "fictional-desktop-secret"))
+                         "fictional-desktop-token")
         self.assertTrue(client.kwargs["batch_mode"])
+        self.assertEqual(client.kwargs["concurrent_tasks"], 4)
         self.assertEqual(client.kwargs["max_tasks"], 123)
         self.assertEqual(client.kwargs["max_project_tasks"], 10000)
         self.assertIs(client.kwargs["checkpoint"], checkpoints[0])
@@ -139,7 +139,7 @@ class CollectionRuntimeTests(unittest.TestCase):
             settings, EXPLICIT_CREDENTIALS, self.directory,
             client_factory=NarrowClient, checkpoint_factory=forbidden_checkpoint)
         self.assertEqual(client.credentials(),
-                         ("fictional-desktop-app", "fictional-desktop-secret"))
+                         "fictional-desktop-token")
         self.assertEqual(list(self.directory.iterdir()), [])
 
     def test_constructor_failure_closes_checkpoint_and_hides_exception_content(self):
@@ -183,36 +183,29 @@ class CollectionRuntimeTests(unittest.TestCase):
         tasks = [{"id": name, "projectId": "demo-project", "isArchived": False,
                   "updated": "2026-01-02T01:00:00Z"}
                  for name in ("fictional-task-a", "fictional-task-b")]
-        details = []
-        interrupted = []
+        from test_batched_collection import (FakeClock, ProjectTransport,
+                                             fictional_envelope, fictional_archive)
+        clock = FakeClock()
+        transport = ProjectTransport(tasks, clock, histories={row["id"]: [[]] for row in tasks})
+        transport.interrupt_on_detail = "fictional-task-b"
+        details = transport.detail_ids
+        settings = dict(DEFAULT_SETTINGS, tenant_id="demo-org", project_id="demo-project", max_concurrent_tasks=1)
 
-        class Response(io.BytesIO):
-            status = 200
-
-        def transport(request, timeout):
-            url = urlsplit(request.full_url)
-            if url.path == "/api/v3/project/demo-project/task/query":
-                result = {"code": 200, "result": tasks, "nextPageToken": ""}
-            elif url.path == "/api/v3/task/query":
-                task_id = parse_qs(url.query)["taskId"][0]
-                details.append(task_id)
-                if task_id == "fictional-task-b" and not interrupted:
-                    interrupted.append(True)
-                    raise CollectionError("Synthetic interrupted collection")
-                result = {"code": 200, "result": next(task for task in tasks if task["id"] == task_id)}
-            else:
-                result = {"code": 200, "result": [], "nextPageToken": ""}
-            return Response(json.dumps(result).encode("utf-8"))
-
-        settings = dict(DEFAULT_SETTINGS, tenant_id="demo-org", project_id="demo-project")
-        with patch("teambition_readonly.build_opener", return_value=SimpleNamespace(open=transport)):
-            first = runtime.make_collection_client(settings, EXPLICIT_CREDENTIALS, self.directory,
+        def client():
+            value = runtime.make_collection_client(settings, EXPLICIT_CREDENTIALS, self.directory,
                                                    checkpoint_factory=synthetic_checkpoint)
+            # Test-only business/archive contracts. The real service remains unverified.
+            value.mcp_envelope_validator = fictional_envelope
+            value.archive_contract_validator = fictional_archive
+            value.clock, value.sleep = clock, clock.sleep
+            return value
+
+        with patch("teambition_mcp.build_opener", return_value=SimpleNamespace(open=transport)):
+            first = client()
             with self.assertRaises(CollectionError):
                 first.collect("demo-project", day="2026-01-02")
             self.assertEqual(details, ["fictional-task-a", "fictional-task-b"])
-            resumed = runtime.make_collection_client(settings, EXPLICIT_CREDENTIALS, self.directory,
-                                                     checkpoint_factory=synthetic_checkpoint)
+            resumed = client()
             source = resumed.collect("demo-project", day="2026-01-02")
         self.assertEqual(details, ["fictional-task-a", "fictional-task-b", "fictional-task-b"])
         self.assertTrue(source["pagination_complete"])
@@ -238,7 +231,7 @@ class CollectionRuntimeTests(unittest.TestCase):
         self.assertEqual(workflow_builder.call_count, 1)
         for call in (*worker_builder.call_args_list, *workflow_builder.call_args_list):
             self.assertEqual(call.args[0]["project_id"], "demo-project")
-            self.assertEqual(call.args[1]["teambition_app_id"], "synthetic-app-id")
+            self.assertEqual(call.args[1]["teambition_mcp_token"], "synthetic-mcp-token")
             self.assertEqual(call.args[2], self.directory)
             self.assertIs(call.kwargs["checkpoint_factory"], synthetic_checkpoint)
 
@@ -304,7 +297,7 @@ class CollectionRuntimeTests(unittest.TestCase):
             info = reopened.start({"tenant_id": "demo-org", "project_id": "demo-project",
                                    "include_archived": False, "selection": updated_selection("2026-01-02"),
                                    "policy": {"synthetic": True},
-                                   "credential_identity": hashlib.sha256(b"fictional-credential-pair").hexdigest()}, now=100)
+                                   "credential_identity": hashlib.sha256(b"fictional-token").hexdigest()}, now=100)
             self.assertFalse(info["resumed"])
             self.assertIsNone(reopened.load_task("fictional-task"))
         finally:

@@ -22,6 +22,7 @@ class ConfigTests(unittest.TestCase):
                 settings = validate_settings(dict(DEFAULT_SETTINGS, max_tasks_per_run=batch_size))
                 self.assertEqual(collection_client_limits(settings), {
                     "max_tasks": batch_size,
+                    "concurrent_tasks": 4,
                     "max_requests": requests,
                     "max_pages": 50,
                     "max_records": 50000,

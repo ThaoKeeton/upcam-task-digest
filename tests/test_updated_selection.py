@@ -2,7 +2,6 @@
 import copy
 import json
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 import unittest
 
 from digest_pipeline import build_digest
@@ -11,7 +10,7 @@ from report_contract import SHANGHAI
 from upcam_app.config import DEFAULT_SETTINGS, scheduled_window
 from datetime import date, timedelta
 from teambition_readonly import CollectionError
-from test_collection import FakeTransport, client, page
+from test_collection import FakeTransport, arguments, tool_name, client, page
 
 FIXTURES=Path(__file__).parent/'fixtures'
 
@@ -28,7 +27,7 @@ class UpdatedSelectionTests(unittest.TestCase):
         return FakeTransport(page([task]),{'code':200,'result':task},
                              page(activities),page([task]))
 
-    def test_five_small_pages_scan_every_task_and_repeat_all_closing_pages_without_q(self):
+    def test_five_candidate_pages_and_closing_pages_keep_the_same_lower_bound_q(self):
         tasks=[dict(self.task,id=f'fictional-task-{i}') for i in range(9)]
         pages=[page(tasks[i:i+2],f'next-{i+2}' if i+2<len(tasks) else '') for i in range(0,len(tasks),2)]
         closing_tasks=list(reversed(tasks))
@@ -42,22 +41,22 @@ class UpdatedSelectionTests(unittest.TestCase):
         self.assertEqual(result['selection'],updated_selection(self.day))
         self.assertEqual(result['selection']['mode'],'v3-project-activities-half-open')
         self.assertEqual(result['selection']['basis'],'activity-createTime')
-        self.assertEqual(result['selection']['candidate_scope'],'current-visible-project-tasks')
-        self.assertIsNone(result['selection']['q'])
+        self.assertEqual(result['selection']['candidate_scope'],'current-visible-project-tasks-updated-since')
+        self.assertEqual(result['selection']['q'], "updated >= '2026-01-02T00:00:00+08:00'")
         self.assertFalse(result['selection']['view_equivalent'])
         self.assertFalse(result['selection']['historical_event_coverage'])
         self.assertFalse(result['selection']['snapshot_guaranteed'])
         for phase,requests in (('next',t.requests[:5]),('closing',t.requests[-5:])):
             for i,req in enumerate(requests):
-                query=parse_qs(urlsplit(req.full_url).query)
-                self.assertNotIn('q',query)
-                self.assertEqual(query['pageSize'],['2'])
-                self.assertEqual(query['includeArchived'],['false'])
-                self.assertEqual(query.get('pageToken'),None if i==0 else [f'{phase}-{i*2}'])
+                query=arguments(req)
+                self.assertEqual(query['tql'], result['selection']['q'])
+                self.assertEqual(query['pageSize'],2)
+                self.assertEqual(query['includeArchived'],False)
+                self.assertEqual(query.get('pageToken'),None if i==0 else f'{phase}-{i*2}')
         self.assertEqual(len(t.requests),28)
-        self.assertTrue(all(req.method=='GET' for req in t.requests))
+        self.assertTrue(all(req.method=='POST' for req in t.requests))
 
-    def test_task_updated_is_validated_as_a_version_without_window_membership(self):
+    def test_full_project_audit_validates_versions_without_window_membership(self):
         accepted=['2026-01-02T00:00:00.000+08:00','2026-01-02T23:59:59.999+08:00',
                   '2026-01-01T16:00:00.000Z','2026-01-02T15:59:59.999Z',
                   '2026-01-01T23:59:59.999+08:00','2026-01-03T00:00:00.000+08:00',
@@ -67,7 +66,8 @@ class UpdatedSelectionTests(unittest.TestCase):
             with self.subTest(updated=updated):
                 task=dict(self.task,updated=updated)
                 t=self.transport(task)
-                self.assertEqual(len(client(t).collect('demo-project',day=self.day)['records']),1)
+                self.assertEqual(len(client(t).collect('demo-project',day=self.day,
+                                                      candidate_mode='full_project')['records']),1)
                 self.assertEqual(len(t.requests),4)
         rejected=['2026-01-02T00:00:00',None,'invalid',123,True]
         for updated in rejected:
@@ -98,23 +98,23 @@ class UpdatedSelectionTests(unittest.TestCase):
         self.assertEqual(result['records'],[])
         self.assertEqual(len(t.requests),2)
         for request in t.requests:
-            self.assertIn('/project/demo-project/task/query',request.full_url)
-            self.assertNotIn('q',parse_qs(urlsplit(request.full_url).query))
+            self.assertEqual(tool_name(request), 'teambition.project.task-query')
+            self.assertEqual(arguments(request)['tql'], updated_selection(self.day)['q'])
 
-    def test_project_scan_error_never_falls_back_to_updated_query(self):
+    def test_project_scan_error_never_falls_back_to_unfiltered_query(self):
         t=FakeTransport({'code':400,'errorMessage':'fictional project scan rejection'})
         with self.assertRaises(CollectionError):client(t).collect('demo-project',day=self.day)
         self.assertEqual(len(t.requests),1)
-        self.assertNotIn('q',parse_qs(urlsplit(t.requests[0].full_url).query))
+        self.assertEqual(arguments(t.requests[0])['tql'], updated_selection(self.day)['q'])
 
-    def test_budget_and_pagination_cycle_still_fail_closed(self):
-        for replies,kwargs in [([page([self.task],'next'),page([], 'next')],{}),
-                               ([page([self.task],'next'),page()],{'max_requests':1}),
+    def test_budget_and_unterminated_business_pagination_still_fail_closed(self):
+        for replies,kwargs in [([page([self.task],'same'),page([], 'same')],{'max_pages':2}),
+                               ([page([self.task],'next'),page()],{'max_requests':4}),
                                ([page([self.task,dict(self.task,id='second')])],{'max_tasks':1})]:
             t=FakeTransport(*replies)
             with self.assertRaises(CollectionError):client(t,**kwargs).collect('demo-project',day=self.day)
-            self.assertTrue(all('/project/' in req.full_url
-                                and 'q' not in parse_qs(urlsplit(req.full_url).query)
+            self.assertTrue(all(tool_name(req) == 'teambition.project.task-query'
+                                and arguments(req).get('tql') == updated_selection(self.day)['q']
                                 for req in t.requests))
 
     def test_task_changed_between_list_and_detail_aborts(self):
@@ -162,7 +162,8 @@ class UpdatedSelectionTests(unittest.TestCase):
                                'boundToObjectId':task['id'],'boundToObjectType':'task'}]):
             with self.subTest(history_empty=not activities):
                 t=self.transport(task,activities)
-                report=build_digest(client(t).collect('demo-project',day=self.day),self.config,self.day)
+                report=build_digest(client(t).collect('demo-project',day=self.day,
+                                                     candidate_mode='full_project'),self.config,self.day)
                 self.assertEqual(report['digest']['tasks'],[])
                 self.assertEqual(report['audit'],[])
                 self.assertEqual(report['summary_inputs'],[])
@@ -184,11 +185,10 @@ class UpdatedSelectionTests(unittest.TestCase):
             activity={'id':'fictional-undated-event','action':'create','createTime':when,
                       'boundToObjectId':self.task['id'],'boundToObjectType':'task'}
             with self.subTest(when=when):
-                collection=client(self.transport(self.task,[activity])).collect('demo-project',day=self.day)
-                report=build_digest(collection,self.config,self.day)
-                self.assertEqual(len(report['digest']['tasks']),1)
-                self.assertEqual(report['audit'][0]['undated_event_ids'],['fictional-undated-event'])
-                self.assertFalse(report['ready_to_send'])
+                transport = self.transport(self.task, [activity])
+                with self.assertRaises(CollectionError):
+                    client(transport).collect('demo-project', day=self.day)
+                self.assertEqual(len(transport.requests), 3)
 
     def test_fixed_day_and_page_size_validation_before_transport(self):
         for day,size in [(None,2),('20260102',2),('2026-01-02',0),('2026-01-02',101),('2026-01-02',True)]:
@@ -196,7 +196,7 @@ class UpdatedSelectionTests(unittest.TestCase):
             with self.assertRaises(CollectionError):client(t).collect('demo-project',day=day,page_size=size)
             self.assertEqual(t.requests,[])
 
-    def test_custom_half_open_window_filters_activities_without_task_updated_query(self):
+    def test_custom_half_open_window_filters_activities_with_lower_bound_candidate_query(self):
         window=('2026-01-01T16:50:00+08:00','2026-01-02T08:50:00+08:00')
         task=dict(self.task,updated='2026-01-05T07:00:00+08:00')
         events=[
@@ -209,7 +209,7 @@ class UpdatedSelectionTests(unittest.TestCase):
         collection=client(t).collect('demo-project',day=self.day,window=window)
         report=build_digest(collection,self.config,self.day,window=window)
         for request in (t.requests[0],t.requests[-1]):
-            self.assertNotIn('q',parse_qs(urlsplit(request.full_url).query))
+            self.assertEqual(arguments(request)['tql'], f"updated >= '{window[0]}'")
         self.assertEqual(collection['selection']['window_kind'],'custom')
         self.assertEqual(report['digest']['date'],self.day)
         self.assertEqual(report['audit'][0]['event_ids'],['fictional-at-start'])
@@ -251,7 +251,8 @@ class UpdatedSelectionTests(unittest.TestCase):
                                  ['synthetic-boundary-0', 'synthetic-boundary-1'])
                 self.assertEqual(report['scope']['end_exclusive'], expected_end)
                 for request in (t.requests[0],t.requests[-1]):
-                    self.assertNotIn('q',parse_qs(urlsplit(request.full_url).query))
+                    self.assertEqual(arguments(request)['tql'],
+                                     f"updated >= '{expected_start}'")
 
 
 if __name__=='__main__':unittest.main()

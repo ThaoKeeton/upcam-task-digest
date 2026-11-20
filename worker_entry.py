@@ -10,10 +10,10 @@ from upcam_app.worker_api import serve
 if __name__ == "__main__":
     sys.stdin.reconfigure(encoding="utf-8", errors="strict")
     sys.stdout.reconfigure(encoding="utf-8", errors="strict")
-    if sys.argv[1:] == ["--smoke-test"]:
+    if sys.argv[1:] in (["--smoke-test"], ["--smoke-test-slow-diagnostic"]):
         from upcam_app.smoke_data import make_smoke_service
         with TemporaryDirectory(prefix="upcam-winui-synthetic-") as directory:
-            serve(service=make_smoke_service(Path(directory)))
+            serve(service=make_smoke_service(Path(directory), slow_diagnostic=sys.argv[1:] == ["--smoke-test-slow-diagnostic"]))
     elif sys.argv[1:]:
         sys.exit(2)
     else:

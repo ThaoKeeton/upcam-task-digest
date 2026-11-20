@@ -7,10 +7,12 @@ internal sealed class DesktopState
 {
     public JsonObject Settings { get; private set; } = new();
     public JsonObject SecretPresence { get; private set; } = new();
+    public JsonObject DingTalkDestinations { get; private set; } = new();
     public JsonObject Efforts { get; set; } = new();
     public JsonArray Models { get; set; } = new();
     public JsonArray FastModels { get; set; } = new();
     public JsonArray History { get; set; } = new();
+    public JsonArray ProjectChoices { get; set; } = new();
     public Dictionary<string, string> SecretDrafts { get; } = new();
     internal static readonly string[] GeneralKeys = { "ui_language", "ui_theme", "tray_icon_enabled",
         "close_to_tray", "start_in_tray", "auto_check_updates", "start_with_windows" };
@@ -83,7 +85,7 @@ internal sealed class DesktopState
             InvalidateDiagnostic();
         }
         Dirty = true;
-        if (key is "owner_names" or "status_names" or "resolved_status_ids" or "max_tasks_per_run"
+        if (key is "owner_names" or "status_names" or "resolved_status_ids" or "max_tasks_per_run" or "max_concurrent_tasks"
             or "dingtalk_mention_mode" or "dingtalk_mentions")
             InvalidateDiagnostic();
         if (key is "tenant_id" or "project_id" or "include_archived") InvalidateScope();
@@ -101,7 +103,11 @@ internal sealed class DesktopState
     public void SetSecretDraft(string key, string value)
     {
         SecretDrafts[key] = value;
-        if (!string.IsNullOrEmpty(value) && (key is "teambition_app_id" or "teambition_app_secret")) InvalidateScope();
+        if (!string.IsNullOrEmpty(value) && key == "teambition_mcp_token")
+        {
+            ProjectChoices.Clear();
+            InvalidateScope();
+        }
     }
 
     private void InvalidateScope()
@@ -126,6 +132,18 @@ internal sealed class DesktopState
             StatusSuggestions[item.Key] = item.Value!.GetValue<string>();
     }
 
+    public void ApplyDingTalkSelection(JsonObject result)
+    {
+        if (result["settings"]?["dingtalk_destination_id"] is JsonValue destinationId)
+            Settings["dingtalk_destination_id"] = destinationId.DeepClone();
+        if (result["secret_presence"] is JsonObject presence)
+            SecretPresence = (JsonObject)presence.DeepClone();
+        if (result["dingtalk_destinations"] is JsonObject robots)
+            DingTalkDestinations = (JsonObject)robots.DeepClone();
+        SecretDrafts.Remove("dingtalk_webhook");
+        SecretDrafts.Remove("dingtalk_signing_secret");
+    }
+
     public void Apply(JsonObject result)
     {
         if (result["settings"] is JsonObject settings)
@@ -134,6 +152,7 @@ internal sealed class DesktopState
             InvalidateDiagnostic();
         }
         if (result["secret_presence"] is JsonObject presence) SecretPresence = (JsonObject)presence.DeepClone();
+        if (result["dingtalk_destinations"] is JsonObject robots) DingTalkDestinations = (JsonObject)robots.DeepClone();
         if (!GeneralDirty && result["settings"] is JsonObject saved)
             GeneralPreferences = new JsonObject(GeneralKeys.Select(key =>
                 KeyValuePair.Create<string, JsonNode?>(key, saved[key]?.DeepClone())));
@@ -146,6 +165,7 @@ internal sealed class DesktopState
         if (result["models"] is JsonArray) ApplyModels(result);
         if (result["history"] is JsonArray history) History = (JsonArray)history.DeepClone();
         SecretDrafts.Clear();
+        ProjectChoices.Clear();
         Dirty = false;
     }
 

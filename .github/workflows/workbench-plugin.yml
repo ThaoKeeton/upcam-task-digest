@@ -1,6 +1,8 @@
 name: Workbench native digest plugin
 
 on:
+  push:
+    branches: [fix/diagnostic-progress-cancel]
   workflow_dispatch:
   pull_request:
     branches: [main]
@@ -18,6 +20,8 @@ on:
       - 'LICENSES/**'
       - 'winui/UPCAMTaskDigest/DesktopState.cs'
       - 'winui/UPCAMTaskDigest/UiStrings.cs'
+      - 'winui/UPCAMTaskDigest/WorkerProtocol.cs'
+      - 'winui/UPCAMTaskDigest/CollectionProgressText.cs'
       - 'winui/UPCAMTaskDigest/Strings/en-US.json'
       - '.gitattributes'
       - '.github/workflows/workbench-plugin.yml'
@@ -87,8 +91,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $root = Join-Path (Get-Location) 'dist/workbench-plugin/extracted installation with spaces'
           New-Item -ItemType Directory -Path $root -Force | Out-Null
-          Expand-Archive dist/workbench-plugin/UPCAMTaskDigest-workbench-production-0.1.0-win-x64.zip -DestinationPath $root
-          Expand-Archive dist/workbench-plugin/UPCAMTaskDigest-workbench-acceptance-0.1.0-win-x64.zip -DestinationPath $root
+          Expand-Archive dist/workbench-plugin/UPCAMTaskDigest-workbench-production-0.1.1-win-x64.zip -DestinationPath $root
+          Expand-Archive dist/workbench-plugin/UPCAMTaskDigest-workbench-acceptance-0.1.1-win-x64.zip -DestinationPath $root
           python integrations/project-workbench/audit_package.py (Join-Path $root 'com.upcam.task-digest')
           if ($LASTEXITCODE -ne 0) { throw 'Extracted production package validation failed.' }
           python integrations/project-workbench/audit_package.py (Join-Path $root 'com.upcam.task-digest.acceptance')
@@ -168,7 +172,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path (Get-Location) 'dist/workbench-plugin'
-          $fileName = 'UPCAMTaskDigest-workbench-acceptance-0.1.0-win-x64.zip'
+          $fileName = 'UPCAMTaskDigest-workbench-acceptance-0.1.1-win-x64.zip'
           $archive = Join-Path $root $fileName
           $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           $declaredHash = ((Get-Content -LiteralPath ($archive + '.sha256') -Raw).Trim() -split '\s+')[0]
@@ -207,19 +211,19 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: success()
         with:
-          name: UPCAMTaskDigest-workbench-plugin-0.1.0-windows
+          name: UPCAMTaskDigest-workbench-plugin-0.1.1-windows
           path: |
-            dist/workbench-plugin/UPCAMTaskDigest-workbench-production-0.1.0-win-x64.zip
-            dist/workbench-plugin/UPCAMTaskDigest-workbench-production-0.1.0-win-x64.zip.sha256
+            dist/workbench-plugin/UPCAMTaskDigest-workbench-production-0.1.1-win-x64.zip
+            dist/workbench-plugin/UPCAMTaskDigest-workbench-production-0.1.1-win-x64.zip.sha256
           if-no-files-found: error
           retention-days: 14
       - uses: actions/upload-artifact@v4
         if: success()
         with:
-          name: UPCAMTaskDigest-workbench-acceptance-0.1.0-windows
+          name: UPCAMTaskDigest-workbench-acceptance-0.1.1-windows
           path: |
-            dist/workbench-plugin/UPCAMTaskDigest-workbench-acceptance-0.1.0-win-x64.zip
-            dist/workbench-plugin/UPCAMTaskDigest-workbench-acceptance-0.1.0-win-x64.zip.sha256
+            dist/workbench-plugin/UPCAMTaskDigest-workbench-acceptance-0.1.1-win-x64.zip
+            dist/workbench-plugin/UPCAMTaskDigest-workbench-acceptance-0.1.1-win-x64.zip.sha256
             dist/workbench-plugin/acceptance-handoff.json
             dist/workbench-plugin/ACCEPTANCE.zh-CN.md
           if-no-files-found: error
@@ -231,5 +235,108 @@ jobs:
           path: |
             dist/workbench-plugin/evidence/
             dist/workbench-plugin/packages/*/plugin-package.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  shipping-pairing:
+    needs: windows-native
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: integrations/project-workbench/reference/global.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: UPCAMTaskDigest-workbench-plugin-0.1.1-windows
+          path: pairing-input
+      - name: Download pinned shipping Workbench 0.4.0 bytes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path pairing-evidence | Out-Null
+          $zip = Join-Path (Get-Location) 'pairing-input/ProjectWorkbench-0.4.0-655d7b6.zip'
+          Invoke-WebRequest -Uri 'https://api.github.com/repos/ThaoKeeton/project-workbench/actions/artifacts/13633291911/zip' -Headers @{
+            Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'
+          } -OutFile $zip
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -cne 'eee78758d3f38e94abe81a6c13f3252b76ce02c00f13375dd6d925e8dd6a9db4') { throw 'Exact shipping archive hash mismatch.' }
+          Expand-Archive -LiteralPath $zip -DestinationPath pairing-host
+          @{
+            hostRepository = 'ThaoKeeton/project-workbench'; hostCommit = '655d7b6496067daad7c5e4cefb1f1da1b8379536';
+            hostRunId = 42518602297L; hostArtifactId = 13633291911L; hostArchiveSha256 = $hash;
+            hostExeSha256 = (Get-FileHash pairing-host/Workbench.App.exe -Algorithm SHA256).Hash.ToLowerInvariant();
+            hostDllSha256 = (Get-FileHash pairing-host/Workbench.App.dll -Algorithm SHA256).Hash.ToLowerInvariant();
+            hostCoreSha256 = (Get-FileHash pairing-host/Workbench.Core.dll -Algorithm SHA256).Hash.ToLowerInvariant();
+            hostMode = 'unmodified shipping binary, normal UI'; pluginRunId = '${{ github.run_id }}';
+            pluginSourceCommit = '${{ github.event.pull_request.head.sha || github.sha }}';
+            pluginBuildCommit = (& git rev-parse HEAD).Trim()
+          } | ConvertTo-Json | Set-Content pairing-evidence/inputs.json -Encoding utf8
+      - name: Audit production package and compile installer against shipping Core
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = 'pairing-input/UPCAMTaskDigest-workbench-production-0.1.1-win-x64.zip'
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $declared = ((Get-Content -LiteralPath ($zip + '.sha256') -Raw).Trim() -split '\s+')[0]
+          if ($declared -cne $hash) { throw 'Production plugin archive checksum mismatch.' }
+          Expand-Archive -LiteralPath $zip -DestinationPath 'pairing-package with spaces'
+          python integrations/project-workbench/audit_package.py 'pairing-package with spaces/com.upcam.task-digest'
+          if ($LASTEXITCODE -ne 0) { throw 'Production package inventory failed.' }
+          $metadata = Get-Content 'pairing-package with spaces/com.upcam.task-digest/plugin-package.json' -Raw | ConvertFrom-Json
+          if ($metadata.pluginId -cne 'com.upcam.task-digest' -or $metadata.pluginVersion -cne '0.1.1' -or $metadata.backendVersion -cne '0.4.6' -or $metadata.syntheticAcceptance -ne $false) { throw 'Production package identity mismatch.' }
+          $inputs = Get-Content pairing-evidence/inputs.json -Raw | ConvertFrom-Json -AsHashtable
+          if ($metadata.sourceCommit -cne $inputs.pluginBuildCommit) { throw 'Plugin artifact source commit does not match this workflow checkout.' }
+          $inputs.pluginArchiveSha256 = $hash
+          $inputs.pluginMetadataSourceCommit = $metadata.sourceCommit
+          $inputs | ConvertTo-Json | Set-Content pairing-evidence/inputs.json -Encoding utf8
+          $hostDirectory = Join-Path (Get-Location) 'pairing-host'
+          dotnet publish integrations/project-workbench/shipping-pairing/ShippingInstall/ShippingInstall.csproj -c Release -r win-x64 --self-contained false "-p:ShippingHostDirectory=$hostDirectory" -o pairing-installer
+          if ($LASTEXITCODE -ne 0) { throw 'Shipping Core installer build failed.' }
+      - name: Verify pure SHA256 and safe failure helpers in Windows PowerShell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = Get-Location
+          $powershell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+          & $powershell -NoProfile -NonInteractive -STA -File (Join-Path $base 'integrations/project-workbench/shipping-pairing/test-hash-helper.ps1') -DriverPath (Join-Path $base 'integrations/project-workbench/shipping-pairing/test-shipping-host.ps1') -ReportPath (Join-Path $base 'pairing-evidence/hash-helper.json')
+          if ($LASTEXITCODE -ne 0) { throw 'Pure SHA256 helper regression failed.' }
+          Get-Content pairing-evidence/hash-helper.json
+      - name: Install, trust, diagnose prerequisite, disable and close exact shipping pair
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = Get-Location
+          $driver = Join-Path $base 'integrations/project-workbench/shipping-pairing/test-shipping-host.ps1'
+          $powershell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+          $arguments = @('-NoProfile', '-NonInteractive', '-STA', '-File', ('"' + $driver + '"'),
+            '-HostExe', ('"' + (Join-Path $base 'pairing-host/Workbench.App.exe') + '"'),
+            '-PackageDirectory', ('"' + (Join-Path $base 'pairing-package with spaces/com.upcam.task-digest') + '"'),
+            '-InstallerExe', ('"' + (Join-Path $base 'pairing-installer/ShippingInstall.exe') + '"'),
+            '-InstallReportPath', ('"' + (Join-Path $base 'pairing-evidence/package-install.json') + '"'),
+            '-ReportPath', ('"' + (Join-Path $base 'pairing-evidence/shipping-pairing.json') + '"'),
+            '-ScreenshotPath', ('"' + (Join-Path $base 'pairing-evidence/shipping-pairing.png') + '"'))
+          $process = Start-Process -FilePath $powershell -ArgumentList $arguments -PassThru
+          try {
+            if (-not $process.WaitForExit(360000)) { $process.Kill($true); throw 'Shipping UIA pairing timed out; owned driver tree stopped.' }
+            if (Test-Path pairing-evidence/shipping-pairing.json) { Get-Content pairing-evidence/shipping-pairing.json }
+            if ($process.ExitCode -ne 0) { throw 'Shipping pair UIA failed.' }
+            $result = Get-Content pairing-evidence/shipping-pairing.json -Raw | ConvertFrom-Json
+            if (-not $result.succeeded -or $result.cleanup -cne 'graceful') { throw 'Shipping pairing or graceful cleanup did not pass.' }
+          } finally { $process.Dispose() }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: UPCAMTaskDigest-0.1.1-Workbench-0.4.0-shipping-pairing
+          path: pairing-evidence/
           if-no-files-found: warn
           retention-days: 14

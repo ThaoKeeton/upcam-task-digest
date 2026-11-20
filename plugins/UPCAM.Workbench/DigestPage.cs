@@ -269,7 +269,7 @@ internal sealed partial class DigestPage : Grid
                                 payload = p.Data.WindowPayload(); payload["path"] = ExportTarget(p); payload["include_project_content"] = true;
                             }
                             JsonObject result = await worker.SendAsync("export_detailed_diagnostic_to_file", payload, token);
-                            lock (_state.Sync) return ApplyDetailedExportResult(p, result);
+                            lock (_state.Sync) return ApplyDetailedExportResult(result);
                         });
                     })))
         }, "diagnostic-export", "Diagnostic export options");
@@ -297,10 +297,11 @@ internal sealed partial class DigestPage : Grid
         data.DiagnosticText = data.Output;
     }
 
-    private static string ApplyDetailedExportResult(ProfileDraft profile, JsonObject result)
+    private static string ApplyDetailedExportResult(JsonObject result)
     {
-        // Diagnosis can succeed while writing the detailed snapshot is refused. Keep the diagnosis in both cases.
-        ApplyDiagnostic(profile, result);
+        // Detailed export collects with full-project scope, so its message is not
+        // the updated-since read-only diagnosis already on screen. Keep that text
+        // whether the private file is written or refused.
         JsonObject? export = result["detailed_export"] as JsonObject;
         if (export?["saved"] is JsonValue saved && saved.TryGetValue<bool>(out bool confirmed) && confirmed)
             return "详细诊断已保存，包含项目内容并已剔除配置凭据；请仅私下分享用于排查。";

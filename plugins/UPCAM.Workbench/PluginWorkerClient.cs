@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Win32.SafeHandles;
+using Upcam.Desktop;
 
 namespace Upcam.Workbench;
 
@@ -20,7 +21,6 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
     private const string Cancelled = "The UPCAM backend request was cancelled. Check local run history before trying again.";
     private const string TimedOut = "The UPCAM backend request timed out. Check local run history before trying again.";
     private const int MaxRequestBytes = 2 * 1024 * 1024;
-    private const int MaxResponseBytes = 32 * 1024 * 1024;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly TimeSpan OrdinaryDeadline = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan CollectionDeadline = TimeSpan.FromMinutes(125);
@@ -87,6 +87,7 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
     private readonly CancellationToken _lifetime;
     private readonly CancellationTokenRegistration _lifetimeRegistration;
     private readonly SemaphoreSlim _requestGate = new(1, 1);
+    private readonly WorkerLineReader _reader;
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _cleanup;
     private readonly object _disposeLock = new();
@@ -97,6 +98,7 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
     private PluginWorkerClient(OwnedWorker worker, Mutex singleton, CancellationToken lifetime)
     {
         _worker = worker;
+        _reader = new WorkerLineReader(worker.Output);
         _singleton = singleton;
         _lifetime = lifetime;
         _cleanup = ObserveExitAsync();
@@ -126,7 +128,7 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
         PluginWorkerClient? client = null;
         try
         {
-            // Standalone 0.4.3 uses the existence of this named kernel object,
+            // Standalone 0.4.6 uses the existence of this named kernel object,
             // rather than thread-affine WaitOne/ReleaseMutex ownership.
             singleton = new Mutex(false, SingletonName, out bool createdNew);
             if (!createdNew)
@@ -139,7 +141,7 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
             string nonce = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
             JsonObject handshake = await client.SendAsync("plugin_handshake", new JsonObject
             {
-                ["protocol_version"] = 1, ["backend_version"] = "0.4.3", ["nonce"] = nonce
+                ["protocol_version"] = 1, ["backend_version"] = "0.4.6", ["nonce"] = nonce
             }, cancellationToken).ConfigureAwait(false);
             if (!ValidHandshake(handshake, nonce, profile, synthetic))
                 throw new InvalidOperationException("The UPCAM backend handshake did not match the requested session.");
@@ -179,7 +181,7 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
     }
 
     public async Task<JsonObject> SendAsync(string operation, JsonObject? payload = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, IProgress<CollectionProgress>? progress = null)
     {
         try { await _requestGate.WaitAsync(cancellationToken).ConfigureAwait(false); }
         catch (OperationCanceledException)
@@ -192,13 +194,13 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
         {
             if (!IsUsable) throw new InvalidOperationException(Unavailable);
             return await ExchangeAsync(operation, payload, cancellationToken,
-                IsCollection(operation) ? CollectionDeadline : OrdinaryDeadline, includeLifetime: true).ConfigureAwait(false);
+                IsCollection(operation) ? CollectionDeadline : OrdinaryDeadline, includeLifetime: true, progress).ConfigureAwait(false);
         }
         finally { _requestGate.Release(); }
     }
 
     private async Task<JsonObject> ExchangeAsync(string operation, JsonObject? payload, CancellationToken caller,
-        TimeSpan timeout, bool includeLifetime)
+        TimeSpan timeout, bool includeLifetime, IProgress<CollectionProgress>? progress = null)
     {
         string id = Guid.NewGuid().ToString("N");
         byte[] request;
@@ -206,8 +208,9 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
         {
             if (string.IsNullOrWhiteSpace(operation) || operation.Length > 128)
                 throw new ArgumentException();
-            request = JsonSerializer.SerializeToUtf8Bytes(new JsonObject
-            { ["id"] = id, ["op"] = operation, ["payload"] = payload?.DeepClone() ?? new JsonObject() });
+            var body = new JsonObject { ["id"] = id, ["op"] = operation, ["payload"] = payload?.DeepClone() ?? new JsonObject() };
+            if ((operation is "diagnose" or "save") && progress is not null) body["progress"] = true;
+            request = JsonSerializer.SerializeToUtf8Bytes(body);
         }
         catch (Exception) { throw new InvalidOperationException("The UPCAM backend request is invalid."); }
         if (request.Length > MaxRequestBytes)
@@ -218,17 +221,40 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
             : CancellationTokenSource.CreateLinkedTokenSource(caller);
         deadline.CancelAfter(timeout);
         using var abort = deadline.Token.Register(static state => ((PluginWorkerClient)state!).BreakConnection(), this);
+        bool silenceExpired = false;
         try
         {
             deadline.Token.ThrowIfCancellationRequested();
             await _worker.Input.WriteAsync(request, deadline.Token).ConfigureAwait(false);
             await _worker.Input.WriteAsync(new byte[] { 0x0a }, deadline.Token).ConfigureAwait(false);
             await _worker.Input.FlushAsync(deadline.Token).ConfigureAwait(false);
-            string line = await ReadLineAsync(_worker.Output, deadline.Token).ConfigureAwait(false);
-            var response = DecodeResponse(line, id);
-            deadline.Token.ThrowIfCancellationRequested();
-            if (response.Result is null) throw new OperationRejectedException(response.Error ?? OperationFailed);
-            return response.Result;
+            while (true)
+            {
+                using var silence = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+                if ((operation is "diagnose" or "save") && progress is not null) silence.CancelAfter(TimeSpan.FromMinutes(11));
+                using var abortSilent = silence.Token.Register(() =>
+                {
+                    if (!deadline.IsCancellationRequested) Volatile.Write(ref silenceExpired, true);
+                    BreakConnection();
+                });
+                string line = await _reader.ReadAsync(silence.Token).ConfigureAwait(false) ?? throw new ProtocolFaultException();
+                using var document = JsonDocument.Parse(line, new JsonDocumentOptions { MaxDepth = 64 });
+                ValidateMembers(document.RootElement);
+                if (document.RootElement.TryGetProperty("kind", out var kind))
+                {
+                    if (operation is not ("diagnose" or "save") || progress is null || kind.GetString() != "progress" ||
+                        document.RootElement.EnumerateObject().Count() != 3 ||
+                        document.RootElement.GetProperty("id").GetString() != id)
+                        throw new ProtocolFaultException();
+                    progress.Report(CollectionProgress.Parse(JsonNode.Parse(document.RootElement.GetProperty("progress").GetRawText())!.AsObject()));
+                    continue;
+                }
+                if (_reader.HasBufferedData) throw new ProtocolFaultException();
+                var response = DecodeResponse(line, id);
+                deadline.Token.ThrowIfCancellationRequested();
+                if (response.Result is null) throw new OperationRejectedException(response.Error ?? OperationFailed);
+                return response.Result;
+            }
         }
         catch (OperationRejectedException rejected)
         {
@@ -242,7 +268,7 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
             if (caller.IsCancellationRequested || (includeLifetime && (_lifetime.IsCancellationRequested || _stop.IsCancellationRequested)))
                 throw new OperationCanceledException(Cancelled,
                     caller.IsCancellationRequested ? caller : includeLifetime && _lifetime.IsCancellationRequested ? _lifetime : _stop.Token);
-            if (deadline.IsCancellationRequested) throw new TimeoutException(TimedOut);
+            if (deadline.IsCancellationRequested || Volatile.Read(ref silenceExpired)) throw new TimeoutException(TimedOut);
             throw new InvalidOperationException(InvalidResponse);
         }
     }
@@ -257,7 +283,7 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
         {
             string? revision = response["ruleset_revision"]?.GetValue<string>();
             return response["protocol_version"]?.GetValue<int>() == 1 &&
-                response["backend_version"]?.GetValue<string>() == "0.4.3" &&
+                response["backend_version"]?.GetValue<string>() == "0.4.6" &&
                 response["nonce"]?.GetValue<string>() == nonce &&
                 response["mode"]?.GetValue<string>() == "project-workbench" &&
                 string.Equals(response["data_directory"]?.GetValue<string>(), profile, StringComparison.OrdinalIgnoreCase) &&
@@ -307,28 +333,6 @@ internal sealed class PluginWorkerClient : IAsyncDisposable
         }
         else if (element.ValueKind == JsonValueKind.Array)
             foreach (var item in element.EnumerateArray()) ValidateMembers(item);
-    }
-
-    private static async Task<string> ReadLineAsync(Stream stream, CancellationToken cancellationToken)
-    {
-        using var line = new MemoryStream();
-        byte[] buffer = new byte[8192];
-        while (true)
-        {
-            int count = await stream.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
-            if (count == 0) throw new ProtocolFaultException();
-            int newline = Array.IndexOf(buffer, (byte)0x0a, 0, count);
-            int length = newline >= 0 ? newline : count;
-            if (line.Length + length > MaxResponseBytes || (newline >= 0 && newline != count - 1))
-                throw new ProtocolFaultException();
-            line.Write(buffer, 0, length);
-            if (newline >= 0)
-            {
-                byte[] bytes = line.ToArray();
-                int byteCount = bytes.Length > 0 && bytes[^1] == 0x0d ? bytes.Length - 1 : bytes.Length;
-                return StrictUtf8.GetString(bytes, 0, byteCount);
-            }
-        }
     }
 
     private void BreakConnection()

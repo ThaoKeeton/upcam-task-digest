@@ -50,22 +50,59 @@ def report_window(day, start=None, end=None):
     return start, end
 
 
-def updated_selection(day, start=None, end=None):
-    """Describe activity-time selection over current readable project tasks.
+def updated_selection(day, start=None, end=None, *, candidate_mode="updated_since_start"):
+    """Describe candidate collection separately from the activity-time window.
 
-    The historical public name is retained for local callers. It no longer
-    constructs an updated-time query: task.updated is not an activity index.
-    Current project visibility is explicitly not a historical snapshot.
+    The normal path asks the server for updated >= the report start, then
+    validates and rechecks returned candidates locally, without an end cap.
+    Rounding a fractional start down to the supported whole-second query is
+    conservative; it is not proof that all activity advances updated.
+    ``full_project`` preserves the previous audit contract.
+    Neither strategy is a historical project snapshot.
     """
+    if candidate_mode not in ("updated_since_start", "full_project"):
+        raise ValueError("Invalid task candidate mode")
     report_day = strict_day(day)
     start, end = report_window(report_day.isoformat(), start, end)
     full_start, full_end = canonical_window(report_day.isoformat())
-    return {'mode': 'v3-project-activities-half-open', 'view_equivalent': False,
+    selection = {'mode': 'v3-project-activities-half-open', 'view_equivalent': False,
             'date': report_day.isoformat(), 'start': start.isoformat(), 'end_exclusive': end.isoformat(),
             'q': None, 'basis': 'activity-createTime',
             'candidate_scope': 'current-visible-project-tasks',
             'historical_event_coverage': False, 'snapshot_guaranteed': False,
             'window_kind': 'calendar_day' if (start, end) == (full_start, full_end) else 'custom'}
+    if candidate_mode == "updated_since_start":
+        # TQL's documented absolute timestamp examples use whole seconds. Round
+        # down to widen, never narrow, the candidate range for fractional input.
+        query_start = start.replace(microsecond=0)
+        cutoff = query_start.isoformat()
+        selection.update(candidate_scope="current-visible-project-tasks-updated-since",
+                         candidate_updated_since=cutoff,
+                         candidate_overlap_seconds=(start - query_start).total_seconds(),
+                         activity_updated_index_guaranteed=False,
+                         q=f"updated >= '{cutoff}'")
+    return selection
+
+
+def validate_selection(selection, day, start=None, end=None):
+    """Accept current scopes and the old local-only candidate contract for history."""
+    current = updated_selection(day, start, end, candidate_mode="updated_since_start")
+    old_start = datetime.fromisoformat(current['start']) - timedelta(days=1)
+    old_cutoff = old_start.replace(microsecond=0).isoformat()
+    legacy = dict(current, q=f"updated >= '{old_cutoff}'",
+                  candidate_updated_since=old_cutoff, candidate_overlap_seconds=86400)
+    previous_local = dict(legacy, q=None, candidate_updated_since=old_start.isoformat())
+    full = updated_selection(day, start, end, candidate_mode="full_project")
+    if selection not in (current, legacy, previous_local, full):
+        raise ValueError("Selection contract differs from report window")
+    return selection
+
+
+def task_is_candidate(updated, selection):
+    """Filter a validated list row locally; never impose a report-end cap."""
+    instant = task_updated_timestamp(updated)
+    cutoff = selection.get("candidate_updated_since")
+    return cutoff is None or instant >= task_updated_timestamp(cutoff)
 
 
 def task_updated_timestamp(value):
@@ -99,9 +136,9 @@ def validated_report_source(report):
             or scope.get("start") != start.isoformat()
             or scope.get("end_exclusive") != end.isoformat()
             or scope.get("pagination_complete") is not True
-            or type(scope.get("include_archived")) is not bool
-            or selection != updated_selection(day, start, end)):
+            or type(scope.get("include_archived")) is not bool):
         raise ValueError("Report window or collection scope mismatch")
+    validate_selection(selection, day, start, end)
     source = tuple(scope.get(key) for key in ("tenant_id", "project_id"))
     if any(not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", v) for v in source):
         raise ValueError("Missing or invalid report source")

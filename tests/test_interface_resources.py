@@ -101,6 +101,32 @@ def _resources():
 
 
 class InterfaceResourceTests(unittest.TestCase):
+    def test_normal_diagnostic_describes_server_candidate_filter_and_its_limit(self):
+        page = (NATIVE / "MainWindow.Diagnostics.cs").read_text(encoding="utf-8")
+        self.assertIn("按任务更新时间筛选候选", page)
+        self.assertIn("未推进任务更新时间", page)
+        self.assertNotIn("缩短时间范围不会减少基础扫描", page)
+
+    def test_ignored_server_filter_explanation_has_english_translation(self):
+        message = "Teambition 返回了更新时间早于筛选下界的任务，无法确认服务端筛选生效。已停止采集，未退回全项目扫描；请检查接口。"
+        self.assertIn(message, _resources())
+
+    def test_scope_page_does_not_claim_all_readable_histories_are_scanned(self):
+        page = (NATIVE / "MainWindow.Pages.cs").read_text(encoding="utf-8")
+        self.assertIn("按更新时间筛选候选", page)
+        self.assertIn("未推进更新时间的动态可能遗漏", page)
+        self.assertNotIn("推荐范围：扫描指定 Project ID 下当前可读任务的动态", page)
+
+    def test_detailed_export_warns_about_full_project_scan(self):
+        page = (NATIVE / "MainWindow.Pages.cs").read_text(encoding="utf-8")
+        self.assertIn("按照当前归档及项目范围配置，详细导出会复核全部可见任务和历史动态，可能耗时较长。", page)
+
+    def test_concurrency_copy_distinguishes_rate_target_from_actual_start_spacing(self):
+        page = (NATIVE / "MainWindow.Pages.cs").read_text(encoding="utf-8")
+        self.assertIn("限流目标间隔为 0.25 秒", page)
+        self.assertIn("实际请求间距可能受系统调度影响", page)
+        self.assertNotIn("所有线程共用至少 0.25 秒的请求间隔", page)
+
     def test_english_resources_are_complete_and_preserve_format_arguments(self):
         # Catches missing/empty translations and dropped or changed arguments.
         self.assertTrue(RESOURCE.is_file(), "The separate English resource is missing")
@@ -121,7 +147,7 @@ class InterfaceResourceTests(unittest.TestCase):
         resources = _resources()
         expected = set()
         for name in ("Ui.cs", "DesktopState.cs", "NativeDesktop.cs", "WorkerClient.cs",
-                     "MainWindow.xaml.cs", "MainWindow.Pages.cs", "MainWindow.General.cs", "ProcessHandoff.cs"):
+                     "MainWindow.xaml.cs", "MainWindow.Pages.cs", "MainWindow.General.cs", "MainWindow.Diagnostics.cs", "WorkerProtocol.cs", "CollectionProgressText.cs", "ProcessHandoff.cs"):
             expected.update(text for text in _csharp_literals((NATIVE / name).read_text(encoding="utf-8"))
                             if CJK.search(text))
         import xml.etree.ElementTree as ET
@@ -175,6 +201,8 @@ class InterfaceResourceTests(unittest.TestCase):
                 '<NuGetAudit>false</NuGetAudit>'
                 '</PropertyGroup><ItemGroup>'
                 f'<Compile Include="{escape(str(NATIVE / "UiStrings.cs"))}" Link="UiStrings.cs" />'
+                f'<Compile Include="{escape(str(NATIVE / "WorkerProtocol.cs"))}" Link="WorkerProtocol.cs" />'
+                f'<Compile Include="{escape(str(NATIVE / "CollectionProgressText.cs"))}" Link="CollectionProgressText.cs" />'
                 f'<EmbeddedResource Include="{escape(str(RESOURCE))}" LogicalName="Upcam.Desktop.Strings.en-US.json" />'
                 '</ItemGroup></Project>', encoding="utf-8")
             (target / "Program.cs").write_text(CSHARP_PROBE, encoding="utf-8")
@@ -235,6 +263,25 @@ try
 
     UiStrings.Configure("zh-CN");
     Equal(UiStrings.F("项目：{0}", "Home : untouched"), "项目：Home : untouched");
+
+    // Enumeration counts are provisional full-project candidates, not updates.
+    var elapsed = TimeSpan.FromSeconds(27);
+    Equal(CollectionProgressText.Format(new("listing", 0, 1000, 10, 1, 0), elapsed),
+        "列出项目任务 · 已耗时 0:27 · 已列出候选任务 1000 项（非时段内更新数） · 请求 10");
+    Equal(CollectionProgressText.Format(new("collecting", 5, 1201, 24, 1, 0), elapsed),
+        "读取任务及动态 · 已耗时 0:27 · 候选任务读取进度 5/1201 项（非时段内更新数） · 请求 24");
+    Equal(CollectionProgressText.Format(new("reconciling", 1201, 1000, 2425, 5, 1), elapsed),
+        "重新核对项目变化 · 已耗时 0:27 · 已列出候选任务 1000 项（非时段内更新数） · 请求 2425");
+    Equal(CollectionProgressText.Format(new("loading_cache", 600, 1201, 13, 1, 0), elapsed),
+        "恢复已读取任务进度 · 已耗时 0:27 · 候选任务读取进度 600/1201 项（非时段内更新数） · 请求 13");
+    Equal(CollectionProgressText.Format(new("listing", 0, 1000, 10, 1, 0), elapsed, "保存前只读核验"),
+        "保存前只读核验 · 已耗时 0:27 · 已列出候选任务 1000 项（非时段内更新数） · 请求 10");
+
+    UiStrings.Configure("en-US");
+    Equal(CollectionProgressText.Format(new("listing", 0, 1000, 10, 1, 0), elapsed),
+        "Listing project tasks · elapsed 0:27 · candidate tasks listed: 1000 (not updates in the selected window) · requests 10");
+    Equal(CollectionProgressText.Format(new("collecting", 5, 1201, 24, 1, 0), elapsed),
+        "Reading tasks and activity · elapsed 0:27 · candidate-task read progress: 5/1201 tasks (not updates in the selected window) · requests 24");
 }
 finally
 {

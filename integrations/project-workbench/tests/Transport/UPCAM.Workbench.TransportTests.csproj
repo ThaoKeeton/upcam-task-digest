@@ -11,5 +11,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../../../plugins/UPCAM.Workbench/PluginWorkerClient.cs" Link="PluginWorkerClient.cs" />
+    <Compile Include="../../../../winui/UPCAMTaskDigest/WorkerProtocol.cs" Link="WorkerProtocol.cs" />
   </ItemGroup>
 </Project>

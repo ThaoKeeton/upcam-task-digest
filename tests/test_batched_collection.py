@@ -4,13 +4,13 @@ import copy
 import io
 import json
 import math
+from datetime import datetime
 from pathlib import Path
 import tempfile
 import unittest
 from dataclasses import replace
 from unittest.mock import patch
-from urllib.error import URLError
-from urllib.parse import parse_qs, urlsplit
+from urllib.error import HTTPError
 
 from teambition_readonly import Client, CollectionError
 
@@ -27,7 +27,44 @@ class FakeClock:
 
 
 class Response(io.BytesIO):
-    status = 200
+    def __init__(self, body=b"", *, status=200):
+        super().__init__(body)
+        self.status = status
+        self.headers = {"Content-Type": "application/json"}
+
+    def geturl(self):
+        return "https://open.teambition.com/api/mcp/v2"
+
+    def read1(self, size=-1):
+        return self.read(size)
+
+
+PROJECT_TOOL = "teambition.project.task-query"
+DETAIL_TOOL = "teambition.task.query"
+ACTIVITY_TOOL = "teambition.task.activity"
+
+
+def fictional_envelope(value):
+    # Test-only success values. No live business contract is asserted here.
+    return value.get("code") == 200 and value.get("errorCode") == ""
+
+
+def fictional_archive(row):
+    return type(row.get("isArchived")) is bool
+
+
+def catalog():
+    def schema(fields, required):
+        return {"type": "object", "properties": {key: {"type": kind} for key, kind in fields.items()},
+                "required": required, "additionalProperties": False}
+    definitions = {
+        PROJECT_TOOL: schema({"projectId": "string", "tql": "string", "pageSize": "integer",
+                              "pageToken": "string", "enrichFields": "string", "includeArchived": "boolean"}, ["projectId"]),
+        DETAIL_TOOL: schema({"taskId": "string", "includeArchived": "boolean", "enrichFields": "string"}, ["taskId"]),
+        ACTIVITY_TOOL: schema({"taskId": "string", "actions": "string", "pageSize": "integer", "pageToken": "string",
+                              "includeFileDetails": "boolean", "includeRtfHtml": "boolean"}, ["taskId"]),
+    }
+    return {"tools": [{"name": name, "inputSchema": definition} for name, definition in definitions.items()]}
 
 
 def task(index, **changes):
@@ -43,7 +80,7 @@ def event(task_id, index=0, **changes):
 
 
 class ProjectTransport:
-    """A paginated fictional API whose observable source can change per scan."""
+    """A paginated fictional MCP service whose source can change per scan."""
 
     def __init__(self, tasks, clock, *, histories=None, scans=None):
         self.tasks = copy.deepcopy(tasks)
@@ -58,46 +95,85 @@ class ProjectTransport:
         self.interrupt_on_detail = None
         self.transform = None
 
-    def __call__(self, request, timeout):
-        url = urlsplit(request.full_url)
-        params = parse_qs(url.query)
-        self.requests.append((url.path, params, self.clock()))
-        if url.path == "/api/v3/project/fictional-project/task/query":
+    def __call__(self, request, timeout, *, _started=None):
+        started = self.clock() if _started is None else _started
+        assert request.full_url == "https://open.teambition.com/api/mcp/v2"
+        assert request.method == "POST"
+        assert request.get_header("Authorization", "").startswith("Bearer fictional-")
+        message = json.loads(request.data)
+        method = message["method"]
+        if method == "tools/call":
+            operation = message["params"]["name"]
+            params = message["params"]["arguments"]
+        else:
+            operation, params = method, message.get("params", {})
+        self.requests.append((operation, copy.deepcopy(params), started))
+        if method == "initialize":
+            result = {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}},
+                      "serverInfo": {"name": "fictional", "version": "1"}}
+        elif method == "notifications/initialized":
+            return Response(status=202)
+        elif method == "tools/list":
+            result = catalog()
+        elif method == "tools/call":
+            result = {"structuredContent": self.business(operation, params)}
+        else:
+            raise AssertionError("Unexpected MCP method")
+        return Response(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}).encode("utf-8"))
+
+    def business(self, operation, params):
+        if operation == PROJECT_TOOL:
             if "pageToken" not in params:
                 self.scan_count += 1
                 if self.scans is not None:
                     self.tasks = copy.deepcopy(self.scans(min(self.scan_count, 100)))
-            offset = int(params.get("pageToken", ["0"])[0])
-            size = int(params["pageSize"][0])
-            rows = self.tasks[offset:offset + size]
-            next_token = str(offset + size) if offset + size < len(self.tasks) else ""
-            result = {"code": 200, "result": rows, "nextPageToken": next_token}
-        elif url.path == "/api/v3/task/query":
-            task_id = params["taskId"][0]
+            offset = int(params.get("pageToken", "0"))
+            size = params["pageSize"]
+            rows = self.tasks
+            if "tql" in params:
+                query = params["tql"]
+                if not (query.startswith("updated >= '") and query.endswith("'")):
+                    raise AssertionError("Unexpected fictional TQL syntax")
+                cutoff = datetime.fromisoformat(query[len("updated >= '"):-1])
+                def included(row):
+                    try:
+                        value = datetime.fromisoformat(row.get("updated", "").replace("Z", "+00:00"))
+                        return value >= cutoff
+                    except (ValueError, TypeError, AttributeError):
+                        return True  # Invalid rows remain visible to validation.
+                rows = [row for row in rows if included(row)]
+            next_token = str(offset + size) if offset + size < len(rows) else ""
+            result = {"result": copy.deepcopy(rows[offset:offset + size]), "nextPageToken": next_token}
+        elif operation == DETAIL_TOOL:
+            task_id = params["taskId"]
             self.detail_ids.append(task_id)
             if self.interrupt_on_detail == task_id:
                 self.interrupt_on_detail = None
                 raise CollectionError("Synthetic interrupted collection")
             detail = next(row for row in self.tasks if row["id"] == task_id)
-            result = {"code": 200, "result": copy.deepcopy(detail)}
-        else:
-            task_id = url.path.split("/")[-3]
-            page_index = int(params.get("pageToken", ["0"])[0])
+            result = {"result": copy.deepcopy(detail)}
+        elif operation == ACTIVITY_TOOL:
+            task_id = params["taskId"]
+            page_index = int(params.get("pageToken", "0"))
             self.activity_pages.append((task_id, page_index))
             if self.fail_activity == (task_id, page_index):
                 self.fail_activity = None
                 raise CollectionError("Synthetic interrupted collection")
             pages = self.histories.get(task_id, [[event(task_id)]])
-            result = {"code": 200, "result": copy.deepcopy(pages[page_index]),
+            result = {"result": copy.deepcopy(pages[page_index]),
                       "nextPageToken": str(page_index + 1) if page_index + 1 < len(pages) else ""}
+        else:
+            raise AssertionError("Unexpected business tool")
+        result.update(code=200, errorCode="", errorMessage="")
         if self.transform:
-            result = self.transform(result, url.path, params)
-        return Response(json.dumps(result).encode("utf-8"))
+            result = self.transform(result, operation, params)
+        return result
 
 
 def collector(transport, clock, **changes):
     return Client("fictional-tenant", transport=transport, clock=clock, sleep=clock.sleep,
-                  credentials=lambda: ("fictional-app", "fictional-secret"),
+                  credentials=lambda: "fictional-token",
+                  mcp_envelope_validator=fictional_envelope, archive_contract_validator=fictional_archive,
                   batch_mode=True, **changes)
 
 
@@ -111,11 +187,11 @@ class LargeProjectCollectionTests(unittest.TestCase):
                     with self.assertRaisesRegex(CollectionError, "Pagination|selection"):
                         collector(transport, clock).collect("fictional-project", day="2026-01-02")
                     self.assertEqual(transport.detail_ids, [])
-                    self.assertEqual(len(transport.requests), 100)
+                    self.assertEqual(len(transport.requests), 103)
                 else:
                     result = collector(transport, clock).collect("fictional-project", day="2026-01-02")
                     self.assertEqual(len(result["records"]), 10000)
-                    self.assertEqual(result["collection_stats"]["requests"], 20200)
+                    self.assertEqual(result["collection_stats"]["requests"], 20200 + 3 * 34)
                     self.assertEqual(result["collection_stats"]["records"], 40000)
 
     def test_701_and_1201_tasks_complete_across_pages_and_task_batches(self):
@@ -133,14 +209,17 @@ class LargeProjectCollectionTests(unittest.TestCase):
                 self.assertEqual(source["records"][-1]["task"], tasks[-1])
                 self.assertEqual(transport.scan_count, 2)
                 self.assertGreaterEqual(source["collection_stats"]["batches"], math.ceil(count / 300))
-                self.assertEqual(source["collection_stats"]["requests"], 2 * count + 2 * math.ceil(count / 100))
+                self.assertEqual(source["collection_stats"]["requests"], 2 * count + 2 * math.ceil(count / 100)
+                                 + 3 * math.ceil(count / 300))
                 self.assertTrue(all(type(value) is int for value in source["collection_stats"].values()))
                 self.assertFalse(source["selection"]["snapshot_guaranteed"])
                 self.assertFalse(source["selection"]["historical_event_coverage"])
                 for path, query, unused in transport.requests:
-                    self.assertNotIn("q", query)
-                    if "/project/" in path:
-                        self.assertEqual(query["includeArchived"], ["false"])
+                    if path == PROJECT_TOOL:
+                        self.assertEqual(query["tql"], "updated >= '2026-01-02T00:00:00+08:00'")
+                        self.assertEqual(query["includeArchived"], False)
+                    else:
+                        self.assertNotIn("tql", query)
                 instants = [instant for unused, query, instant in transport.requests]
                 self.assertTrue(all(right - left >= 0.25 for left, right in zip(instants, instants[1:])))
 
@@ -162,9 +241,48 @@ class LargeProjectCollectionTests(unittest.TestCase):
         self.assertEqual(result["selection"]["end_exclusive"], "2026-01-02T18:00:00+08:00")
         self.assertEqual(len(result["records"]), 2)
         for path, query, unused in transport.requests:
-            self.assertNotIn("q", query)
-            if "/project/" in path:
-                self.assertEqual(query["includeArchived"], ["true"])
+            if path == PROJECT_TOOL:
+                self.assertEqual(query["tql"], "updated >= '2026-01-01T18:00:00+08:00'")
+                self.assertEqual(query["includeArchived"], True)
+            else:
+                self.assertNotIn("tql", query)
+
+    def test_repeated_opaque_cursors_continue_until_explicit_empty_terminal(self):
+        class RepeatedCursorTransport(ProjectTransport):
+            def business(self, operation, params):
+                if operation not in (PROJECT_TOOL, ACTIVITY_TOOL):
+                    return super().business(operation, params)
+                if operation == PROJECT_TOOL:
+                    if "pageToken" not in params:
+                        self.scan_count += 1
+                        self.project_page = 0
+                    index = self.project_page
+                    self.project_page += 1
+                    rows = self.tasks[index:index + 1]
+                else:
+                    identity = params["taskId"]
+                    if "pageToken" not in params:
+                        self.history_page = 0
+                    index = self.history_page
+                    self.history_page += 1
+                    self.activity_pages.append((identity, index))
+                    rows = [event(identity, index)] if index < 2 else []
+                return {"code": 200, "errorCode": "", "errorMessage": "",
+                        "result": copy.deepcopy(rows), "nextPageToken": "opaque-repeat" if index < 2 else ""}
+
+        clock = FakeClock()
+        transport = RepeatedCursorTransport([task(0), task(1)], clock)
+        source = collector(transport, clock).collect("fictional-project", day="2026-01-02")
+        self.assertTrue(source["pagination_complete"])
+        self.assertEqual(transport.scan_count, 2)
+        self.assertEqual(len(source["records"]), 2)
+        for record in source["records"]:
+            self.assertEqual(record["activities"], [event(record["task"]["id"], index) for index in range(2)])
+            self.assertEqual([params.get("pageToken") for name, params, _ in transport.requests
+                              if name == ACTIVITY_TOOL and params["taskId"] == record["task"]["id"]],
+                             [None, "opaque-repeat", "opaque-repeat"])
+        self.assertEqual([params.get("pageToken") for name, params, _ in transport.requests if name == PROJECT_TOOL],
+                         [None, "opaque-repeat", "opaque-repeat"] * 2)
 
     def test_project_limit_blocks_without_returning_truncated_records(self):
         clock = FakeClock()
@@ -241,7 +359,7 @@ class ResumeTests(unittest.TestCase):
                 kwargs = {"day": "2026-01-03" if change == "day" else "2026-01-02",
                           "include_archived": change == "archive"}
                 if change == "credentials":
-                    reader.credentials = lambda: ("another-fictional-app", "another-fictional-secret")
+                    reader.credentials = lambda: "fictional-rotated-token"
                 if change == "tenant":
                     reader.tenant_id = "another-fictional-tenant"
                 result = reader.collect("fictional-project", **kwargs)
@@ -344,7 +462,7 @@ class ReconciliationTests(unittest.TestCase):
         transport = ProjectTransport([old], clock, scans=lambda index: [old] if index == 1 else [changed])
         first_detail = [True]
         def transform(value, path, query):
-            if path == "/api/v3/task/query" and first_detail[0]:
+            if path == DETAIL_TOOL and first_detail[0]:
                 first_detail[0] = False
                 value["result"] = changed
             return value
@@ -413,15 +531,21 @@ class BudgetTests(unittest.TestCase):
             response = api(request, timeout)
             body = response.getvalue()
             response.close()
-            return InterruptedRead(body)
+            if json.loads(request.data).get("params", {}).get("name") == PROJECT_TOOL:
+                return InterruptedRead(body)
+            return Response(body, status=response.status)
         with self.assertRaises(KeyboardInterrupt):
             collector(transport, clock, checkpoint=store).collect("fictional-project", day="2026-01-02")
-        self.assertEqual(store.counters["requests"], 1)
+        self.assertEqual(store.counters["requests"], 4)
         self.assertEqual(store.counters["records"], 100)
-        self.assertEqual(store.counters["response_bytes"], 8 * 1024 * 1024 + 1)
+        handshake_bytes = len(json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
+            "protocolVersion": "2025-03-26", "capabilities": {"tools": {}},
+            "serverInfo": {"name": "fictional", "version": "1"}}}).encode()) + len(
+            json.dumps({"jsonrpc": "2.0", "id": 2, "result": catalog()}).encode())
+        self.assertEqual(store.counters["response_bytes"], handshake_bytes + 8 * 1024 * 1024 + 1)
         result = collector(api, clock, checkpoint=store).collect("fictional-project", day="2026-01-02")
         self.assertTrue(result["pagination_complete"])
-        self.assertEqual(result["collection_stats"]["requests"], 5)
+        self.assertEqual(result["collection_stats"]["requests"], 11)
         self.assertEqual(result["collection_stats"]["records"], 104)
 
     def test_remaining_row_budget_reduces_project_and_activity_page_sizes(self):
@@ -435,9 +559,13 @@ class BudgetTests(unittest.TestCase):
             collector(transport, clock, checkpoint=store,
                       batch_policy=replace(BatchPolicy(), max_records=4)).collect(
                           "fictional-project", day="2026-01-02")
-        self.assertEqual(transport.requests[0][1]["pageSize"], ["4"])
-        self.assertEqual(transport.requests[2][1]["pageSize"], ["2"])
-        self.assertEqual(len(transport.requests), 3)
+        business = [(name, params) for name, params, _ in transport.requests if name in (PROJECT_TOOL, DETAIL_TOOL, ACTIVITY_TOOL)]
+        self.assertEqual(business[0], (PROJECT_TOOL, {"projectId": "fictional-project", "pageSize": 4,
+                         "includeArchived": False, "enrichFields": "tfs,members",
+                         "tql": "updated >= '2026-01-02T00:00:00+08:00'"}))
+        self.assertEqual(business[2][0], ACTIVITY_TOOL)
+        self.assertEqual(business[2][1]["pageSize"], 2)
+        self.assertEqual(len(transport.requests), 6)
         self.assertEqual(store.counters["records"], 4)
 
     def test_remaining_byte_budget_reduces_read_and_rejects_a_truncated_prefix(self):
@@ -448,21 +576,23 @@ class BudgetTests(unittest.TestCase):
         bodies = []
         class LimitedResponse(Response):
             def read(self, size=-1):
-                reads.append(size)
+                reads.append((len(bodies) - 1, size))
                 return super().read(size)
         def transport(request, timeout):
             response = api(request, timeout)
             body = response.getvalue()
             response.close()
             bodies.append(body)
-            return LimitedResponse(body)
-        with self.assertRaisesRegex(CollectionError, "Response size limit"):
+            return LimitedResponse(body, status=response.status)
+        with self.assertRaisesRegex(CollectionError, "response|Response"):
             collector(transport, clock, checkpoint=store,
                       batch_policy=replace(BatchPolicy(), max_response_bytes=512)).collect(
                           "fictional-project", day="2026-01-02")
-        self.assertEqual(reads[0], 512)
-        self.assertEqual(reads[1], 512 - len(bodies[0]))
-        self.assertEqual(reads[2], 512 - len(bodies[0]) - len(bodies[1]))
+        first_reads = {index: next(size for item, size in reads if item == index) for index in range(len(bodies))}
+        self.assertEqual(first_reads, {index: 512 - sum(map(len, bodies[:index])) for index in range(len(bodies))})
+        self.assertEqual([name for name, _, _ in api.requests],
+                         ["initialize", "notifications/initialized", "tools/list"])
+        self.assertGreater(len(bodies[-1]), first_reads[len(bodies) - 1])
         self.assertEqual(store.counters["response_bytes"], 512)
         self.assertIsNone(store.load_task(task(0)["id"]))
 
@@ -471,17 +601,17 @@ class BudgetTests(unittest.TestCase):
         clock = FakeClock()
         api = ProjectTransport([task(0)], clock)
         def transform(value, path, query):
-            if "/project/" in path:
+            if path == PROJECT_TOOL:
                 value["result"] = [task(0), task(1)]
             return value
         api.transform = transform
-        with self.assertRaisesRegex(CollectionError, "row count|record"):
+        with self.assertRaisesRegex(CollectionError, "row count|record|invalid"):
             collector(api, clock, batch_policy=replace(BatchPolicy(), max_records=1)).collect(
                 "fictional-project", day="2026-01-02")
-        self.assertEqual(len(api.requests), 1)
+        self.assertEqual(len(api.requests), 4)
         self.assertEqual(api.detail_ids, [])
 
-    def test_response_exit_interruption_preserves_received_rows_and_bytes(self):
+    def test_response_exit_interruption_preserves_uncertain_reservations(self):
         from collection_batches import BatchPolicy, MemoryCheckpoint
         store, clock = MemoryCheckpoint(), FakeClock()
         api = ProjectTransport([task(0)], clock)
@@ -494,23 +624,28 @@ class BudgetTests(unittest.TestCase):
             response = api(request, timeout)
             body = response.getvalue()
             response.close()
-            received.append(body)
-            return InterruptedResponse(body)
+            is_business = json.loads(request.data).get("params", {}).get("name") == PROJECT_TOOL
+            received.append((body, is_business))
+            if is_business:
+                return InterruptedResponse(body)
+            return Response(body, status=response.status)
         options = {"checkpoint": store, "batch_policy": replace(BatchPolicy(), max_records=4)}
         for unused in range(3):
             with self.assertRaises(KeyboardInterrupt):
-                collector(transport, clock, **options).collect("fictional-project", day="2026-01-02")
-        self.assertEqual(store.counters["requests"], 3)
+                collector(transport, clock, **options).collect("fictional-project", day="2026-01-02", page_size=1)
+        self.assertEqual(store.counters["requests"], 12)
         self.assertEqual(store.counters["records"], 3)
-        self.assertEqual(store.counters["response_bytes"], sum(map(len, received)))
+        self.assertEqual(store.counters["response_bytes"],
+                         3 * (8 * 1024 * 1024 + 1) + sum(len(body) for body, business in received if not business))
         with self.assertRaises(CollectionError):
-            collector(api, clock, **options).collect("fictional-project", day="2026-01-02")
+            collector(api, clock, **options).collect("fictional-project", day="2026-01-02", page_size=1)
+        self.assertEqual(api.detail_ids, [])
 
     def test_local_request_exhaustion_rotates_once_and_restarts_partial_task(self):
         clock = FakeClock()
         tasks = [task(0), task(1), task(2)]
         transport = ProjectTransport(tasks, clock)
-        result = collector(transport, clock, max_requests=4).collect("fictional-project", day="2026-01-02")
+        result = collector(transport, clock, max_requests=7).collect("fictional-project", day="2026-01-02")
         self.assertEqual(len(result["records"]), 3)
         self.assertEqual(transport.detail_ids.count(tasks[1]["id"]), 2)
         self.assertEqual(result["collection_stats"]["requests"], len(transport.requests))
@@ -525,16 +660,18 @@ class BudgetTests(unittest.TestCase):
                 identity = current["id"]
                 if limit == "requests":
                     history = [[event(identity, index)] for index in range(3)]
-                    options = {"max_requests": 3}
+                    options = {"max_requests": 6}
                 elif limit == "records":
-                    history = [[event(identity, index) for index in range(4)]]
+                    # The fictional service respects a reduced one-row page;
+                    # each batch can read pages but cannot finish the history.
+                    history = [[event(identity, index)] for index in range(4)]
                     options = {"max_records": 3}
                 elif limit == "bytes":
-                    history = [[event(identity, 0, content="x" * 2000)]]
-                    options = {"max_response_bytes": 1024}
+                    history = [[event(identity, 0, content="x" * 10000)]]
+                    options = {"max_response_bytes": 4096}
                 else:
                     history = [[event(identity, index)] for index in range(5)]
-                    options = {"max_seconds": 1}
+                    options = {"max_seconds": 2}
                 transport = ProjectTransport([current], clock, histories={identity: history})
                 with self.assertRaises(CollectionError):
                     collector(transport, clock, checkpoint=store, **options).collect("fictional-project", day="2026-01-02")
@@ -545,10 +682,12 @@ class BudgetTests(unittest.TestCase):
         from collection_batches import BatchPolicy, MemoryCheckpoint
         store, clock = MemoryCheckpoint(), FakeClock()
         transport = ProjectTransport([task(0), task(1)], clock)
-        options = {"checkpoint": store, "max_tasks": 1, "batch_policy": replace(BatchPolicy(), max_requests=5)}
+        options = {"checkpoint": store, "max_tasks": 1, "batch_policy": replace(BatchPolicy(), max_requests=11)}
         with self.assertRaisesRegex(CollectionError, "session.*request|request.*session"):
             collector(transport, clock, **options).collect("fictional-project", day="2026-01-02")
-        self.assertEqual(len(transport.requests), 5)
+        self.assertEqual(len(transport.requests), 11)
+        self.assertEqual(store.counters["batches"], 2)
+        self.assertTrue(all(store.load_task(task(index)["id"]) is not None for index in range(2)))
         resumed = ProjectTransport([task(0), task(1)], clock)
         with self.assertRaises(CollectionError):
             collector(resumed, clock, **options).collect("fictional-project", day="2026-01-02")
@@ -560,10 +699,10 @@ class BudgetTests(unittest.TestCase):
             clock = FakeClock()
             current = task(0)
             transport = ProjectTransport([current, current] if duplicate else [current], clock)
-            with self.subTest(duplicate=duplicate), self.assertRaisesRegex(CollectionError, "session.*record|record.*session"):
+            with self.subTest(duplicate=duplicate), self.assertRaisesRegex(CollectionError, "session.*record|record.*session|invalid"):
                 collector(transport, clock, batch_policy=replace(BatchPolicy(), max_records=1 if duplicate else 2)).collect(
                     "fictional-project", day="2026-01-02")
-            self.assertEqual(len(transport.requests), 1 if duplicate else 2)
+            self.assertEqual(len(transport.requests), 4 if duplicate else 5)
             self.assertEqual(transport.activity_pages, [])
 
     def test_global_bytes_retained_json_and_time_block_without_partial_cache(self):
@@ -603,13 +742,16 @@ class BudgetTests(unittest.TestCase):
         attempts = []
         def transport(request, timeout):
             attempts.append(request)
-            if urlsplit(request.full_url).path == "/api/v3/task/query":
-                raise URLError("fictional-private-retry")
+            if json.loads(request.data).get("params", {}).get("name") == DETAIL_TOOL:
+                raise HTTPError("https://open.teambition.com/api/mcp/v2", 503,
+                                "fictional-private-retry", {}, None)
             return api(request, timeout)
         with self.assertRaises(CollectionError):
-            collector(transport, clock, batch_policy=replace(BatchPolicy(), max_requests=2)).collect(
+            collector(transport, clock, batch_policy=replace(BatchPolicy(), max_requests=6)).collect(
                 "fictional-project", day="2026-01-02")
-        self.assertEqual(len(attempts), 2)
+        self.assertEqual(len(attempts), 6)
+        self.assertEqual(sum(json.loads(request.data).get("params", {}).get("name") == DETAIL_TOOL
+                             for request in attempts), 2)
 
 
 class FailureTests(unittest.TestCase):
@@ -654,7 +796,7 @@ class FailureTests(unittest.TestCase):
             collector(transport, clock, checkpoint=store).collect("fictional-project", day="2026-01-02")
         self.assertIsNone(store.load_task(identity))
 
-    def test_cyclic_tokens_incomplete_pages_and_activity_page_limit_block(self):
+    def test_nonterminating_cursors_incomplete_pages_and_activity_page_limit_block(self):
         from collection_batches import MemoryCheckpoint
         for failure in ("project-cycle", "activity-cycle", "missing-terminal", "pages"):
             with self.subTest(failure=failure):
@@ -664,11 +806,11 @@ class FailureTests(unittest.TestCase):
                 histories = {identity: [[event(identity, index)] for index in range(4)]}
                 transport = ProjectTransport([current], clock, histories=histories)
                 def transform(value, path, query):
-                    if failure == "project-cycle" and "/project/" in path:
+                    if failure == "project-cycle" and path == PROJECT_TOOL:
                         value["nextPageToken"] = "0"
-                    if failure == "activity-cycle" and path.endswith("activity/list"):
+                    if failure == "activity-cycle" and path == ACTIVITY_TOOL:
                         value["nextPageToken"] = "0"
-                    if failure == "missing-terminal" and path.endswith("activity/list"):
+                    if failure == "missing-terminal" and path == ACTIVITY_TOOL:
                         del value["nextPageToken"]
                     return value
                 transport.transform = transform

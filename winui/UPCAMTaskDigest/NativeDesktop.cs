@@ -55,7 +55,7 @@ internal sealed class NativeDesktop : IDisposable
     {
         Size = (uint)Marshal.SizeOf<NotifyIconData>(), Window = _hwnd, Id = 1,
         Flags = 1 | 2 | 4, Callback = TrayMessage, Icon = _trayIcon,
-        Tip = UiStrings.T("UPCAM 站会日报"), Info = "", InfoTitle = ""
+        Tip = UiStrings.T("UPCAM · Teambition 工作助手"), Info = "", InfoTitle = ""
     };
 
     private void AddIcon()

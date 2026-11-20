@@ -95,7 +95,9 @@ class SafeStructureExportTests(unittest.TestCase):
         ])
         report = safe_structure_export(collection, {}, "2026-01-02")
         self.assertEqual([event["in_report_window"] for event in report["tasks"][0]["activities"]],
-                         [False, True, True, False, None, None])
+                         [True, True, None, None, False, False])
+        self.assertEqual([event["event_id"] for event in report["tasks"][0]["activities"]],
+                         [f"synthetic-event-{index}" for index in (1, 2, 4, 5, 0, 3)])
         self.assertTrue(report["selection_check"]["matches_report_window"])
         self.assertTrue(report["window_evaluation_available"])
         legacy_call = safe_structure_export(collection, {})
@@ -116,13 +118,20 @@ class SafeStructureExportTests(unittest.TestCase):
         report = safe_structure_export(collection, {}, "2026-01-02", window)
         self.assertFalse(report["selection_check"]["matches_report_window"])
         events = report["tasks"][0]["activities"]
-        self.assertFalse(events[0]["in_report_window"])
-        self.assertTrue(events[0]["task_binding_valid"])
-        self.assertFalse(events[1]["task_binding_valid"])
+        self.assertTrue(events[0]["in_report_window"])
+        self.assertFalse(events[0]["task_binding_valid"])
+        self.assertFalse(events[1]["in_report_window"])
+        self.assertTrue(events[1]["task_binding_valid"])
         self.assertNotIn("PRIVATE_OTHER_TASK", json.dumps(report))
         collection["selection"] = updated_selection("2026-01-02", *window)
         self.assertTrue(safe_structure_export(collection, {}, "2026-01-02", window)
                         ["selection_check"]["matches_report_window"])
+
+    def test_previous_full_project_audit_contract_still_matches_report_window(self):
+        collection = self.collection([])
+        collection["selection"] = updated_selection("2026-01-02", candidate_mode="full_project")
+        result = safe_structure_export(collection, {}, "2026-01-02")
+        self.assertTrue(result["selection_check"]["matches_report_window"])
 
     def test_executor_id_fields_are_allowlisted_and_hidden_fields_remain_counted(self):
         private_name = "SYNTHETIC_PRIVATE_EXECUTOR_NAME"

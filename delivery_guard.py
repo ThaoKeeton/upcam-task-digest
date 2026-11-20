@@ -142,8 +142,13 @@ class DeliveryGuard:
                     or not isinstance(current_model, str) or not current_model
                     or not isinstance(current_effort, str) or not current_effort):
                 raise ValueError("Current evidence and model settings are required")
-            validate_automated_report(report, current_collection, current_config,
-                                      current_model, current_effort, current_service_tier)
+            if report.get("report_type") == "automated-mcp-raw-v1":
+                from mcp_raw_digest import validate_raw_report
+                validate_raw_report(report, current_collection, current_config,
+                                    current_model, current_effort, current_service_tier)
+            else:
+                validate_automated_report(report, current_collection, current_config,
+                                          current_model, current_effort, current_service_tier)
         except (ValueError, TypeError, KeyError, AttributeError, RuntimeError, AutomatedDigestBlocked):
             raise DeliveryBlocked("Invalid, stale or unverified report provenance") from None
         if any(not isinstance(v, str) or not v for v in (tenant, project, destination)):
